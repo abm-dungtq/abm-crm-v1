@@ -1,7 +1,7 @@
 ---
 phase: 7
 title: "PoC MISA coverage (song song, không chặn)"
-status: pending
+status: waiting
 priority: P2
 effort: "2-3 ngày (phụ thuộc kế toán)"
 dependencies: [2]
@@ -63,3 +63,31 @@ Spawn the `kongming` subagent for next-step counsel and pass:
 Apply kongming's guidance, then re-run the Verify step.
 If `kongming` cannot be spawned in this environment, STOP and report the same
 failure evidence to the user. Never continue by self-reasoning.
+
+## Execution checkpoint — 2026-10-03
+
+- Task 7.1: DONE — [coverage](../../docs/integrations/misa/misa-coverage-v1.md) có nguồn chính thức cho kết nối, công nợ/pull, callback, giới hạn phân trang và các điểm gói ABM chưa xác minh. Không gọi API MISA.
+- Task 7.2: PENDING-HUMAN — năm câu hỏi có `Trả lời: Chờ kế toán [UNVERIFIED]`, không phải năm câu trả lời đã nhận. Coordinator đã xác nhận chưa có câu trả lời và sẽ chuyển bộ câu hỏi tới user; phase giữ chờ theo nhánh Verify được cho phép.
+- Task 7.3: mapping ứng viên đã ghi đủ 12 trường PaymentReference theo tài liệu công khai; đối chiếu mẫu thực tế PENDING-HUMAN vì chưa nhận file khử nhận dạng ngoài repo. Không tạo mẫu giả hoặc lưu dữ liệu thật trong repo.
+- Task 7.4: DONE — [quy tắc đối soát](../../docs/integrations/misa/payment-reconciliation-rules-v1.md) có precedence, chống cộng lặp, allocation, partial, version sửa/hủy, chặn downstream, unmatched queue và quyền xác nhận kế toán.
+- Task 7.5: kết luận DONE theo phương án chờ; commit NOT RUN, coordinator chịu trách nhiệm commit sau review theo Project execution guide.
+
+Coordinator trả lời Orca ask cho task `task_46b3e7e3a8cf`, dispatch `ctx_9713a01e3b52`: hoàn thiện tài liệu từ nguồn công khai, đánh dấu câu trả lời và coverage ABM chưa xác minh, kết luận đúng chuỗi chờ bên dưới; worker báo succeeded cho phần được cho phép, không tự điền câu trả lời.
+
+Kết luận: `Chưa xác định — chờ trả lời kế toán và xác nhận gói AMIS có Open API`. Phase này không chặn phase 08 ngoài dòng MISA ghi “chờ”. Không sửa status phase khác hoặc plan.md.
+
+### Verify đã chạy
+
+Các lệnh chạy nguyên văn bằng Git Bash trên Windows; chưa có kiểm tra nào bị thay bằng dữ liệu giả.
+
+| Task | Verify | Output / kết quả |
+| --- | --- | --- |
+| 7.1 | `grep -c 'actdocs.misa.vn' /d/TQD/CRM/docs/integrations/misa/misa-coverage-v1.md` | `9`, exit 0 — PASS ≥ 1. |
+| 7.2 | Kiểm mục có năm câu trả lời; nếu chưa có giữ phase chờ | 0 câu trả lời thật, 5 câu hỏi chờ — PENDING-HUMAN; nhánh giữ chờ đã áp dụng. |
+| 7.3 | `grep -c 'PaymentReference' /d/TQD/CRM/docs/integrations/misa/misa-coverage-v1.md` | `2`, exit 0 — PASS ≥ 1; chưa chứng minh mapping trên mẫu. |
+| 7.4 | `grep -cE 'precedence|allocation|unmatched' /d/TQD/CRM/docs/integrations/misa/payment-reconciliation-rules-v1.md` | `15`, exit 0 — PASS ≥ 3. |
+| 7.5 | `grep -c '## Kết luận' /d/TQD/CRM/docs/integrations/misa/misa-coverage-v1.md` | `1`, exit 0 — PASS = 1; commit NOT RUN. |
+
+### Việc còn chờ
+
+Kế toán trả lời năm câu hỏi, xác nhận quyền/gói API và cung cấp mẫu đã khử nhận dạng ngoài repo để kiểm mapping. Coordinator review và commit; không coi phase hay coverage thực thu ABM đã hoàn tất.
