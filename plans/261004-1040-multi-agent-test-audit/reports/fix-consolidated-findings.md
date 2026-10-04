@@ -41,6 +41,20 @@ Ngày 2026-10-04. Sửa theo [báo cáo tổng hợp](phase-04-consolidated-find
 - `pnpm -F @abm/contracts typecheck`, `pnpm -F @abm/crm typecheck`: sạch. `pnpm -F @abm/crm test`: 127/127. `pnpm -F @abm/crm build`: đạt.
 - Giao diện (Chrome headless, local `wrangler dev` 8787, D1 local reset + migration 0001–0002 + seed): 390px một nút tạo lead, drawer đóng không nhận focus, Esc đóng, cột kanban kế lộ ra; 1440px Admin vào `/leads` và `/leads/new` về `/admin`, Sale vào audit không thấy bộ lọc/banner, audit có năm, dialog Won khoá nút đến khi đủ giá trị và bằng chứng rồi đóng Won thành công, kiểm trùng ngoài scope không lộ mã. Không lỗi trang. Đã dừng `wrangler dev`.
 
+## Triển khai
+
+2026-10-04, theo thứ tự:
+1. Backup D1 remote ra `exports/abm-crm-eval-before-0002-20261004.sql` (gitignored, 22 lead).
+2. Áp migration `0002` lên remote.
+3. Chạy `pnpm -F @abm/crm deploy`.
+
+Smoke test https://abm-crm-eval.ngulongyquan.workers.dev:
+- Trang chủ trả 200.
+- `/audit`: Admin và Sale 403, Leader và BGĐ 200.
+- `q` 101 ký tự → 422.
+- Tìm `DƯỢC PHẨM LỘC THỌ` ra L-0004.
+- Won thiếu giá trị → 422, không ghi dữ liệu.
+
 ## Review độc lập
 
 Agent review không thấy lộ quyền hay sai thứ tự bind; xác nhận `tx.assert` rollback cả batch, trả STALE_VERSION và để `_guard` rỗng. Đã sửa theo review:
