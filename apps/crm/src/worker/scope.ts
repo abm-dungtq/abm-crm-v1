@@ -8,7 +8,7 @@ export interface SqlFragment {
 /**
  * Lead visibility per permission-matrix-v1: Sale own/assigned, Leader team plus the
  * department intake queue it assigns from, Head department, BGĐ organization.
- * Admin has no business data access.
+ * Admin reads the whole organization to oversee work; business commands stay closed to Admin.
  */
 export function leadScope(actor: Actor, alias = 'l'): SqlFragment {
   const a = alias;
@@ -23,6 +23,7 @@ export function leadScope(actor: Actor, alias = 'l'): SqlFragment {
     case 'head':
       return { sql: `${a}.department_id = ?`, binds: [actor.departmentId] };
     case 'director':
+    case 'admin':
       return { sql: `${a}.organization_id = ?`, binds: [actor.organizationId] };
     default:
       return { sql: '0 = 1', binds: [] };

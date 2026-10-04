@@ -27,7 +27,7 @@ File mẫu: [`apps/crm/public/mau-danh-sach-nhan-su.csv`](../../apps/crm/public/
 
 ## Lưu ý
 
-- Admin chỉ quản lý tài khoản và cấu hình, không xem dữ liệu khách hàng. Nên có 2 Admin. Người cần xem dữ liệu kinh doanh dùng tài khoản BGĐ riêng.
+- Admin quản lý tài khoản, cấu hình và xem toàn bộ dữ liệu công ty (chỉ xem, không tạo hay sửa lead). Nên có 2 Admin.
 - Phòng ban hoặc nhóm chưa có trong CRM sẽ được tạo mới sau khi Admin xác nhận ở bước xem trước.
 - Nhập lại cùng file không tạo trùng: CRM so theo email và chỉ cập nhật thông tin đã đổi. Người không có trong file không bị khóa tự động.
 - Người không dùng Lark vẫn điền bình thường. Họ chỉ dùng CRM trên web.

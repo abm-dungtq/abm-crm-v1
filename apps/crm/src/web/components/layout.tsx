@@ -11,7 +11,7 @@ import { Avatar, ErrorState, Loading, StageBadge } from './ui';
 export const roleLabel = (role: string) => ROLES.find((r) => r.code === role)?.label ?? role;
 
 export const SCOPE_LABEL: Record<RoleCode, string> = {
-  sale: 'Lead của tôi', leader: 'Team + hàng chờ phòng', head: 'Toàn phòng ban', director: 'Toàn công ty', admin: 'Cấu hình hệ thống',
+  sale: 'Lead của tôi', leader: 'Team + hàng chờ phòng', head: 'Toàn phòng ban', director: 'Toàn công ty', admin: 'Xem toàn công ty + cấu hình',
 };
 
 interface NavItem { to: string; label: string; icon: IconName; roles?: RoleCode[]; badge?: number }
@@ -26,24 +26,25 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [open]);
-  const business = actor.role !== 'admin';
-  const approvals = useApi<ApprovalItem[]>(business ? '/approvals?status=pending' : null);
+  // Admin sees every business screen read-only (organization scope) but creates or changes nothing there.
+  const businessWriter = actor.role !== 'admin';
+  const approvals = useApi<ApprovalItem[]>('/approvals?status=pending');
   const pending = approvals.data?.filter((a) => a.canDecide).length ?? 0;
 
   const nav: NavItem[] = [
-    { to: '/', label: 'Tổng quan', icon: 'home', roles: ['sale', 'leader', 'head', 'director'] },
-    { to: '/pipeline', label: 'Pipeline', icon: 'board', roles: ['sale', 'leader', 'head', 'director'] },
-    { to: '/leads', label: 'Lead', icon: 'leads', roles: ['sale', 'leader', 'head', 'director'] },
-    { to: '/customers', label: 'Khách hàng 360', icon: 'building', roles: ['sale', 'leader', 'head', 'director'] },
-    { to: '/tasks', label: 'Việc của tôi', icon: 'check', roles: ['sale', 'leader', 'head', 'director'] },
-    { to: '/approvals', label: 'Hàng chờ duyệt', icon: 'approve', roles: ['sale', 'leader', 'head', 'director'], badge: pending },
-    { to: '/audit', label: 'Nhật ký audit', icon: 'audit', roles: ['leader', 'head', 'director'] },
+    { to: '/', label: 'Tổng quan', icon: 'home' },
+    { to: '/pipeline', label: 'Pipeline', icon: 'board' },
+    { to: '/leads', label: 'Lead', icon: 'leads' },
+    { to: '/customers', label: 'Khách hàng 360', icon: 'building' },
+    { to: '/tasks', label: actor.role === 'admin' ? 'Công việc' : 'Việc của tôi', icon: 'check' },
+    { to: '/approvals', label: 'Hàng chờ duyệt', icon: 'approve', badge: pending },
+    { to: '/audit', label: 'Nhật ký audit', icon: 'audit', roles: ['leader', 'head', 'director', 'admin'] },
     { to: '/admin/users', label: 'Người dùng', icon: 'leads', roles: ['admin'] },
     { to: '/admin', label: 'Cấu hình', icon: 'settings', roles: ['admin'] },
   ];
   const passwordMode = currentAuthMode() === 'password';
-  // Admin has no business screens; only its own pages and the password form stay reachable.
-  const reachable = business || pathname.startsWith('/admin') || pathname === '/account/password';
+  // Creating a lead is a business command, closed to Admin.
+  const reachable = businessWriter || pathname !== '/leads/new';
 
   return (
     <div className="shell">
@@ -73,11 +74,11 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
         </div>
         <header className="topbar">
           <button className="btn btn-ghost icon-btn menu-btn" onClick={() => setOpen(true)} aria-label="Mở menu"><Icon name="menu" /></button>
-          {business ? <GlobalSearch /> : <span className="spacer" />}
+          <GlobalSearch />
           <span className="spacer hide-sm" />
-          {business && actor.role !== 'admin' && <Link to="/leads/new" className="btn btn-primary"><Icon name="plus" /><span className="hide-sm">Tạo lead</span></Link>}
+          {businessWriter && <Link to="/leads/new" className="btn btn-primary"><Icon name="plus" /><span className="hide-sm">Tạo lead</span></Link>}
         </header>
-        <main className="content" id="main">{reachable ? children : <Navigate to="/admin" replace />}</main>
+        <main className="content" id="main">{reachable ? children : <Navigate to="/" replace />}</main>
       </div>
     </div>
   );
@@ -183,7 +184,7 @@ export function RolePicker() {
     leader: 'Thấy team và hàng chờ phòng; giao lead, nhả lead, duyệt chuyển owner.',
     head: 'Xem toàn phòng ban, dashboard theo Sale.',
     director: 'Xem toàn công ty.',
-    admin: 'Chỉ cấu hình hệ thống, không xem dữ liệu khách.',
+    admin: 'Xem toàn công ty (chỉ xem), quản lý người dùng và cấu hình.',
   };
   return (
     <div className="picker">
@@ -201,7 +202,7 @@ export function RolePicker() {
           {users.error && <ErrorState error={users.error} onRetry={() => users.refetch()} />}
           <div className="role-grid">
             {users.data?.map((u) => (
-              <button key={u.id} className="role-option" onClick={() => { setDemoUser(u.id); window.location.assign(u.role === 'admin' ? '/admin' : '/'); }}>
+              <button key={u.id} className="role-option" onClick={() => { setDemoUser(u.id); window.location.assign('/'); }}>
                 <Avatar name={u.name} size="lg" />
                 <span className="stack-sm" style={{ gap: 2 }}>
                   <span className="name">{u.name}</span>

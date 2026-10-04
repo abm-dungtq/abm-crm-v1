@@ -39,7 +39,7 @@ const lead = (id: string) => db.prepare('SELECT * FROM lead WHERE id = ?').bind(
 const count = async (table: string) => (await db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first<{ n: number }>())!.n;
 
 describe('scope', () => {
-  test('sale sees only own leads; leader sees team plus department queue; admin sees none', async () => {
+  test('sale sees only own leads; leader sees team plus department queue; admin sees the organization read-only', async () => {
     const sale = await call('u-lan', 'GET', '/leads');
     expect(sale.json.data.length).toBeGreaterThan(0);
     expect(sale.json.data.every((l: any) => l.owner?.id === 'u-lan')).toBe(true);
@@ -49,7 +49,11 @@ describe('scope', () => {
     expect([...owners].sort()).toEqual(['queue', 'u-lan', 'u-long']);
 
     const admin = await call('u-admin', 'GET', '/leads');
-    expect(admin.json.data).toEqual([]);
+    const director = await call('u-bgd', 'GET', '/leads');
+    expect(admin.json.data.map((l: any) => l.id).sort()).toEqual(director.json.data.map((l: any) => l.id).sort());
+    expect((await call('u-admin', 'GET', '/audit')).status).toBe(200);
+    expect((await call('u-admin', 'GET', '/leads/lead-10')).json.data.permissions)
+      .toMatchObject({ assign: false, logActivity: false, changeStage: false, completeTask: false, requestOwnerChange: false });
     expect((await call('u-lan', 'GET', '/leads/lead-10')).status).toBe(404);
   });
 

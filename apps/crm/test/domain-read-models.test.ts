@@ -153,6 +153,6 @@ describe('account detail scope', () => {
     }
     expect((await get('u-long', '/accounts/acc-4')).data.contacts[0].name).toBe('Người liên hệ mới');
     expect((await get('u-lan', '/accounts/acc-10')).status).toBe(404);
-    expect((await get('u-admin', '/accounts/acc-4')).status).toBe(404);
+    expect((await get('u-admin', '/accounts/acc-4')).data.leads.map((l: any) => l.code).sort()).toEqual(views['u-bgd']);
   });
 });

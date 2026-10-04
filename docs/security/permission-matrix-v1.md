@@ -15,7 +15,7 @@ Nguồn có hiệu lực: [business-decisions-v1 QĐ4/5/9/13/14](../decisions/bu
 | CSKH [PROPOSED] | own R | own R | own R | own R/W | own R/W | own R/yêu cầu; none Approve | none | none | none |
 | Triển khai [PROPOSED] | own R | own R | own R | own R/W | own R/W | own R/yêu cầu; none Approve | none | none | none |
 | Kế toán [PROPOSED] | own R reference được giao | none | own R reference được giao | own R/W | own R/W ghi đối soát | own R/yêu cầu; none Approve | none | none | none |
-| Admin | none quyền nghiệp vụ tự động | none | none | none | none | none duyệt nghiệp vụ tự động | none audit nghiệp vụ | none duyệt cuối | org R/W; role/config/kill switch |
+| Admin | org R | org R | org R | org R | org R | org R; none Approve | org R | none duyệt cuối | org R/W; role/config/kill switch |
 | Agent nhóm phòng ban | department R projection | department R; W tạo intake low-risk | department R; none W tự động | department R; W nhắc/việc chưa gán người hợp lệ | department R/W low-risk không gán người | department yêu cầu; none Approve | none | none | none |
 | Agent cá nhân DM | own/team/department/org R theo principal; none W customer | scope principal R/W create_lead low-risk | scope principal R; W sau approval | scope principal R/W low-risk | scope principal R/W low-risk | scope principal yêu cầu; none Approve | none | scope principal yêu cầu; none tự thực thi | none |
 
@@ -29,9 +29,9 @@ Web áp scope cá nhân/team/department/org. Nhóm Lark trả pipeline mức dep
 
 Merge, archive/delete/ẩn danh, export, discount, payment confirmation, contract, entitlement override, role management và AI write là capability riêng, không suy từ R/W. Chỉ Admin xóa/ẩn danh theo QĐ5; không xóa audit ≥ 5 năm. MISA là nguồn thực thu, Kế toán proposal không cấp quyền CRM tự xác nhận thu. Các quyền chưa chốt ở MVP sau phải duyệt trước triển khai.
 
-Phase 04 task 4.7 ghi Department Head duyệt export, nhưng QĐ5/user chốt BGĐ duyệt. Theo coordinator giữ BGĐ duyệt cuối, Head chỉ review scope. Audit cells đã duyệt 2026-10-04 theo scope lead của từng vai trò; Admin không đọc audit nghiệp vụ. Admin quản trị cấu hình không tự nhận quyền nghiệp vụ; cần role nghiệp vụ riêng nếu có nhu cầu.
+Phase 04 task 4.7 ghi Department Head duyệt export, nhưng QĐ5/user chốt BGĐ duyệt. Theo coordinator giữ BGĐ duyệt cuối, Head chỉ review scope. Audit cells đã duyệt 2026-10-04 theo scope lead của từng vai trò. Cùng ngày user đổi quyết định: Admin xem toàn bộ dữ liệu và audit của công ty để kiểm soát công việc, nhưng chỉ đọc; Admin không tạo/sửa lead, ghi hoạt động, đổi stage, hoàn thành việc hay duyệt yêu cầu.
 
-Quản lý người dùng ([ADR-006](../adr/adr-006-password-login.md)) chỉ dành cho Admin: nhập danh sách nhân sự, sửa tên/email/vai trò/phòng ban/nhóm, khóa và mở khóa, cấp mật khẩu tạm, liên kết Lark theo email. Admin không tự đổi vai trò hay tự khóa mình, và hệ thống luôn giữ ít nhất một Admin hoạt động. Quyền này không mở quyền xem dữ liệu kinh doanh.
+Quản lý người dùng ([ADR-006](../adr/adr-006-password-login.md)) chỉ dành cho Admin: nhập danh sách nhân sự, sửa tên/email/vai trò/phòng ban/nhóm, khóa và mở khóa, cấp mật khẩu tạm, liên kết Lark theo email. Admin không tự đổi vai trò hay tự khóa mình, và hệ thống luôn giữ ít nhất một Admin hoạt động. Quyền này không mở quyền ghi dữ liệu kinh doanh.
 
 ## Gate triển khai
 

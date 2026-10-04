@@ -32,10 +32,10 @@ const inTwoDays = () => new Date(Date.now() + 48 * HOUR).toISOString();
 const intake = { contactName: 'Khách Thử', source: 'website', needSummary: 'Cần tư vấn' };
 
 describe('audit access', () => {
-  test('Leader, Trưởng phòng and BGĐ read audit within their lead scope; Sale and Admin cannot', async () => {
-    for (const user of ['u-lan', 'u-admin']) expect((await get(user, '/audit')).status, user).toBe(403);
+  test('Leader, Trưởng phòng, BGĐ and Admin read audit within their lead scope; Sale cannot', async () => {
+    expect((await get('u-lan', '/audit')).status).toBe(403);
     const visible = async (user: string) => new Set(((await get(user, '/leads')).json.data as any[]).map((l) => l.code));
-    for (const user of ['u-hung', 'u-head', 'u-bgd']) {
+    for (const user of ['u-hung', 'u-head', 'u-bgd', 'u-admin']) {
       const r = await get(user, '/audit');
       expect(r.status, user).toBe(200);
       const scope = await visible(user);

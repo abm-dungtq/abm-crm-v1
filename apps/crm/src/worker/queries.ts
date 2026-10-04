@@ -235,8 +235,8 @@ const toAudit = (r: Record<string, unknown>) => ({
   lead: { id: r.lead_id as string, code: r.lead_code as string },
 });
 
-/** Business audit per permission-matrix-v1: Leader team, Trưởng phòng department, BGĐ organization; Sale and Admin none. */
-export const canReadAudit = (actor: Actor) => actor.role === 'leader' || actor.role === 'head' || actor.role === 'director';
+/** Business audit per permission-matrix-v1: Leader team, Trưởng phòng department, BGĐ and Admin organization; Sale none. */
+export const canReadAudit = (actor: Actor) => actor.role !== 'sale';
 
 export async function listAudit(db: D1Database, actor: Actor, leadId?: string) {
   const scope = leadScope(actor);

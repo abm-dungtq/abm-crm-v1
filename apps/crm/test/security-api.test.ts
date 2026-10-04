@@ -38,7 +38,7 @@ test('identity rejects absent, unknown, disabled actors and every non-demo mode'
 test.each(roles)('read routes retain own/team/department/org scope for %s', async user => {
   const ids = (await call(user, '/leads')).json.data.map((l: any) => l.id);
   const allowed = new Set(ids);
-  if (user !== 'u-admin') expect(ids.length).toBeGreaterThan(0);
+  expect(ids.length).toBeGreaterThan(0);
   const tasks = (await call(user, '/tasks')).json.data;
   expect(tasks.every((t: any) => allowed.has(t.lead.id))).toBe(true);
   const approvals = (await call(user, '/approvals')).json.data;
@@ -46,15 +46,13 @@ test.each(roles)('read routes retain own/team/department/org scope for %s', asyn
   const accounts = (await call(user, '/accounts')).json.data;
   const visibleAccounts = new Set((await call(user, '/leads')).json.data.map((l: any) => l.account?.id));
   expect(accounts.every((a: any) => visibleAccounts.has(a.id))).toBe(true);
-  if (user !== 'u-admin') {
-    const detail = (await call(user, `/leads/${ids[0]}`)).json.data;
-    expect(detail.lead.id).toBe(ids[0]);
-    expect(detail.contactPoints.length).toBeGreaterThan(0);
-    const account = (await call(user, `/accounts/${accounts[0].id}`)).json.data;
-    expect(account.leads.length).toBeGreaterThan(0);
-    expect(account.leads.every((l: any) => allowed.has(l.id))).toBe(true);
-    expect(account.activities.every((a: any) => allowed.has(a.leadId))).toBe(true);
-  }
+  const detail = (await call(user, `/leads/${ids[0]}`)).json.data;
+  expect(detail.lead.id).toBe(ids[0]);
+  expect(detail.contactPoints.length).toBeGreaterThan(0);
+  const account = (await call(user, `/accounts/${accounts[0].id}`)).json.data;
+  expect(account.leads.length).toBeGreaterThan(0);
+  expect(account.leads.every((l: any) => allowed.has(l.id))).toBe(true);
+  expect(account.activities.every((a: any) => allowed.has(a.leadId))).toBe(true);
   const search = (await call(user, '/search?q=Demo')).json.data;
   expect(search.leads.every((l: any) => allowed.has(l.id))).toBe(true);
   expect(search.accounts.every((a: any) => visibleAccounts.has(a.id))).toBe(true);
@@ -67,8 +65,10 @@ test.each(roles)('read routes retain own/team/department/org scope for %s', asyn
   if (user === 'u-lan') expect(ids).not.toContain('lead-09');
   if (user === 'u-hung') expect(ids).not.toContain('lead-10');
   if (user === 'u-admin') {
-    expect(ids).toEqual([]); expect(tasks).toEqual([]); expect(approvals).toEqual([]); expect(accounts).toEqual([]);
-    expect(dashboard.kpi.activeLeads).toBe(0);
+    // Admin oversees the whole organization read-only, the same lead set as BGĐ.
+    const director = (await call('u-bgd', '/leads')).json.data.map((l: any) => l.id);
+    expect([...ids].sort()).toEqual([...director].sort());
+    expect(detail.permissions).toMatchObject({ logActivity: false, changeStage: false, completeTask: false, assign: false });
   }
 });
 
@@ -85,7 +85,7 @@ test.each(roles)('command role restrictions run before input parsing for %s', as
   }
 });
 
-test.each(['u-lan', 'u-hung', 'u-admin'])('detail IDOR is denied for %s', async user => {
+test.each(['u-lan', 'u-hung'])('detail IDOR is denied for %s', async user => {
   for (const path of ['/leads/lead-10', '/accounts/acc-10', '/leads/missing', '/accounts/missing']) {
     const res = await call(user, path);
     expect(res.status).toBe(404);
