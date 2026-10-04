@@ -45,7 +45,7 @@ Sửa lỗi sản phẩm; refactor; đổi CI; deploy; tối ưu test suite.
 | 03 | [Giao diện, E2E, khả năng tiếp cận](phase-03-ui-e2e-accessibility.md) | antigravity | — | báo cáo 03 | completed (dừng sớm theo user) |
 | 04 | [Đối chiếu chéo và hợp nhất](phase-04-cross-verify-consolidate.md) | claude | 01, 02, 03 | báo cáo tổng hợp | completed (coordinator tổng hợp theo user) |
 
-Kết quả: [báo cáo tổng hợp](reports/phase-04-consolidated-findings.md). Sửa lỗi tiếp theo bằng `/ak:fix` theo quyết định user ghi trong báo cáo đó.
+Kết quả: [báo cáo tổng hợp](reports/phase-04-consolidated-findings.md). Sửa lỗi bằng `/ak:fix` theo quyết định user ghi trong báo cáo đó: [báo cáo sửa lỗi](reports/fix-consolidated-findings.md).
 
 Báo cáo nằm trong `plans/261004-1040-multi-agent-test-audit/reports/`.
 

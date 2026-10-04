@@ -43,6 +43,7 @@ Nguồn: [PRD 9.2](../source-package/sources/PRD-ABM-CRM-Revenue-Customer-Operat
 
 Trạng thái: ĐÃ CHỐT [DECIDED].
 Nội dung: Owner là người được giao Lead/Deal; ghi Team, Assigned At, Assigned By, Support User và Assignment History. First contact trong 4 giờ làm việc, quá hạn nhắc Owner và báo Leader; sau 24 giờ làm việc chưa liên hệ, Leader quyết định nhả về hàng chờ phòng ban. Giờ làm việc 08:00–17:30 Asia/Ho_Chi_Minh. Sale yêu cầu chuyển owner, Leader duyệt; Sale nghỉ thì Leader phân lại hàng loạt có audit. Support chỉ xem và ghi hoạt động theo scope, không đổi stage. Owner Contact/Account là owner của Deal active gần nhất; Leader xử lý xung đột. Không suy ra quyền toàn doanh nghiệp khách từ ownership một Deal.
+Bổ sung user duyệt 2026-10-04: hoạt động ghi lùi thời điểm không được sớm hơn lúc Lead được giao (hoặc tạo, nếu chưa giao) và không quá 7 ngày trước hiện tại, để first contact không được ghi hồi tố cho đúng SLA.
 Nguồn: [PRD 9.4–9.5](../source-package/sources/PRD-ABM-CRM-Revenue-Customer-Operations-v2.1.md#94-lead-ownership), [PRD 43 QĐ4](../source-package/sources/PRD-ABM-CRM-Revenue-Customer-Operations-v2.1.md#quyết-định-4--ownership).
 
 ## QĐ5 Role/Permission

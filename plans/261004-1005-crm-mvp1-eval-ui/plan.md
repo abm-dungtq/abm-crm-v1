@@ -28,6 +28,9 @@ Nguồn: [handoff](../handoffs/crm-frontend-design-cloudflare-deploy-20261004-10
 - Migration SQL thuần qua Wrangler; chưa dùng Drizzle (ADR-001).
 - Không có agent write, kill switch, notification push; hàng chờ duyệt gồm yêu cầu đổi owner và đề xuất mẫu của agent.
 - Dữ liệu mẫu hư cấu, không có dữ liệu khách thật.
+- Hoãn sang MVP1 thật (user duyệt 2026-10-04): DB chưa kiểm `next_action_task_id` trỏ tới task tồn tại và đang mở (chỉ kiểm non-null, cần migration rebuild bảng); approval chưa có hạn duyệt và payload hash.
+- Sai lệch đã chấp nhận so với ADR-003/005 (user duyệt 2026-10-04): Idempotency-Key là duy nhất theo từng actor, không theo toàn tổ chức; trường lạ trong body command bị bỏ qua thay vì từ chối.
+- Won lưu giá trị chốt vào `lead.expected_value` và bằng chứng vào `lead.won_note` (migration `0002`); tách sang Deal khi MVP1 thật có bảng `deal`.
 
 ## Acceptance
 

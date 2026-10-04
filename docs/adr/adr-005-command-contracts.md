@@ -27,6 +27,8 @@ Idempotency key namespace organization/source/action; bind command/request hash/
 
 Đổi command contract phải review callers và chạy parity/RBAC tests; không có validator thứ hai. [Action-risk](../security/action-risk-matrix-v1.md) và [permission](../security/permission-matrix-v1.md) là policy input đã review; quyền chưa duyệt deny mặc định. Scaffold chưa có full command implementation, ADR không tuyên bố các tool đã chạy.
 
+Bản đánh giá `apps/crm` có hai sai lệch user chấp nhận (2026-10-04), ghi trong [plan eval](../../plans/261004-1005-crm-mvp1-eval-ui/plan.md#rút-gọn-có-chủ-đích-cho-bản-đánh-giá-ghi-lại-để-mvp1-thật-xử-lý): Idempotency-Key duy nhất theo actor, và trường lạ bị bỏ qua thay vì từ chối. Replay vẫn kiểm lại quyền trên lead đích trước khi trả kết quả đã lưu.
+
 ## Bằng chứng/PoC
 
 [Test strategy](../engineering/test-strategy.md) quy định contract parity, idempotency, stale/approval/kill switch cases. Phase 05/06 kiểm runtime; ADR chốt convention, không chốt tính đúng của auth hoặc D1 guard chưa PoC.
