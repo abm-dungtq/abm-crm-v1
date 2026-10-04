@@ -283,6 +283,7 @@ export function RequestOwnerDialog({ open, onClose, lead, members }: {
 
 export function approvalTitle(a: ApprovalItem) {
   if (a.kind === 'owner_change') return `Chuyển owner: ${a.payload.fromUserName ?? '—'} → ${a.payload.toUserName ?? '—'}`;
+  if (a.kind === 'agent_assign') return `Bot đề xuất giao lead cho ${a.payload.toUserName ?? '—'}`;
   return `Đổi stage: ${stageLabel(a.lead.stage)} → ${stageLabel(a.payload.toStage ?? '')}`;
 }
 

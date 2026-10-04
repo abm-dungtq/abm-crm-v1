@@ -146,6 +146,8 @@ export const createLeadInput = z.object({
   needSummary: text(1000),
   confirmNotDuplicate: z.boolean().optional(),
   nextAction: nextActionInput.optional(),
+  /** Only used by actors without a department of their own (Admin, BGĐ). */
+  departmentId: id.optional(),
 }).refine((v) => Boolean(v.phone || v.email), { message: 'Cần số điện thoại hoặc email', path: ['phone'] })
   .refine((v) => !v.taxCode || Boolean(v.companyName), { message: 'MST cần đi kèm tên công ty', path: ['companyName'] });
 export type CreateLeadInput = z.infer<typeof createLeadInput>;

@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { COMMANDS, SEARCH_MAX_LENGTH, type ApiResult, type CommandName } from '@abm/contracts';
 import { isDemoMode, requireActor } from './actor';
 import { adminRoutes } from './admin-routes';
+import { mcpRoutes } from './mcp-routes';
 import { publicAuth, sessionAuth } from './auth-routes';
 import { originGuard } from './session';
 import { runCommand } from './commands';
@@ -24,6 +25,8 @@ app.onError((error, c) => {
 });
 
 app.get('/health', (c) => c.json({ ok: true }));
+// The chat agent authenticates with its own Bearer token, so it is mounted before the browser origin and session checks.
+app.route('/mcp', mcpRoutes);
 app.use('*', originGuard);
 app.route('/auth', publicAuth);
 

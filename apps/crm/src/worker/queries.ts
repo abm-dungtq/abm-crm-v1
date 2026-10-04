@@ -258,7 +258,7 @@ export async function listAudit(db: D1Database, actor: Actor, leadId?: string) {
 export async function listApprovals(db: D1Database, actor: Actor, status?: string, leadId?: string) {
   const scope = leadScope(actor);
   const rows = await db.prepare(`
-    SELECT ap.*, l.code AS lead_code, l.owner_user_id, l.team_id, l.stage AS lead_stage, l.version AS lead_version,
+    SELECT ap.*, l.code AS lead_code, l.owner_user_id, l.team_id, l.department_id, l.status AS lead_status, l.stage AS lead_stage, l.version AS lead_version,
       c.display_name AS contact_name, ru.display_name AS requester_name, du.display_name AS decider_name
     FROM approval ap JOIN lead l ON l.id = ap.lead_id JOIN contact c ON c.id = l.contact_id
     LEFT JOIN app_user ru ON ru.id = ap.requested_by_user_id LEFT JOIN app_user du ON du.id = ap.decided_by_user_id
@@ -270,7 +270,7 @@ export async function listApprovals(db: D1Database, actor: Actor, status?: strin
   return rows.results.map((r) => {
     const payload = JSON.parse(r.payload_json as string) as Record<string, string>;
     const canDecide = r.status === 'pending' && mayDecideApproval(actor, r.kind as string, payload.toStage,
-      { team_id: r.team_id as string | null, owner_user_id: r.owner_user_id as string | null });
+      { team_id: r.team_id as string | null, owner_user_id: r.owner_user_id as string | null, department_id: r.department_id as string, status: r.lead_status as string });
     return {
       id: r.id as string, kind: r.kind as string, status: r.status as string, version: r.version as number,
       reason: r.reason as string | null, createdAt: r.created_at as string, decidedAt: r.decided_at as string | null,

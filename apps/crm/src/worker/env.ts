@@ -1,4 +1,5 @@
 import type { RoleCode } from '@abm/contracts';
+import type { Context } from 'hono';
 
 export interface Env {
   DB: D1Database;
@@ -23,3 +24,12 @@ export interface Actor {
 }
 
 export type AppBindings = { Bindings: Env; Variables: { actor: Actor; mustChangePassword: boolean } };
+
+/** Runs work after the response when the runtime allows it; tests have no ExecutionContext, so it is awaited there. */
+export async function background(c: Context, work: Promise<unknown>) {
+  try {
+    c.executionCtx.waitUntil(work);
+  } catch {
+    await work;
+  }
+}

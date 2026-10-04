@@ -105,12 +105,12 @@ function LeadView({ detail }: { detail: LeadDetail }) {
                 {pendingApprovals.map((a) => (
                   <li key={a.id} className="stack-sm">
                     <div className="row-wrap">
-                      {a.requestedByKind === 'agent' ? <Badge tone="agent"><Icon name="bot" style={{ width: 12, height: 12 }} />Agent đề xuất</Badge> : <Badge>{a.requester}</Badge>}
+                      {a.requestedByKind === 'agent' ? <Badge tone="agent"><Icon name="bot" style={{ width: 12, height: 12 }} />{a.requester} qua bot</Badge> : <Badge>{a.requester}</Badge>}
                       <strong>{approvalTitle(a)}</strong>
                     </div>
                     {a.reason && <span className="small text-2">{a.reason}</span>}
                     {a.isStale && <span className="small" style={{ color: 'var(--warn)' }}>Lead đã đổi sau khi tạo yêu cầu: duyệt sẽ không thực hiện.</span>}
-                    {a.canDecide ? <DecideButtons approval={a} /> : <span className="small muted">Chờ {a.kind === 'owner_change' ? 'Leader của team' : 'owner hoặc Leader'} duyệt</span>}
+                    {a.canDecide ? <DecideButtons approval={a} /> : <span className="small muted">Chờ {a.kind === 'agent_stage_change' && !['won', 'lost'].includes(a.payload.toStage ?? '') ? 'owner hoặc Leader' : 'Leader của team'} duyệt</span>}
                   </li>
                 ))}
               </ul>

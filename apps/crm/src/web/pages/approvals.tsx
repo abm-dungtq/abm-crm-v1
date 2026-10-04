@@ -41,7 +41,7 @@ export function ApprovalsPage() {
             <div className="card-body stack-sm">
               <div className="row-wrap">
                 {a.requestedByKind === 'agent'
-                  ? <Badge tone="agent"><Icon name="bot" style={{ width: 12, height: 12 }} />{a.payload.agentName ?? 'Agent'}</Badge>
+                  ? <Badge tone="agent"><Icon name="bot" style={{ width: 12, height: 12 }} />{a.requester} qua bot</Badge>
                   : <Badge>{a.requester}</Badge>}
                 <Badge tone={STATUS[a.status]?.tone}>{STATUS[a.status]?.label}</Badge>
                 <span className="small muted">{fmtAgo(a.createdAt)}</span>
@@ -52,7 +52,7 @@ export function ApprovalsPage() {
               {a.payload.evidence && <p className="small text-2" style={{ borderLeft: '3px solid var(--agent)', paddingLeft: 8 }}>Bằng chứng: {a.payload.evidence}</p>}
               {a.isStale && <span className="small" style={{ color: 'var(--warn)' }}>Lead đã thay đổi sau khi tạo yêu cầu: duyệt sẽ đánh dấu hết hiệu lực, không thực hiện.</span>}
               {a.status === 'pending'
-                ? (a.canDecide ? <DecideButtons approval={a} /> : <span className="small muted">Chờ {a.kind === 'owner_change' ? 'Leader của team' : 'owner hoặc Leader'} duyệt.</span>)
+                ? (a.canDecide ? <DecideButtons approval={a} /> : <span className="small muted">Chờ {a.kind === 'agent_stage_change' && !['won', 'lost'].includes(a.payload.toStage ?? '') ? 'owner hoặc Leader' : 'Leader của team'} duyệt.</span>)
                 : <span className="small muted">{a.decider ?? '—'} · {fmtDateTime(a.decidedAt)}{a.decisionNote ? ` · “${a.decisionNote}”` : ''}</span>}
             </div>
           </article>

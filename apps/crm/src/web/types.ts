@@ -86,7 +86,7 @@ export interface Dashboard {
 
 export interface ApprovalItem {
   id: string;
-  kind: 'owner_change' | 'agent_stage_change';
+  kind: 'owner_change' | 'agent_stage_change' | 'agent_assign';
   status: 'pending' | 'approved' | 'rejected' | 'stale';
   version: number;
   reason: string | null;

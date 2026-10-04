@@ -30,12 +30,21 @@ export function leadScope(actor: Actor, alias = 'l'): SqlFragment {
   }
 }
 
-/** Owner changes and agent Won/Lost proposals are decided by the team Leader only (QĐ14, action-risk matrix). */
+/** Owner changes, agent assignments and agent Won/Lost proposals are decided by the team Leader only (QĐ14, action-risk matrix). */
 export const leaderOnly = (kind: string, toStage?: string | null) =>
-  kind === 'owner_change' || toStage === 'won' || toStage === 'lost';
+  kind === 'owner_change' || kind === 'agent_assign' || toStage === 'won' || toStage === 'lost';
 
-export function mayDecideApproval(actor: Actor, kind: string, toStage: string | null | undefined, lead: { team_id: string | null; owner_user_id: string | null }) {
+export interface ApprovalLead {
+  team_id: string | null;
+  owner_user_id: string | null;
+  department_id: string;
+  status: string;
+}
+
+/** A queue lead has no team yet, so its assignment is decided by a Leader of the lead's department. */
+export function mayDecideApproval(actor: Actor, kind: string, toStage: string | null | undefined, lead: ApprovalLead) {
   const isTeamLeader = actor.role === 'leader' && actor.teamId != null && lead.team_id === actor.teamId;
+  if (kind === 'agent_assign' && lead.status === 'queue') return actor.role === 'leader' && lead.department_id === actor.departmentId;
   if (leaderOnly(kind, toStage)) return isTeamLeader;
   return isTeamLeader || (actor.role === 'sale' && lead.owner_user_id === actor.id);
 }

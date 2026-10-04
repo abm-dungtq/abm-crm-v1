@@ -39,7 +39,7 @@ interface TaskRow {
 
 interface ApprovalRow {
   id: string;
-  kind: 'owner_change' | 'agent_stage_change';
+  kind: 'owner_change' | 'agent_stage_change' | 'agent_assign';
   lead_id: string;
   target_version: number;
   payload_json: string;
@@ -58,7 +58,7 @@ const handlers: { [K in CommandName]: Handler<z.infer<(typeof COMMANDS)[K]['sche
   createLead, assignLead, releaseLead, logActivity, completeTask, changeStage, requestOwnerChange, decideApproval,
 };
 
-async function sha256(text: string) {
+export async function sha256(text: string) {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
@@ -104,7 +104,9 @@ export async function runCommand(db: D1Database, actor: Actor, name: CommandName
   if (previous) return replayInScope(db, actor, name, parsed.data, previous);
 
   const tx = new GuardedTx(db, actor, name);
-  const handler = handlers[name] as Handler<unknown>;
+  // A chat agent acting for anyone but Admin only proposes risky changes; a person confirms on the web.
+  const proposes = actor.kind === 'agent' && actor.role !== 'admin' && (name === 'changeStage' || name === 'assignLead');
+  const handler = (proposes ? proposals[name as keyof typeof proposals] : handlers[name]) as Handler<unknown>;
   const result = await handler({ db, actor, input: parsed.data, tx });
   if (!result.ok) return result;
   tx.idempotency(idempotencyKey, hash, result);
@@ -179,7 +181,7 @@ async function applyOwnerChange(db: D1Database, tx: GuardedTx, lead: LeadRow, ex
 /** Validates and stages a stage transition (QĐ1/QĐ6 state machine, MVP1: forward one step only). */
 type StageChange = Pick<ChangeStageInput, 'toStage' | 'lostReason' | 'lostNote' | 'wonValue' | 'wonNote'>;
 
-async function applyStageChange(db: D1Database, tx: GuardedTx, lead: LeadRow, expectedVersion: number, input: StageChange, via?: string): Promise<ApiResult<unknown> | null> {
+function validateStageChange(lead: LeadRow, input: StageChange): ApiResult<never> | null {
   if (lead.status !== 'active') return fail('VALIDATION_FAILED', 'Chỉ lead đang mở mới đổi được stage');
   if (!allowedTransitions(lead.stage).includes(input.toStage)) {
     return fail('VALIDATION_FAILED', `Không chuyển được từ "${stageLabel(lead.stage)}" sang "${stageLabel(input.toStage)}". MVP1 chỉ tiến một bước, Won chỉ từ Chờ chốt.`, { fields: { toStage: 'Chuyển stage không hợp lệ' } });
@@ -191,6 +193,13 @@ async function applyStageChange(db: D1Database, tx: GuardedTx, lead: LeadRow, ex
   if (won && (!input.wonValue || !input.wonNote)) {
     return fail('VALIDATION_FAILED', 'Won cần giá trị chốt và ghi chú bằng chứng', { fields: { wonValue: 'Bắt buộc', wonNote: 'Bắt buộc' } });
   }
+  return null;
+}
+
+async function applyStageChange(db: D1Database, tx: GuardedTx, lead: LeadRow, expectedVersion: number, input: StageChange, via?: string): Promise<ApiResult<unknown> | null> {
+  const invalid = validateStageChange(lead, input);
+  if (invalid) return invalid;
+  const won = input.toStage === 'won';
   const terminal = won || input.toStage === 'lost';
   const set: Record<string, unknown> = { stage: input.toStage, stage_entered_at: tx.now };
   if (terminal) {
@@ -261,7 +270,12 @@ async function createLead({ db, actor, input, tx }: Ctx<CreateLeadInput>) {
   if (isSale && !input.nextAction) {
     return fail('VALIDATION_FAILED', 'Lead tự khai thác phải có Next Action và hạn (QĐ13)', { fields: { 'nextAction.title': 'Bắt buộc' } });
   }
-  const departmentId = actor.departmentId
+  // A chosen department only applies to actors without one (Admin, BGĐ); everyone else creates into their own.
+  const chosen = !actor.departmentId && input.departmentId
+    ? (await db.prepare('SELECT id FROM department WHERE id = ? AND organization_id = ?').bind(input.departmentId, actor.organizationId).first<{ id: string }>())?.id
+    : undefined;
+  if (!actor.departmentId && input.departmentId && !chosen) return fail('VALIDATION_FAILED', 'Phòng ban không hợp lệ', { fields: { departmentId: 'Không hợp lệ' } });
+  const departmentId = actor.departmentId ?? chosen
     ?? (await db.prepare('SELECT id FROM department WHERE organization_id = ? ORDER BY created_at LIMIT 1').bind(actor.organizationId).first<{ id: string }>())?.id;
   if (!departmentId) return fail('VALIDATION_FAILED', 'Chưa cấu hình phòng ban');
 
@@ -328,26 +342,29 @@ async function loadAssignee(db: D1Database, actor: Actor, lead: LeadRow, userId:
     .bind(userId, lead.department_id).first<{ id: string; display_name: string; team_id: string; department_id: string }>();
 }
 
-async function assignLead({ db, actor, input, tx }: Ctx<AssignLeadInput>) {
-  const lead = await loadLead(db, actor, input.leadId);
-  if (!lead) return notFound();
-  if (lead.version !== input.expectedVersion) return stale();
+type Assignee = { id: string; display_name: string; team_id: string; department_id: string };
+
+/** Checks an assignment for this actor; shared by the direct command, an agent proposal and its approval. */
+async function checkAssign(db: D1Database, actor: Actor, lead: LeadRow, ownerUserId: string): Promise<{ error: ApiResult<never> } | { member: Assignee }> {
   const ownTeam = actor.role === 'admin' || lead.team_id === actor.teamId;
   if (lead.status !== 'queue' && !(lead.status === 'active' && ownTeam)) {
-    return fail('VALIDATION_FAILED', 'Chỉ giao lead trong hàng chờ hoặc lead đang mở của team');
+    return { error: fail('VALIDATION_FAILED', 'Chỉ giao lead trong hàng chờ hoặc lead đang mở của team') };
   }
-  const member = await loadAssignee(db, actor, lead, input.ownerUserId);
-  if (!member) return fail('VALIDATION_FAILED', 'Người nhận phải là thành viên đang hoạt động của team', { fields: { ownerUserId: 'Không hợp lệ' } });
-  const by = actor.role === 'admin' ? 'Admin' : 'Leader';
+  const member = await loadAssignee(db, actor, lead, ownerUserId);
+  if (!member) return { error: fail('VALIDATION_FAILED', 'Người nhận phải là thành viên đang hoạt động của team', { fields: { ownerUserId: 'Không hợp lệ' } }) };
+  if (lead.status === 'active' && lead.owner_user_id === member.id) return { error: fail('VALIDATION_FAILED', 'Lead đã thuộc người này') };
+  return { member };
+}
 
+async function applyAssign(db: D1Database, tx: GuardedTx, actor: Actor, lead: LeadRow, expectedVersion: number, member: Assignee, nextAction: NextActionInput | undefined, via?: string) {
+  const by = `${actor.role === 'admin' ? 'Admin' : 'Leader'}${via ? ` (${via})` : ''}`;
   if (lead.status === 'active') {
-    if (lead.owner_user_id === member.id) return fail('VALIDATION_FAILED', 'Lead đã thuộc người này');
-    await applyOwnerChange(db, tx, lead, input.expectedVersion, member, `${by} phân lại`);
-    return ok({ leadId: lead.id });
+    await applyOwnerChange(db, tx, lead, expectedVersion, member, `${by} phân lại`);
+    return;
   }
-  const action = input.nextAction ?? defaultFirstContact(new Date(tx.now));
+  const action = nextAction ?? defaultFirstContact(new Date(tx.now));
   const taskId = crypto.randomUUID();
-  tx.update('lead', lead.id, input.expectedVersion, {
+  tx.update('lead', lead.id, expectedVersion, {
     owner_user_id: member.id, team_id: member.team_id, status: 'active', assigned_at: tx.now, next_action_task_id: taskId,
   });
   tx.insertVersioned('task', {
@@ -357,6 +374,15 @@ async function assignLead({ db, actor, input, tx }: Ctx<AssignLeadInput>) {
   tx.activity(lead.id, 'owner_changed', `${by} giao cho ${member.display_name}. Next Action: ${action.title}`);
   tx.audit('lead', lead.id, { status: 'queue', owner_user_id: null }, { status: 'active', owner_user_id: member.id, next_action: action });
   tx.event('lead.assigned', { leadId: lead.id, ownerUserId: member.id });
+}
+
+async function assignLead({ db, actor, input, tx }: Ctx<AssignLeadInput>) {
+  const lead = await loadLead(db, actor, input.leadId);
+  if (!lead) return notFound();
+  if (lead.version !== input.expectedVersion) return stale();
+  const checked = await checkAssign(db, actor, lead, input.ownerUserId);
+  if ('error' in checked) return checked.error;
+  await applyAssign(db, tx, actor, lead, input.expectedVersion, checked.member, input.nextAction);
   return ok({ leadId: lead.id });
 }
 
@@ -475,7 +501,7 @@ async function decideApproval({ db, actor, input, tx }: Ctx<DecideApprovalInput>
 
   const payload = JSON.parse(approval.payload_json) as {
     toUserId?: string; toStage?: StageCode; lostReason?: ChangeStageInput['lostReason']; lostNote?: string;
-    wonValue?: number; wonNote?: string; agentName?: string;
+    wonValue?: number; wonNote?: string; agentName?: string; nextAction?: NextActionInput;
   };
   if (!mayDecideApproval(actor, approval.kind, payload.toStage, lead)) {
     return fail('FORBIDDEN', leaderOnly(approval.kind, payload.toStage) ? 'Chỉ Leader của team duyệt chuyển owner hoặc Won/Lost (QĐ14, action-risk matrix)' : 'Chỉ owner hoặc Leader của team duyệt đề xuất này');
@@ -500,6 +526,11 @@ async function decideApproval({ db, actor, input, tx }: Ctx<DecideApprovalInput>
     const member = payload.toUserId ? await loadTeamMember(db, payload.toUserId, lead.team_id) : null;
     if (!member) return fail('VALIDATION_FAILED', 'Người nhận không còn thuộc team');
     await applyOwnerChange(db, tx, lead, approval.target_version, member, 'Leader duyệt yêu cầu chuyển owner');
+  } else if (approval.kind === 'agent_assign') {
+    if (!payload.toUserId) return fail('VALIDATION_FAILED', 'Đề xuất thiếu người nhận');
+    const checked = await checkAssign(db, actor, lead, payload.toUserId);
+    if ('error' in checked) return checked.error;
+    await applyAssign(db, tx, actor, lead, approval.target_version, checked.member, payload.nextAction, `duyệt đề xuất qua bot của ${payload.agentName ?? 'agent'}`);
   } else {
     if (!payload.toStage) return fail('VALIDATION_FAILED', 'Đề xuất thiếu stage đích');
     const invalid = await applyStageChange(db, tx, lead, approval.target_version, {
@@ -512,3 +543,43 @@ async function decideApproval({ db, actor, input, tx }: Ctx<DecideApprovalInput>
   return ok({ status: 'approved' });
 }
 
+// ---------- agent proposals ----------
+
+/**
+ * Stores a risky change requested through the chat agent as a pending approval. It is validated
+ * first so an impossible proposal never waits in the queue; the decider re-validates on approval.
+ */
+async function propose(db: D1Database, actor: Actor, tx: GuardedTx, lead: LeadRow, kind: 'agent_stage_change' | 'agent_assign', payload: Record<string, unknown>) {
+  const pending = await db.prepare('SELECT 1 FROM approval WHERE lead_id = ? AND kind = ? AND status = ?').bind(lead.id, kind, 'pending').first();
+  if (pending) return fail('VALIDATION_FAILED', 'Lead đã có đề xuất cùng loại đang chờ duyệt');
+  const approvalId = crypto.randomUUID();
+  tx.insertVersioned('approval', {
+    id: approvalId, kind, lead_id: lead.id, target_version: lead.version,
+    payload_json: JSON.stringify({ ...payload, agentName: actor.displayName }),
+    status: 'pending', requested_by_user_id: actor.id, requested_by_kind: actor.kind,
+  });
+  tx.assert('SELECT COUNT(*) = 1 FROM approval WHERE lead_id = ? AND kind = ? AND status = ?', [lead.id, kind, 'pending']);
+  tx.audit('approval', approvalId, null, { kind, leadId: lead.id, ...payload });
+  tx.event('approval.requested', { approvalId, leadId: lead.id, kind, toStage: payload.toStage ?? null });
+  return ok({ status: 'pending_approval', approvalId, kind, toStage: payload.toStage ?? null });
+}
+
+const proposals = {
+  async changeStage({ db, actor, input, tx }: Ctx<ChangeStageInput>) {
+    const lead = await loadLead(db, actor, input.leadId);
+    if (!lead) return notFound();
+    if (lead.version !== input.expectedVersion) return stale();
+    const invalid = validateStageChange(lead, input);
+    if (invalid) return invalid;
+    const { toStage, lostReason, lostNote, wonValue, wonNote } = input;
+    return propose(db, actor, tx, lead, 'agent_stage_change', { toStage, lostReason, lostNote, wonValue, wonNote });
+  },
+  async assignLead({ db, actor, input, tx }: Ctx<AssignLeadInput>) {
+    const lead = await loadLead(db, actor, input.leadId);
+    if (!lead) return notFound();
+    if (lead.version !== input.expectedVersion) return stale();
+    const checked = await checkAssign(db, actor, lead, input.ownerUserId);
+    if ('error' in checked) return checked.error;
+    return propose(db, actor, tx, lead, 'agent_assign', { toUserId: checked.member.id, nextAction: input.nextAction });
+  },
+};
