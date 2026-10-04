@@ -61,6 +61,7 @@ Claude không tự gửi tin lên Lark và không bao giờ in token, secret hay
 ### Task 5.2 — Backup, migrate, deploy (cần đồng ý)
 
 - Steps:
+  0. Diễn tập cục bộ trước (không cần đồng ý, không đụng remote): D1 local mới, áp 0001–0003, nạp `seed/demo.sql` (có 3 dòng approval), rồi áp 0004. Đạt khi `SELECT COUNT(*) FROM approval` = 3 và `PRAGMA index_list(approval)` có `approval_status` và `approval_lead_kind_status`. Không đạt thì dừng, không sang bước 1.
   1. Backup:
 
      ```powershell

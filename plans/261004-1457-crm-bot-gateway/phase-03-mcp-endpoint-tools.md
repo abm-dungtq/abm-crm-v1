@@ -38,7 +38,7 @@ GoClaw gọi `POST /api/mcp` (MCP Streamable HTTP, JSON-RPC) bằng Bearer token
      - (b) thiếu `Authorization: Bearer <token>` → 401;
      - (c) tính `sha256(token)` (hex, dùng cùng hàm `sha256` như `commands.ts`; export nó nếu cần), tra `SELECT t.id, t.user_id FROM agent_token t WHERE t.token_hash = ? AND t.revoked_at IS NULL`;
      - (d) không có dòng → 401;
-     - (e) `loadAgentActor(db, user_id)` trả null (user bị khóa) → 401;
+     - (e) `loadAgentActor(db, user_id)` trả null (user bị khóa) → 401. Không chặn theo `must_change_password`: chìa khóa bot là thông tin xác thực riêng do Admin cấp;
      - (f) cập nhật `last_used_at` qua helper `background(c, promise)`, rồi `c.set('actor', actor)`.
      Tạo helper `background` trong `apps/crm/src/worker/env.ts` (hoặc file nhỏ `background.ts`): `try { c.executionCtx.waitUntil(p) } catch { await p }`. Lý do: test gọi `app.fetch(req, env)` không có ExecutionContext, và getter `c.executionCtx` của Hono ném lỗi khi thiếu. Mọi chỗ cần `waitUntil` trong kế hoạch này đều dùng `background`.
   2. Chỉ nhận `POST /` (GET trả 405), theo PoC `poc/goclaw-identity/src/index.ts`.
@@ -80,7 +80,7 @@ GoClaw gọi `POST /api/mcp` (MCP Streamable HTTP, JSON-RPC) bằng Bearer token
 - Target: `mcp-tools.ts`, `commands.ts`.
 - Steps:
   1. Công cụ ghi và lệnh tương ứng:
-     - `create_lead` → `createLead`
+     - `create_lead {…, department?}` → `createLead`. `department` là tên phòng ban, so khớp không dấu/không phân biệt hoa thường như `admin-routes.ts` (nhập danh sách). Bắt buộc khi `actor.departmentId` null (Admin, BGĐ), thiếu hoặc không khớp → `VALIDATION_FAILED`. Thêm `departmentId` tùy chọn vào `createLeadInput` (contracts); `createLead` chỉ dùng nó khi actor không có phòng ban, thay cho cách lấy phòng ban cũ nhất. Thêm test web cho Admin tạo lead vào đúng phòng ban.
      - `log_activity {lead_code, type, summary, occurred_at?}` → `logActivity`
      - `complete_task {task_id, …}` → `completeTask`
      - `change_stage {lead_code, to_stage, lost_reason?, lost_note?, won_value?, won_note?, next_action?}` → `changeStage`
@@ -88,7 +88,7 @@ GoClaw gọi `POST /api/mcp` (MCP Streamable HTTP, JSON-RPC) bằng Bearer token
      - `request_owner_change {lead_code, new_owner_email, reason}` → `requestOwnerChange`
 
      Đọc schema Zod tương ứng trong `packages/contracts/src/index.ts` để ánh xạ đúng tên trường.
-  2. Adapter tra `lead.id` và `lead.version` theo `lead_code` ngay trước khi gọi, rồi điền `leadId`/`expectedVersion`.
+  2. Adapter tra `lead.id` và `lead.version` theo `lead_code` ngay trước khi gọi, rồi điền `leadId`/`expectedVersion`. `complete_task` tra `task.version` theo `task_id` (trong phạm vi lead nhìn thấy) theo cùng cách.
   3. Idempotency. `runCommand` băm cả `expectedVersion` (`commands.ts:91`), nên gọi lặp sau khi version đã tăng sẽ bị `IDEMPOTENCY_CONFLICT`. Làm như sau:
      - key1 = `'mcp:' + sha256(toolName + canonicalJson(args))` (khóa sắp xếp). Gọi `runCommand` với key1.
      - Nếu trả `IDEMPOTENCY_CONFLICT`: đọc `created_at, result_json` của `idempotency_key` với `actor_user_id = actor.id AND key = key1`. `created_at` trong vòng 5 phút thì coi là gọi lặp và trả `result_json`. Cũ hơn thì là ý định mới: gọi lại với key2 = `'mcp:' + sha256(toolName + canonicalJson(args) + ':' + version)`.
@@ -131,7 +131,7 @@ GoClaw gọi `POST /api/mcp` (MCP Streamable HTTP, JSON-RPC) bằng Bearer token
 
 ### Task 3.6 — Test cổng MCP
 
-- Target: tạo `apps/crm/test/mcp-gateway.test.ts`. Tạo token test bằng cách insert hash vào `agent_token` trong `beforeEach`, với token sinh ngẫu nhiên trong test.
+- Target: tạo `apps/crm/test/mcp-gateway.test.ts`. Tạo token test bằng cách insert hash vào `agent_token` trong `beforeEach`, với token sinh ngẫu nhiên trong test. Danh sách bảng xóa trong `beforeEach` để `agent_token` trước `app_user` và upsert lại dòng kill switch, theo mẫu `agent-foundation.test.ts`.
 - Test cases:
   1. **auth**:
      - không Bearer → 401;
