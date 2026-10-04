@@ -16,8 +16,8 @@ Kế hoạch này viết để giao cho một executor yếu hơn. Mỗi phase c
 
 | # | Phase | Status | Phụ thuộc |
 |---|---|---|---|
-| 01 | [API `/api/overview` + KPI + kanban + chờ duyệt + bot/Lark](phase-01-overview-api-and-kanban.md) | pending | — |
-| 02 | [Ma trận nhiệt, khối lượng Sale, nguồn lead, audit gần đây, lọc lead theo phòng ban](phase-02-heat-matrix-and-panels.md) | pending | 01 |
+| 01 | [API `/api/overview` + KPI + kanban + chờ duyệt + bot/Lark](phase-01-overview-api-and-kanban.md) | completed | — |
+| 02 | [Ma trận nhiệt, khối lượng Sale, nguồn lead, audit gần đây, lọc lead theo phòng ban](phase-02-heat-matrix-and-panels.md) | completed | 01 |
 | 03 | [Deploy lên eval (cần user đồng ý)](phase-03-deploy-eval.md) | pending | 02 |
 
 ## Acceptance criteria
@@ -43,3 +43,8 @@ Kế hoạch này viết để giao cho một executor yếu hơn. Mỗi phase c
 - Không đưa mã plan hay tên phase vào code, tên test hoặc commit message.
 - Commit theo conventional commits, không nhắc tới AI. Cuối commit message có hai dòng attribution của session.
 - Deploy (phase 03) cần user đồng ý rõ ràng.
+
+## Ghi chú thực hiện
+
+- 202/202 test, typecheck và build đều qua sau phase 02.
+- Chưa kiểm bằng mắt ở 375px: có hai trình duyệt Chrome cùng kết nối, phải hỏi user chọn một, nên bước này bỏ qua để không chặn chế độ tự chạy. Bảng kanban và ma trận đều nằm trong vùng tự cuộn (`.board`, `.table-wrap`).

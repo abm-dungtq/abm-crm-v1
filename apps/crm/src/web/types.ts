@@ -176,4 +176,12 @@ export interface Overview {
     oldest: { id: string; kind: string; toStage: string | null; leadId: string; leadCode: string; requester: string | null; requestedByKind: 'human' | 'agent'; createdAt: string }[];
   };
   bot: { agentWritesOpen: boolean; activeTokens: number; agentWrites7d: number; outbox: { status: string; count: number }[] };
+  matrix: { stages: StageCode[]; departments: OverviewMatrixRow[]; teams: OverviewMatrixRow[] };
+  workload: { id: string; name: string; teamName: string | null; open: number; overdue: number; stale: number; won: number; lost: number }[];
+  sources: { code: string; total: number; won: number; lost: number; winRate: number | null }[];
+  recentAudit: { id: string; command: string; entity: string; leadId: string; leadCode: string; actorName: string | null; actorKind: string; createdAt: string }[];
+}
+export interface OverviewMatrixRow {
+  id: string; name: string; departmentId: string;
+  cells: { stage: StageCode; count: number; value: number; atRisk: number }[];
 }

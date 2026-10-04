@@ -61,6 +61,7 @@ app.get('/dashboard', async (c) => c.json(data(await dashboard(c.env.DB, c.get('
 app.get('/leads', async (c) => c.json(data(await listLeads(c.env.DB, c.get('actor'), {
   status: c.req.query('status') || undefined, stage: c.req.query('stage') || undefined,
   ownerId: c.req.query('owner') || undefined, q: c.req.query('q') || undefined,
+  departmentId: c.req.query('department') || undefined,
 }))));
 app.get('/leads/:id', async (c) => {
   const detail = await leadDetail(c.env.DB, c.get('actor'), c.req.param('id'));

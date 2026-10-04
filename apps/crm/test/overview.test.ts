@@ -83,3 +83,31 @@ test('unknown period falls back to month', async () => {
   expect(data.period.start).toMatch(/^\d{4}-\d{2}-01$/);
   expect((await overview('u-admin', '?period=year')).period.start).toMatch(/^\d{4}-01-01$/);
 });
+
+test('matrix rows add up to the open leads', async () => {
+  const data = await overview();
+  const total = (rows: { cells: { count: number }[] }[]) => rows.reduce((s, r) => s + r.cells.reduce((t, c) => t + c.count, 0), 0);
+  expect(total(data.matrix.departments)).toBe(data.kpi.openLeads);
+  expect(total(data.matrix.teams)).toBeLessThanOrEqual(data.kpi.openLeads);
+  expect(data.matrix.teams.map((t: { id: string }) => t.id).sort()).toEqual(['team-kd1', 'team-kd2']);
+});
+
+test('recent audit shows who did what without the change details', async () => {
+  const res = await app.fetch(new Request('http://crm.test/api/commands/logActivity', {
+    method: 'POST',
+    headers: { 'X-Demo-User': 'u-lan', 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() },
+    body: JSON.stringify({ leadId: 'lead-04', expectedVersion: 1, type: 'note', summary: 'ghi chú' }),
+  }), { ...env, DEMO_MODE: '1' });
+  expect(res.status).toBe(200);
+  const audit = (await overview()).recentAudit;
+  expect(audit.length).toBeGreaterThan(0);
+  expect(audit[0]).toMatchObject({ command: 'logActivity', leadCode: 'L-0004', actorKind: 'human' });
+  expect(Object.keys(audit[0]).sort()).toEqual(['actorKind', 'actorName', 'command', 'createdAt', 'entity', 'id', 'leadCode', 'leadId']);
+});
+
+test('leads can be filtered by department', async () => {
+  await addDepartment('dep-x');
+  const all = (await get('u-admin', '/leads?status=active')).body.data as unknown[];
+  expect((await get('u-admin', '/leads?status=active&department=dep-x')).body.data).toEqual([]);
+  expect(((await get('u-admin', '/leads?status=active&department=dep-kd')).body.data as unknown[]).length).toBe(all.length);
+});

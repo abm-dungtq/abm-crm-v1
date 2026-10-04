@@ -27,7 +27,7 @@ export function LeadsPage() {
     return () => clearTimeout(t);
   }, [text]); // keep URL in sync with the box without a navigation per keystroke
 
-  const all = useApi<LeadItem[]>('/leads');
+  const all = useApi<LeadItem[]>(search.department ? `/leads?department=${encodeURIComponent(search.department)}` : '/leads');
   const members = useApi<Member[]>(actor.role === 'leader' ? '/team-members' : null);
   const [assigning, setAssigning] = useState<LeadItem | null>(null);
   const status = TABS.find((t) => t.id === tab)?.status ?? '';
@@ -56,6 +56,11 @@ export function LeadsPage() {
         ))}
       </div>
       <div className="row-wrap" style={{ marginBottom: 12 }}>
+        {search.department && (
+          <button type="button" className="btn btn-sm" onClick={() => void navigate({ search: (s) => ({ ...s, department: undefined }) })}>
+            Đang lọc một phòng ban · Bỏ lọc
+          </button>
+        )}
         <div className="field" style={{ flex: '1 1 240px' }}>
           <label htmlFor="lead-filter" className="visually-hidden">Lọc lead</label>
           <input id="lead-filter" type="search" placeholder="Lọc theo mã, tên khách, công ty, Sale…" value={text} onChange={(e) => setText(e.target.value)} />

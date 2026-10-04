@@ -1,6 +1,6 @@
 import { ACTIVE_STAGES, type StageCode } from '@abm/contracts';
 import type { Actor } from './env';
-import { LEAD_SELECT, needsAttention, toLeadItem, vnDate, type LeadItem, type LeadListRow } from './queries';
+import { AUDIT_SELECT, LEAD_SELECT, needsAttention, toLeadItem, vnDate, type LeadItem, type LeadListRow } from './queries';
 import { leadScope } from './scope';
 
 /** The organization overview is for the people who run the company: Admin and the Board. */
@@ -40,7 +40,7 @@ export async function overviewData(db: D1Database, actor: Actor, opts: { period?
   const scope = departmentId ? { sql: `${base.sql} AND l.department_id = ?`, binds: [...base.binds, departmentId] } : base;
   const inView = `${scope.sql} AND (l.status IN ('queue', 'active') OR l.closed_at >= ?)`;
 
-  const [groups, rows, overdue, approvalKinds, oldest, bot, outbox] = await Promise.all([
+  const [groups, rows, overdue, approvalKinds, oldest, bot, outbox, placement, teams, people, sources, audit] = await Promise.all([
     db.prepare(`SELECT l.status, l.stage, COUNT(*) AS n, COALESCE(SUM(l.expected_value), 0) AS v FROM lead l
       WHERE ${inView} GROUP BY l.status, l.stage`).bind(...scope.binds, since)
       .all<{ status: string; stage: StageCode; n: number; v: number }>(),
@@ -63,6 +63,23 @@ export async function overviewData(db: D1Database, actor: Actor, opts: { period?
       .bind(vnMidnightUtc(vnDate(now)), new Date(now.getTime() - 7 * 86_400_000).toISOString())
       .first<{ open: number; tokens: number; today: number; week: number }>(),
     db.prepare('SELECT status, COUNT(*) AS n FROM outbox GROUP BY status ORDER BY status').all<{ status: string; n: number }>(),
+    db.prepare(`SELECT l.id, l.department_id FROM lead l WHERE ${scope.sql} AND l.status = 'active'`).bind(...scope.binds)
+      .all<{ id: string; department_id: string }>(),
+    db.prepare(`SELECT t.id, t.name, t.department_id FROM team t JOIN department d ON d.id = t.department_id
+      WHERE d.organization_id = ? ORDER BY t.name`).bind(actor.organizationId).all<{ id: string; name: string; department_id: string }>(),
+    db.prepare(`SELECT u.id, u.display_name AS name, t.name AS team_name FROM app_user u LEFT JOIN team t ON t.id = u.team_id
+      WHERE u.organization_id = ? AND u.status = 'active' AND u.role IN ('sale', 'leader')${departmentId ? ' AND u.department_id = ?' : ''}
+      ORDER BY u.display_name`).bind(actor.organizationId, ...(departmentId ? [departmentId] : []))
+      .all<{ id: string; name: string; team_name: string | null }>(),
+    db.prepare(`SELECT l.source,
+        SUM(CASE WHEN l.created_at >= ? THEN 1 ELSE 0 END) AS total,
+        SUM(CASE WHEN l.status = 'won' AND l.closed_at >= ? THEN 1 ELSE 0 END) AS won,
+        SUM(CASE WHEN l.status = 'lost' AND l.closed_at >= ? THEN 1 ELSE 0 END) AS lost
+      FROM lead l WHERE ${scope.sql} GROUP BY l.source`).bind(since, since, since, ...scope.binds)
+      .all<{ source: string; total: number; won: number; lost: number }>(),
+    // Names and codes only: the change details can hold a customer's phone or email.
+    db.prepare(`${AUDIT_SELECT} WHERE ${scope.sql} ORDER BY al.created_at DESC LIMIT 20`).bind(...scope.binds)
+      .all<{ id: string; command: string; entity: string; lead_id: string; lead_code: string; actor_name: string | null; actor_kind: string; created_at: string }>(),
   ]);
 
   const leads = rows.results.map((r) => toLeadItem(r, now));
@@ -92,6 +109,32 @@ export async function overviewData(db: D1Database, actor: Actor, opts: { period?
   const won = sumOf('won');
   const lost = sumOf('lost');
 
+  const departmentOf = new Map(placement.results.map((p) => [p.id, p.department_id]));
+  const activeLeads = leads.filter((l) => l.status === 'active');
+  const matrixRow = (id: string, name: string, depId: string, inRow: (l: LeadItem) => boolean) => {
+    const items = activeLeads.filter(inRow);
+    return {
+      id, name, departmentId: depId,
+      cells: ACTIVE_STAGES.map((stage) => {
+        const cell = items.filter((l) => l.stage === stage);
+        return { stage, count: cell.length, value: cell.reduce((s, l) => s + (l.expectedValue ?? 0), 0), atRisk: cell.filter(needsAttention).length };
+      }),
+    };
+  };
+  const shownDepartments = departments.filter((d) => !departmentId || d.id === departmentId);
+  const shownIds = new Set(shownDepartments.map((d) => d.id));
+
+  const workload = people.results.map((p) => {
+    const owned = leads.filter((l) => l.owner?.id === p.id);
+    const open = owned.filter((l) => l.status === 'active');
+    return {
+      id: p.id, name: p.name, teamName: p.team_name, open: open.length,
+      overdue: open.filter((l) => l.health.nextActionOverdue).length,
+      stale: open.filter((l) => l.health.stageSla?.state === 'breach').length,
+      won: owned.filter((l) => l.status === 'won').length, lost: owned.filter((l) => l.status === 'lost').length,
+    };
+  }).filter((w) => w.open + w.won + w.lost > 0).sort((a, b) => b.open - a.open);
+
   return {
     period: { key, start },
     departments,
@@ -118,6 +161,20 @@ export async function overviewData(db: D1Database, actor: Actor, opts: { period?
       agentWritesOpen: bot?.open === 1, activeTokens: bot?.tokens ?? 0, agentWrites7d: bot?.week ?? 0,
       outbox: outbox.results.map((o) => ({ status: o.status, count: o.n })),
     },
+    matrix: {
+      stages: [...ACTIVE_STAGES],
+      departments: shownDepartments.map((d) => matrixRow(d.id, d.name, d.id, (l) => departmentOf.get(l.id) === d.id)),
+      teams: teams.results.filter((t) => shownIds.has(t.department_id))
+        .map((t) => matrixRow(t.id, t.name, t.department_id, (l) => l.team?.id === t.id)),
+    },
+    workload,
+    sources: sources.results.filter((s) => s.total + s.won + s.lost > 0)
+      .map((s) => ({ code: s.source, total: s.total, won: s.won, lost: s.lost, winRate: winRate(s.won, s.lost) }))
+      .sort((a, b) => b.total - a.total),
+    recentAudit: audit.results.map((a) => ({
+      id: a.id, command: a.command, entity: a.entity, leadId: a.lead_id, leadCode: a.lead_code,
+      actorName: a.actor_name, actorKind: a.actor_kind, createdAt: a.created_at,
+    })),
   };
 }
 export type Overview = Awaited<ReturnType<typeof overviewData>>;

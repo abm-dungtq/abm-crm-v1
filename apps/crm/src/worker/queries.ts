@@ -82,6 +82,7 @@ export interface LeadFilter {
   ownerId?: string;
   q?: string;
   accountId?: string;
+  departmentId?: string;
 }
 
 export async function listLeads(db: D1Database, actor: Actor, filter: LeadFilter = {}) {
@@ -93,6 +94,7 @@ export async function listLeads(db: D1Database, actor: Actor, filter: LeadFilter
   if (filter.stage) { where.push('l.stage = ?'); binds.push(filter.stage); }
   if (filter.ownerId) { where.push('l.owner_user_id = ?'); binds.push(filter.ownerId); }
   if (filter.accountId) { where.push('l.account_id = ?'); binds.push(filter.accountId); }
+  if (filter.departmentId) { where.push('l.department_id = ?'); binds.push(filter.departmentId); }
   const matcher = filter.q ? searchMatcher(filter.q) : null;
   // Text search folds Vietnamese case/diacritics in JS (SQLite lower() is ASCII-only), so it
   // filters the scoped rows before the page limit instead of inside SQL.

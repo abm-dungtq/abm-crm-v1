@@ -58,7 +58,7 @@ const rootRoute = createRootRoute({
   notFoundComponent: () => <div className="empty"><strong>Không tìm thấy trang</strong></div>,
 });
 
-type LeadsSearch = { tab?: 'active' | 'queue' | 'won' | 'lost' | 'all'; q?: string; stage?: string };
+type LeadsSearch = { tab?: 'active' | 'queue' | 'won' | 'lost' | 'all'; q?: string; stage?: string; department?: string };
 const tabs = ['active', 'queue', 'won', 'lost', 'all'] as const;
 
 const routes = [
@@ -73,6 +73,7 @@ const routes = [
       tab: tabs.includes(s.tab as never) ? (s.tab as LeadsSearch['tab']) : undefined,
       q: typeof s.q === 'string' && s.q ? s.q : undefined,
       stage: typeof s.stage === 'string' && s.stage ? s.stage : undefined,
+      department: typeof s.department === 'string' && s.department ? s.department : undefined,
     }),
   }),
   createRoute({ getParentRoute: () => rootRoute, path: '/leads/new', component: LeadNewPage }),

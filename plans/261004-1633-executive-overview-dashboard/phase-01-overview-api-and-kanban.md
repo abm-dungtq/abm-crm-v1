@@ -1,7 +1,7 @@
 ---
 phase: 1
 title: API overview + KPI + kanban + chờ duyệt + bot/Lark
-status: pending
+status: completed
 ---
 
 # Phase 01 — API `/api/overview`, KPI, kanban, chờ duyệt, bot/Lark
@@ -155,12 +155,12 @@ type OverviewCard = { id: string; code: string; title: string /* tên account, n
   2. `overview counts match the database`: `kpi.openLeads` bằng `SELECT COUNT(*) FROM lead WHERE status='active'`, `kpi.queueLeads` bằng số lead `status='queue'`. Tổng `count` của các cột `ACTIVE_STAGES` bằng `openLeads`. Cột `queue` có `count` bằng `queueLeads`.
   3. `a director placed in a department still sees the whole organization`: chạy `UPDATE app_user SET department_id='dep-kd' WHERE id='u-bgd'`, rồi so `kpi` của `u-bgd` với `kpi` của `u-admin`: phải bằng nhau.
   4. `the department filter narrows every count`: insert `department` mới `dep-x`. Gọi `?department=dep-x` thì `openLeads` = 0 và `queueLeads` = 0. Gọi `?department=dep-kd` thì `openLeads` bằng số khi không lọc. Gọi `?department=khong-ton-tai` thì `departmentId` = null.
-  5. `win rate counts only leads closed in the period`:
-     - `UPDATE lead SET status='won', stage='won', closed_at=<now ISO>, next_action_task_id=NULL` cho 2 lead active;
-     - `status='lost', stage='lost', lost_reason='price'` cho 1 lead;
-     - đặt `closed_at` của mọi lead won/lost khác về `2000-01-01T00:00:00Z`.
-     Kỳ vọng `wonCount`=2, `lostCount`=1, `winRate` gần đúng `2/3` (`toBeCloseTo`). Nếu CHECK constraint chặn update thì xem cách các test khác tạo lead won/lost và làm theo; không tắt constraint.
-  6. `overview never carries customer contact details`:
+  5. `win rate counts only leads closed in the period`. Làm đúng thứ tự:
+     1. `UPDATE lead SET closed_at='2000-01-01T00:00:00Z' WHERE status IN ('won','lost')`, để đẩy mọi lead đã đóng sẵn ra ngoài kỳ;
+     2. `lead-14` và `lead-15` → `status='won', stage='won', closed_at=<now ISO>`;
+     3. `lead-13` → `status='lost', stage='lost', lost_reason='price', closed_at=<now ISO>`.
+
+     Kỳ vọng `wonCount`=2, `lostCount`=1, `winRate` ≈ `2/3` (`toBeCloseTo`). Ba lead này đều `active` trong seed. CHECK constraint không chặn update này.  6. `overview never carries customer contact details`:
      - lấy toàn bộ `value` trong `contact_point`;
      - `JSON.stringify(response)` không chứa giá trị nào trong đó;
      - và không chứa các chuỗi `"before"`, `"after"`, `"phone"`, `"email"`.

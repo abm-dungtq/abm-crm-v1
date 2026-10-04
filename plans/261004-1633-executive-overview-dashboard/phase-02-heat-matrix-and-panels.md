@@ -1,7 +1,7 @@
 ---
 phase: 2
 title: Ma trận nhiệt, khối lượng Sale, nguồn lead, audit gần đây, lọc lead theo phòng ban
-status: pending
+status: completed
 depends_on: [1]
 ---
 
@@ -99,7 +99,7 @@ recentAudit: { id: string; command: string; entity: string; leadId: string; lead
      - `validateSearch` thêm `department: typeof s.department === 'string' && s.department ? s.department : undefined`.
   3. `leads.tsx`:
      - đọc `search.department`;
-     - khi có giá trị thì thêm `&department=${encodeURIComponent(search.department)}` vào đường dẫn API đang dùng;
+     - khi có giá trị thì đổi đường dẫn API từ `'/leads'` thành `/leads?department=${encodeURIComponent(search.department)}` (dùng `?` vì đường dẫn gốc chưa có query). Số đếm trên các tab cũng theo phòng ban đó;
      - hiện một chip "Phòng ban đã lọc" kèm nút xóa lọc (navigate với `department: undefined`).
   4. `overview.tsx`: thêm card **Ma trận nhiệt** ngay dưới kanban.
      - Có nút chuyển hai trạng thái "Theo phòng ban" / "Theo team", dùng `button` có `aria-pressed`.
@@ -120,6 +120,7 @@ recentAudit: { id: string; command: string; entity: string; leadId: string; lead
      ```
      Trước khi dùng, kiểm `styles.css` có biến `--warn` hay không. Nếu không có thì giữ fallback như trên.
 - Verify: `pnpm -F @abm/crm typecheck` exit 0 và `pnpm -F @abm/crm build` exit 0.
+- Giới hạn đã chấp nhận: hàng team trong ma trận chỉ lọc `/leads` theo phòng ban và stage, không lọc theo team. Link `+N nữa` của Won/Lost mở tab Won/Lost toàn thời gian.
 
 ### Task 2.4 — Test bổ sung
 

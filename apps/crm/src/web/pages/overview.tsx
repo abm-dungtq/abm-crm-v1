@@ -1,11 +1,11 @@
 import { useState } from 'react';
 import { Link } from '@tanstack/react-router';
-import { stageLabel } from '@abm/contracts';
+import { sourceLabel, stageLabel } from '@abm/contracts';
 import { useActor } from '../actor-context';
 import { useApi } from '../api';
-import { Alert, Badge, ErrorState, Kpi, Loading } from '../components/ui';
-import { fmtAgo, fmtDate, fmtDue, fmtMoney } from '../format';
-import type { Overview, OverviewColumn, OverviewPeriod } from '../types';
+import { Alert, Avatar, Badge, ErrorState, Kpi, Loading } from '../components/ui';
+import { fmtAgo, fmtDate, fmtDateTime, fmtDue, fmtMoney } from '../format';
+import type { Overview, OverviewColumn, OverviewMatrixRow, OverviewPeriod } from '../types';
 
 const PERIODS: { id: OverviewPeriod; label: string }[] = [
   { id: 'month', label: 'Tháng này' },
@@ -86,6 +86,8 @@ function OverviewBody({ data }: { data: Overview }) {
         {data.columns.map((c) => <OverviewColumnView key={c.key} column={c} />)}
       </div>
 
+      <HeatMatrix data={data} />
+
       <div className="cols-2" style={{ marginTop: 16 }}>
         <section className="card" aria-labelledby="ov-approvals-h">
           <div className="card-head"><h2 id="ov-approvals-h">Chờ duyệt</h2><span className="spacer" /><Link to="/approvals" className="small">Mở hàng chờ duyệt</Link></div>
@@ -133,7 +135,114 @@ function OverviewBody({ data }: { data: Overview }) {
           </ul>
         </section>
       </div>
+
+      <div className="cols-2" style={{ marginTop: 16 }}>
+        <section className="card" aria-labelledby="ov-workload-h">
+          <div className="card-head"><h2 id="ov-workload-h">Khối lượng theo Sale</h2></div>
+          {data.workload.length === 0 ? <div className="card-body small muted">Chưa có lead nào được giao.</div> : (
+            <div className="table-wrap">
+              <table className="table responsive">
+                <thead><tr><th>Người phụ trách</th><th className="right">Đang mở</th><th className="right">Quá hạn</th><th className="right">Quá SLA</th><th className="right">Won / Lost</th></tr></thead>
+                <tbody>
+                  {data.workload.map((w) => (
+                    <tr key={w.id}>
+                      <td><span className="row"><Avatar name={w.name} /><span><span className="cell-title">{w.name}</span>{w.teamName && <span className="cell-sub">{w.teamName}</span>}</span></span></td>
+                      <td className="right num" data-label="Đang mở">{w.open}</td>
+                      <td className="right num" data-label="Quá hạn">{w.overdue ? <Badge tone="danger">{w.overdue}</Badge> : 0}</td>
+                      <td className="right num" data-label="Quá SLA">{w.stale ? <Badge tone="warn">{w.stale}</Badge> : 0}</td>
+                      <td className="right num" data-label="Won / Lost">{w.won} / {w.lost}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
+        <section className="card" aria-labelledby="ov-sources-h">
+          <div className="card-head"><h2 id="ov-sources-h">Nguồn lead</h2></div>
+          {data.sources.length === 0 ? <div className="card-body small muted">Chưa có lead mới trong kỳ.</div> : (
+            <div className="table-wrap">
+              <table className="table responsive">
+                <thead><tr><th>Nguồn</th><th className="right">Lead mới</th><th className="right">Won / Lost</th><th className="right">Tỉ lệ chốt</th></tr></thead>
+                <tbody>
+                  {data.sources.map((s) => (
+                    <tr key={s.code}>
+                      <td>{sourceLabel(s.code)}</td>
+                      <td className="right num" data-label="Lead mới">{s.total}</td>
+                      <td className="right num" data-label="Won / Lost">{s.won} / {s.lost}</td>
+                      <td className="right num" data-label="Tỉ lệ chốt">{pct(s.winRate)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      </div>
+
+      <section className="card" aria-labelledby="ov-audit-h" style={{ marginTop: 16 }}>
+        <div className="card-head"><h2 id="ov-audit-h">Thao tác gần đây</h2><span className="spacer" /><Link to="/audit" className="small">Mở nhật ký audit</Link></div>
+        {data.recentAudit.length === 0 ? <div className="card-body small muted">Chưa có thao tác nào.</div> : (
+          <ul className="list">
+            {data.recentAudit.map((a) => (
+              <li key={a.id} className="row">
+                <span className="small muted nowrap">{fmtDateTime(a.createdAt)}</span>
+                <span className="truncate" style={{ flex: 1, minWidth: 0 }}>
+                  {a.actorName ?? 'Hệ thống'}{a.actorKind === 'agent' ? ' (bot)' : ''} · <span className="mono small">{a.command}</span>
+                </span>
+                <Link to="/leads/$leadId" params={{ leadId: a.leadId }} className="mono small">{a.leadCode}</Link>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
     </>
+  );
+}
+
+const heatLevel = (count: number, atRisk: number) => {
+  if (!count || !atRisk) return 0;
+  const share = atRisk / count;
+  return share <= 0.25 ? 1 : share <= 0.5 ? 2 : 3;
+};
+
+function HeatMatrix({ data }: { data: Overview }) {
+  const [byTeam, setByTeam] = useState(false);
+  const rows: OverviewMatrixRow[] = byTeam ? data.matrix.teams : data.matrix.departments;
+  return (
+    <section className="card" aria-labelledby="ov-heat-h" style={{ marginTop: 16 }}>
+      <div className="card-head">
+        <h2 id="ov-heat-h">Bản đồ nhiệt lead đang mở</h2><span className="spacer" />
+        <div className="row" role="group" aria-label="Nhóm theo">
+          <button type="button" className="chip" aria-pressed={!byTeam} onClick={() => setByTeam(false)}>Theo phòng ban</button>
+          <button type="button" className="chip" aria-pressed={byTeam} onClick={() => setByTeam(true)}>Theo team</button>
+        </div>
+      </div>
+      {rows.length === 0 ? <div className="card-body small muted">Chưa có {byTeam ? 'team' : 'phòng ban'} nào.</div> : (
+        <div className="table-wrap">
+          <table className="table heat">
+            <thead><tr><th>{byTeam ? 'Team' : 'Phòng ban'}</th>{data.matrix.stages.map((s) => <th key={s} className="right">{stageLabel(s)}</th>)}</tr></thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.id}>
+                  <th scope="row" className="nowrap">{r.name}</th>
+                  {r.cells.map((cell) => (
+                    <td key={cell.stage} className="right num">
+                      <Link to="/leads" search={{ tab: 'active', stage: cell.stage, department: r.departmentId }} data-heat={heatLevel(cell.count, cell.atRisk)}
+                        aria-label={`${r.name}, ${stageLabel(cell.stage)}: ${cell.count} lead, ${cell.atRisk} có rủi ro`}>
+                        {cell.count}<span className="cell-value">{cell.count ? fmtMoney(cell.value) : ''}</span>
+                      </Link>
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <div className="card-foot small text-2">Màu càng đậm thì tỉ lệ lead trễ SLA hoặc quá hạn Next Action trong ô càng cao. Bấm vào ô để xem danh sách lead.</div>
+    </section>
   );
 }
 
