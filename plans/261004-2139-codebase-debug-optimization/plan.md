@@ -44,3 +44,7 @@ phương án tối ưu. Orca điều phối; coordinator chỉ giao việc, ki�
 - Không đưa mã plan, tên phase hay mã phát hiện vào code, tên test hay commit message.
 - Không đổi public contract (API response, schema D1), trừ khi bắt buộc để sửa lỗi và có ghi rõ.
 - Báo cáo viết tiếng Việt đơn giản.
+
+## Ghi chú triển khai
+
+- 2026-10-05 06:46: user đồng ý deploy bản sửa lỗi (commit `0dba63d`) lên eval. Không có migration. Version `c0601acd-3752-40a9-8e85-22dc9582606f`. Kiểm sau deploy: `/api/health` 200; `/api/overview` và `/api/mcp` chưa đăng nhập 401; `/api/mcp` có header Origin 403; `/overview` và `/leads` 200.
