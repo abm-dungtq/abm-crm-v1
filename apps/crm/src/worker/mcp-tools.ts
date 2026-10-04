@@ -94,22 +94,25 @@ async function userIdByEmail(db: D1Database, actor: Actor, email: unknown) {
 const REPLAY_WINDOW_MS = 5 * 60_000;
 
 /**
- * Runs a command under a key derived from the call itself, because the bot sends no Idempotency-Key.
- * The stored hash covers expectedVersion, so the same words after the lead changed conflict with
- * the first call: within a few minutes that is a retry and gets the first result back; later it is
- * a new intent and runs under a key that includes the current version.
+ * The bot sends no Idempotency-Key, so the key comes from the call itself. The same call by the same
+ * person within a few minutes is a retry and gets the first result back. Later it is a new intent
+ * (another activity, or a proposal again after a rejection) and runs under a fresh key. The first
+ * call uses a fixed suffix so two identical calls arriving together still write once.
  */
-async function command(db: D1Database, actor: Actor, tool: string, args: Args, name: CommandName, input: Json, version: number | null) {
-  const key1 = `mcp:${await sha256(tool + canonicalJson(args))}`;
-  const first = await runCommand(db, actor, name, input, key1);
-  if (first.ok || first.error.code !== 'IDEMPOTENCY_CONFLICT') return first;
-  const stored = await db.prepare('SELECT created_at, result_json FROM idempotency_key WHERE actor_user_id = ? AND key = ?')
-    .bind(actor.id, key1).first<{ created_at: string; result_json: string }>();
-  if (stored && Date.now() - Date.parse(stored.created_at) < REPLAY_WINDOW_MS) return JSON.parse(stored.result_json) as ApiResult<unknown>;
-  const key2 = `mcp:${await sha256(`${tool}${canonicalJson(args)}:${version ?? ''}`)}`;
-  return runCommand(db, actor, name, input, key2);
+async function command(db: D1Database, actor: Actor, tool: string, args: Args, name: CommandName, input: Json) {
+  const base = `mcp:${await sha256(tool + canonicalJson(args))}:`;
+  // ';' sorts right after ':', so this range is every key with the prefix and stays on the primary key index.
+  const recent = await db.prepare(`SELECT key, created_at, result_json FROM idempotency_key
+    WHERE actor_user_id = ? AND key >= ? AND key < ? ORDER BY created_at DESC LIMIT 1`)
+    .bind(actor.id, base, `${base.slice(0, -1)};`).first<{ key: string; created_at: string; result_json: string }>();
+  if (recent && Date.now() - Date.parse(recent.created_at) < REPLAY_WINDOW_MS) return JSON.parse(recent.result_json) as ApiResult<unknown>;
+  const key = `${base}${recent ? Date.now() : 0}`;
+  const result = await runCommand(db, actor, name, input, key);
+  if (result.ok || result.error.code !== 'IDEMPOTENCY_CONFLICT') return result;
+  // A concurrent identical call won the key with a different expectedVersion: return its result.
+  const winner = await db.prepare('SELECT result_json FROM idempotency_key WHERE actor_user_id = ? AND key = ?').bind(actor.id, key).first<{ result_json: string }>();
+  return winner ? JSON.parse(winner.result_json) as ApiResult<unknown> : result;
 }
-
 async function writeTool(db: D1Database, actor: Actor, name: string, args: Args): Promise<ApiResult<unknown>> {
   if (name === 'create_lead') {
     let departmentId: string | undefined;
@@ -124,7 +127,7 @@ async function writeTool(db: D1Database, actor: Actor, name: string, args: Args)
       contactName: args.contact_name, phone: args.phone, email: args.email, companyName: args.company_name, taxCode: args.tax_code,
       source: args.source, needSummary: args.need_summary, confirmNotDuplicate: args.confirm_not_duplicate,
       nextAction: toNextAction(args.next_action), departmentId,
-    }, null);
+    });
   }
   if (name === 'complete_task') {
     const scope = leadScope(actor);
@@ -135,28 +138,29 @@ async function writeTool(db: D1Database, actor: Actor, name: string, args: Args)
     if (!task) return fail('NOT_FOUND', 'Không tìm thấy việc trong phạm vi của bạn');
     return command(db, actor, name, args, 'completeTask', {
       taskId: task.id, expectedVersion: task.version, outcome: args.outcome, nextAction: toNextAction(args.next_action),
-    }, task.version);
+    });
   }
 
   const lead = await leadByCode(db, actor, args.lead_code);
   if (!lead) return notFound();
   const target = { leadId: lead.id, expectedVersion: lead.version };
   if (name === 'log_activity') {
-    return command(db, actor, name, args, 'logActivity', { ...target, type: args.type, summary: args.summary, occurredAt: args.occurred_at }, lead.version);
+    return command(db, actor, name, args, 'logActivity', { ...target, type: args.type, summary: args.summary, occurredAt: args.occurred_at });
   }
   if (name === 'change_stage') {
     return command(db, actor, name, args, 'changeStage', {
       ...target, toStage: args.to_stage, lostReason: args.lost_reason, lostNote: args.lost_note, wonValue: args.won_value, wonNote: args.won_note,
-    }, lead.version);
+    });
   }
   if (name === 'assign_lead') {
     const ownerUserId = await userIdByEmail(db, actor, args.owner_email);
     if (!ownerUserId) return fail('VALIDATION_FAILED', 'Không tìm thấy người nhận theo email');
-    return command(db, actor, name, args, 'assignLead', { ...target, ownerUserId, nextAction: toNextAction(args.next_action) }, lead.version);
+    return command(db, actor, name, args, 'assignLead', { ...target, ownerUserId, nextAction: toNextAction(args.next_action) });
   }
   const toUserId = await userIdByEmail(db, actor, args.new_owner_email);
   if (!toUserId) return fail('VALIDATION_FAILED', 'Không tìm thấy người nhận theo email');
-  return command(db, actor, name, args, 'requestOwnerChange', { ...target, toUserId, reason: args.reason }, lead.version);
+  const requested = await command(db, actor, name, args, 'requestOwnerChange', { ...target, toUserId, reason: args.reason });
+  return requested.ok ? { ok: true, data: { status: 'pending_approval', kind: 'owner_change', ...(requested.data as Json) } } : requested;
 }
 
 async function readTool(db: D1Database, actor: Actor, name: string, args: Args): Promise<ApiResult<unknown>> {

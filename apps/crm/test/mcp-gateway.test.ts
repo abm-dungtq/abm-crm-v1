@@ -141,6 +141,25 @@ describe('write', () => {
     expect((await lead('lead-04')).stage).toBe('qualified');
   });
 
+  test('after a rejection the same proposal can be made again later', async () => {
+    const args = { lead_code: 'L-0004', to_stage: 'qualified' };
+    const first = await tool('u-lan', 'change_stage', args);
+    const approval = await approvalFor('lead-04', 'agent_stage_change');
+    expect((await web('u-hung', 'decideApproval', { approvalId: approval.id, expectedVersion: approval.version, decision: 'reject' })).status).toBe(200);
+    expect((await tool('u-lan', 'change_stage', args)).data.approvalId).toBe(first.data.approvalId);
+    await db.prepare("UPDATE idempotency_key SET created_at = ? WHERE actor_user_id = 'u-lan'").bind(new Date(Date.now() - 10 * 60_000).toISOString()).run();
+    const again = await tool('u-lan', 'change_stage', args);
+    expect(again.data.status).toBe('pending_approval');
+    expect(again.data.approvalId).not.toBe(first.data.approvalId);
+    expect((await approvalFor('lead-04', 'agent_stage_change')).id).toBe(again.data.approvalId);
+  });
+
+  test('an owner change request through the bot reads as pending approval', async () => {
+    const res = await tool('u-lan', 'request_owner_change', { lead_code: 'L-0004', new_owner_email: 'long@demo.abm.example', reason: 'Khách ở khu vực anh Long' });
+    expect(res.data).toMatchObject({ status: 'pending_approval', kind: 'owner_change', message: 'Đã tạo yêu cầu, Leader sẽ được báo qua Lark' });
+    expect(await approvalFor('lead-04', 'owner_change')).not.toBeNull();
+  });
+
   test('an impossible stage proposal is refused instead of queued', async () => {
     const res = await tool('u-lan', 'change_stage', { lead_code: 'L-0004', to_stage: 'won', won_value: 1, won_note: 'x' });
     expect(res.data.code).toBe('VALIDATION_FAILED');

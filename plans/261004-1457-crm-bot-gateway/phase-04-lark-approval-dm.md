@@ -19,7 +19,8 @@ Khi có yêu cầu duyệt Won/Lost (`agent_stage_change` có `toStage` là `won
 
 - Modify: `apps/crm/src/worker/lark.ts`. Tách hàm lấy tenant token dùng chung, thêm `sendText(env, openId, text)`.
 - Create: `apps/crm/src/worker/approval-notify.ts`. Chứa `approvalNeedsLeaderDm`, `leaderRecipients`, `deliverApprovalDm(env, outboxId)`.
-- Modify: `apps/crm/src/worker/commands.ts`. Phát `tx.event('approval.requested', …)` khi tạo approval cần nhắn.
+- Modify: `apps/crm/src/worker/commands.ts`. Thêm `requesterId` vào payload sự kiện `approval.requested` đã có.
+- Không cần migration mới: cột `attempts`, `last_error`, `sent_at` của `outbox` đã có từ `0004_agent_gateway.sql`.
 - Modify: `apps/crm/src/worker/index.ts` và `mcp-routes.ts`. Sau khi lệnh thành công, gọi `waitUntil` để gửi.
 - Modify: `apps/crm/src/worker/admin-routes.ts`. Thêm `POST /admin/outbox/:id/resend` để Admin gửi lại tin lỗi.
 - Create test: `apps/crm/test/approval-notify.test.ts`.
@@ -76,16 +77,16 @@ Khi có yêu cầu duyệt Won/Lost (`agent_stage_change` có `toStage` là `won
 
 ### Task 4.3 — Phát sự kiện trong cùng giao dịch
 
-- Goal: mỗi approval cần nhắn có đúng một dòng `outbox` ghi cùng batch.
+- Goal: mỗi approval có đúng một dòng `outbox` `approval.requested` ghi cùng batch. Sự kiện giữ nguyên cho **mọi** approval (đã có từ trước, kể cả đổi stage thường); việc lọc ai cần nhắn nằm ở bước gửi.
 - Target: `commands.ts`. Sửa ở handler đề xuất (phase 03) và ở `requestOwnerChange`.
 - Steps:
-  1. Sau khi insert approval, nếu `approvalNeedsLeaderDm` trả true thì gọi:
+  1. `requestOwnerChange` và `propose` đã phát `approval.requested` (phase 03). Chỉ bổ sung `requesterId: actor.id` (và `toStage` cho owner_change là `null`) vào payload, không phát thêm sự kiện:
 
      ```ts
      tx.event('approval.requested', { approvalId, leadId, kind, toStage, requesterId: actor.id })
      ```
 
-  2. Nếu handler đã phát sự kiện cùng tên, không phát thêm. Kiểm bằng cách grep `approval.requested` trước khi sửa.
+  2. Callback ở Task 4.4 chỉ gửi khi `approvalNeedsLeaderDm` đúng. `deliverApprovalDm` gặp approval không cần nhắn thì đặt `status='skipped'` và không gọi Lark.
 - Success criteria: test ở Task 4.5 xanh.
 - Verify: no verification needed (Task 4.5).
 
@@ -124,7 +125,7 @@ Khi có yêu cầu duyệt Won/Lost (`agent_stage_change` có `toStage` là `won
      - có outbox `approval.requested`;
      - `deliverApprovalDm` gọi fetch tới `/im/v1/messages` đúng `receive_id` của Leader;
      - outbox thành `sent`.
-  2. Sale đổi stage thường qua bot: **không** có outbox `approval.requested`.
+  2. Sale đổi stage thường qua bot: có outbox `approval.requested` nhưng **không** gọi fetch tới Lark; gọi thẳng `deliverApprovalDm` thì outbox thành `skipped`.
   3. Leader tự yêu cầu giao lead: không có người nhận (chính Leader bị loại), outbox thành `no_recipient`.
   4. Lark trả HTTP 500:
      - approval vẫn `pending`;

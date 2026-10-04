@@ -159,6 +159,13 @@ GoClaw gọi `POST /api/mcp` (MCP Streamable HTTP, JSON-RPC) bằng Bearer token
 - Verify: `pnpm -F @abm/crm test` exit 0, output không chứa `failed`; `pnpm -F @abm/crm typecheck` exit 0; `pnpm -F @abm/crm build` exit 0.
 - Commit: `feat(crm): add MCP gateway for chat agents`.
 
+## Ghi chú khi thực hiện
+
+- `search_leads` thêm một truy vấn `contact_point` theo id lead đã lọc phạm vi, vì danh sách lead không có SĐT/email.
+- Web Admin tạo lead không gửi `departmentId` thì vẫn rơi vào phòng ban đầu tiên, vì form web chưa có ô chọn phòng ban. Bot bắt buộc ghi phòng ban. Việc tồn: thêm ô chọn phòng ban cho Admin/BGĐ trên web.
+- Idempotency của bot đổi sau review: cùng người, cùng công cụ, cùng tham số trong 5 phút trả lại kết quả lần đầu; quá 5 phút là ý định mới với khóa mới. Lý do: khóa theo version khiến gọi lặp sau khi lead đổi bị ghi trùng, và đề xuất bị từ chối không tạo lại được.
+- `request_owner_change` qua bot trả `status: 'pending_approval'` kèm câu thông báo.
+
 ## Failure Protocol
 
 If any Verify step does not meet its stated pass condition, STOP this phase.
