@@ -1,0 +1,35 @@
+{
+  "name": "@abm/crm",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:api": "wrangler dev --port 8787",
+    "build": "vite build",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.worker.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "db:migrate:local": "wrangler d1 migrations apply abm-crm-eval --local",
+    "db:seed:local": "wrangler d1 execute abm-crm-eval --local --file seed/demo.sql",
+    "deploy": "vite build && wrangler deploy"
+  },
+  "dependencies": {
+    "@abm/contracts": "workspace:*",
+    "@tanstack/react-query": "^5.90.0",
+    "@tanstack/react-router": "^1.130.0",
+    "hono": "^4.13.12",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.3.6",
+    "@cloudflare/workers-types": "5.20261003.1",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "typescript": "7.0.2",
+    "vite": "^7.1.0",
+    "vitest": "4.1.11",
+    "wrangler": "4.147.0"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "abm-crm-eval",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-10-03",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "vars": {
+    // Evaluation build only: lets the viewer pick a synthetic user. Never set on a real deployment.
+    "DEMO_MODE": "1"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "abm-crm-eval",
+      "database_id": "ecf247ae-bb5e-431a-85a1-bca9b21f7507",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "observability": { "enabled": true }
+}
