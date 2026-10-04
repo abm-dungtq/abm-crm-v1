@@ -1,6 +1,6 @@
 ---
 title: Dashboard "Toàn cảnh" cho Admin và Giám đốc
-status: in-progress
+status: completed
 created: 2026-10-04
 mode: advice
 contract: ../reports/brainstorm-261004-1620-executive-overview-dashboard.md
@@ -18,7 +18,7 @@ Kế hoạch này viết để giao cho một executor yếu hơn. Mỗi phase c
 |---|---|---|---|
 | 01 | [API `/api/overview` + KPI + kanban + chờ duyệt + bot/Lark](phase-01-overview-api-and-kanban.md) | completed | — |
 | 02 | [Ma trận nhiệt, khối lượng Sale, nguồn lead, audit gần đây, lọc lead theo phòng ban](phase-02-heat-matrix-and-panels.md) | completed | 01 |
-| 03 | [Deploy lên eval (cần user đồng ý)](phase-03-deploy-eval.md) | pending | 02 |
+| 03 | [Deploy lên eval (cần user đồng ý)](phase-03-deploy-eval.md) | completed | 02 |
 
 ## Acceptance criteria
 
@@ -48,3 +48,4 @@ Kế hoạch này viết để giao cho một executor yếu hơn. Mỗi phase c
 
 - 202/202 test, typecheck và build đều qua sau phase 02.
 - Chưa kiểm bằng mắt ở 375px: có hai trình duyệt Chrome cùng kết nối, phải hỏi user chọn một, nên bước này bỏ qua để không chặn chế độ tự chạy. Bảng kanban và ma trận đều nằm trong vùng tự cuộn (`.board`, `.table-wrap`).
+- 2026-10-04 16:5x: user đồng ý deploy; version `f0d43639-d8d7-47a3-bf1d-adcc74dd401f`. `/api/health` 200, `/api/overview` chưa đăng nhập 401, `/overview` 200, `/api/mcp` không chìa khóa 401.

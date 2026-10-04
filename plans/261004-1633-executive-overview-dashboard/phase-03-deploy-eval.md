@@ -1,7 +1,7 @@
 ---
 phase: 3
 title: Deploy lên eval
-status: pending
+status: completed
 depends_on: [2]
 ---
 
