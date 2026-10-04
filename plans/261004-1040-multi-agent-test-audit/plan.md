@@ -41,7 +41,7 @@ Sửa lỗi sản phẩm; refactor; đổi CI; deploy; tối ưu test suite.
 | # | Phase | Runtime | Phụ thuộc | Ghi được | Trạng thái |
 |---|---|---|---|---|---|
 | 01 | [Đúng nghiệp vụ và API](phase-01-domain-api-correctness.md) | claude | — | `apps/crm/test/domain-*.test.ts`, báo cáo 01 | completed |
-| 02 | [Bảo mật, toàn vẹn dữ liệu, đồng thời](phase-02-security-data-integrity.md) | codex | — | `apps/crm/test/security-*.test.ts`, báo cáo 02 | pending |
+| 02 | [Bảo mật, toàn vẹn dữ liệu, đồng thời](phase-02-security-data-integrity.md) | codex | — | `apps/crm/test/security-*.test.ts`, báo cáo 02 | completed |
 | 03 | [Giao diện, E2E, khả năng tiếp cận](phase-03-ui-e2e-accessibility.md) | antigravity | — | báo cáo 03 | pending |
 | 04 | [Đối chiếu chéo và hợp nhất](phase-04-cross-verify-consolidate.md) | claude | 01, 02, 03 | báo cáo tổng hợp | pending |
 

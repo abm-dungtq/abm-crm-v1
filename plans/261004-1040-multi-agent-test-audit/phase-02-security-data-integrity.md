@@ -1,7 +1,7 @@
 ---
 phase: 2
 title: "Bảo mật, toàn vẹn dữ liệu, đồng thời"
-status: pending
+status: completed
 priority: P1
 runtime: codex
 dependencies: []
