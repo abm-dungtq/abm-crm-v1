@@ -1,7 +1,7 @@
 ---
 phase: 3
 title: Review giao diện web
-status: pending
+status: completed
 runtime: antigravity
 ---
 

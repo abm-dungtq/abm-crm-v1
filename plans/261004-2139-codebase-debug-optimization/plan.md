@@ -17,7 +17,7 @@ phương án tối ưu. Orca điều phối; coordinator chỉ giao việc, ki�
 |---|---|---|---|---|
 | 01 | [Chạy test, typecheck, build và debug lỗi (ak-test)](phase-01-test-and-debug.md) | codex | — | completed |
 | 02 | [Review worker/API và contracts (ak-code-review)](phase-02-review-worker-api.md) | grok | — | pending |
-| 03 | [Review giao diện web (ak-code-review)](phase-03-review-web-ui.md) | antigravity | — | pending |
+| 03 | [Review giao diện web (ak-code-review)](phase-03-review-web-ui.md) | antigravity | — | completed |
 | 04 | [Sửa lỗi đã xác nhận kèm test hồi quy](phase-04-fix-confirmed-bugs.md) | codex | 01, 02, 03 | pending |
 | 05 | [Phương án tối ưu codebase](phase-05-optimization-proposal.md) | antigravity | 01, 02, 03 | pending |
 
