@@ -1,7 +1,7 @@
 ---
 phase: 5
 title: Phương án tối ưu codebase
-status: pending
+status: completed
 runtime: antigravity
 depends_on: [1, 2, 3]
 ---
