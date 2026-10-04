@@ -44,6 +44,7 @@ Claude không tự gửi tin lên Lark và không bao giờ in token, secret hay
      - `… LARK_APP_SECRET`
 
      Giá trị lấy từ app của bot DungTQ_Agent.
+     Leader nhận tin phải nằm trong phạm vi sử dụng (availability) của app Lark, nếu không `sendText` vẫn lỗi dù đủ scope.
   2. Nhắc user cấp scope cho app Lark rồi phát hành phiên bản app:
      - `contact:user.id:readonly`, hoặc scope tra ID theo email;
      - `im:message:send_as_bot`.
@@ -73,10 +74,11 @@ Claude không tự gửi tin lên Lark và không bao giờ in token, secret hay
 
      ```powershell
      npx wrangler d1 execute abm-crm-eval --remote --command "SELECT (SELECT COUNT(*) FROM approval) a, (SELECT COUNT(*) FROM outbox) o"
+     npx wrangler d1 execute abm-crm-eval --remote --command "SELECT status, COUNT(*) AS n FROM outbox GROUP BY status"
      ```
 
   3. Áp migration: `npx wrangler d1 migrations apply abm-crm-eval --remote`.
-  4. Chạy lại lệnh đếm ở bước 2. Số phải bằng trước.
+  4. Chạy lại hai lệnh đếm ở bước 2. Số phải bằng trước (dòng outbox cũ vẫn `pending`, không bị gửi).
   5. Deploy: `pnpm -F @abm/crm deploy`.
 - Success criteria:
   - `GET https://abm-crm-eval.ngulongyquan.workers.dev/api/health` trả 200;
@@ -90,7 +92,7 @@ Claude không tự gửi tin lên Lark và không bao giờ in token, secret hay
 
   in ra `401`.
 
-### Task 5.3 — Script cấp token
+### Task 5.3 — Script cấp token (viết không cần đồng ý; **chạy** ghi D1 remote và GoClaw nên cần đồng ý)
 
 - Goal: mỗi người dùng đã liên kết có một token. D1 chỉ lưu hash. GoClaw lưu token theo khóa `ou_…` (tin trong nhóm), và theo `user_id` tenant khi contact đã merge (tin riêng).
 - Target: `apps/crm/scripts/issue-agent-tokens.mjs`.
@@ -149,7 +151,7 @@ Claude không tự gửi tin lên Lark và không bao giờ in token, secret hay
   2. Xem log GoClaw dòng `mcp.pool.user.connected`, xem `user:` là `ou_…` hay khóa khác.
   3. Nếu khác `ou_…`, chạy lại script Task 5.3 cho B với `--tenant-user <khóa đó>`.
 - Success criteria: bot trả đúng tên B khi nhắn riêng.
-- Verify: log có `tool call … whoami` và D1 không có ghi mới.
+- Verify: log có `tool call … whoami` và D1 không có dòng `audit_log`/`activity` mới (`agent_token.last_used_at` được cập nhật là bình thường).
 
 ### Task 5.6 — Kịch bản trên nhóm Lark test
 

@@ -132,3 +132,17 @@ test('a Lark failure leaves the approval pending and admin can resend it', async
   const audit = await db.prepare("SELECT actor_user_id FROM audit_log WHERE command = 'resendApprovalDm'").first<{ actor_user_id: string }>();
   expect(audit!.actor_user_id).toBe('u-admin');
 });
+
+test('a request decided before the resend messages nobody', async () => {
+  fakeLark(500);
+  const res = await tool('u-lan', 'change_stage', wonArgs);
+  const failed = await requestOutbox(res.approvalId);
+  expect(failed.status).toBe('failed');
+  await db.prepare("UPDATE approval SET status = 'rejected' WHERE id = ?").bind(res.approvalId).run();
+
+  vi.restoreAllMocks();
+  const { spy } = fakeLark();
+  expect(await deliverApprovalDm(testEnv, failed.id, ORIGIN)).toBe('skipped');
+  expect(spy).not.toHaveBeenCalled();
+  expect(await requestOutbox(res.approvalId)).toMatchObject({ status: 'skipped', attempts: 1 });
+});

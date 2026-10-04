@@ -22,7 +22,7 @@ export async function leaderRecipients(db: D1Database, lead: { team_id: string |
 }
 
 interface ApprovalForDm {
-  kind: string; payload_json: string; requested_by_user_id: string | null; requested_by_kind: string;
+  kind: string; status: string; payload_json: string; requested_by_user_id: string | null; requested_by_kind: string;
   code: string; team_id: string | null; department_id: string; contact_name: string; requester: string | null;
 }
 
@@ -51,12 +51,13 @@ export async function deliverApprovalDm(env: Pick<Env, 'DB' | 'LARK_APP_ID' | 'L
   };
   try {
     const { approvalId } = JSON.parse(row.payload_json) as { approvalId: string };
-    const approval = await db.prepare(`SELECT ap.kind, ap.payload_json, ap.requested_by_user_id, ap.requested_by_kind,
+    const approval = await db.prepare(`SELECT ap.kind, ap.status, ap.payload_json, ap.requested_by_user_id, ap.requested_by_kind,
         l.code, l.team_id, l.department_id, c.display_name AS contact_name, ru.display_name AS requester
       FROM approval ap JOIN lead l ON l.id = ap.lead_id JOIN contact c ON c.id = l.contact_id
       LEFT JOIN app_user ru ON ru.id = ap.requested_by_user_id WHERE ap.id = ?`).bind(approvalId).first<ApprovalForDm>();
     const payload = approval ? JSON.parse(approval.payload_json) as { toStage?: string; toUserId?: string } : {};
-    if (!approval || !approvalNeedsLeaderDm(approval.kind, payload.toStage)) return finish('skipped', null, false);
+    // A decided request (for example an old row resent later) no longer needs anyone's attention.
+    if (!approval || approval.status !== 'pending' || !approvalNeedsLeaderDm(approval.kind, payload.toStage)) return finish('skipped', null, false);
     const recipients = await leaderRecipients(db, approval, approval.requested_by_user_id);
     if (!recipients.length) return finish('no_recipient', null, false);
     const toUserName = payload.toUserId
@@ -73,7 +74,11 @@ export async function deliverApprovalDm(env: Pick<Env, 'DB' | 'LARK_APP_ID' | 'L
     }
     return finish(errors.length ? 'failed' : 'sent', errors.join('; ') || null);
   } catch (error) {
-    return finish('failed', error instanceof LarkError ? error.message : 'Lỗi khi chuẩn bị tin nhắn');
+    try {
+      return await finish('failed', error instanceof LarkError ? error.message : 'Lỗi khi chuẩn bị tin nhắn');
+    } catch {
+      return 'failed';
+    }
   }
 }
 
