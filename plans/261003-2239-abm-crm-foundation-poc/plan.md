@@ -1,7 +1,7 @@
 ---
 title: "ABM Agentic CRM — Foundation (MVP0) và PoC"
 description: "Chốt decision pack, ERD, ADR, ma trận quyền và chứng minh D1, danh tính GoClaw/Lark, MISA trước khi xây MVP1."
-status: pending
+status: in-progress
 priority: P1
 effort: "3-4 tuần"
 branch: main
@@ -38,13 +38,13 @@ Không xây tính năng MVP1 cho người dùng thật; không deploy production
 
 | # | Phase | Pha | Phụ thuộc | Trạng thái |
 |---|---|---|---|---|
-| 01 | [Khởi tạo repo và workspace](phase-01-repo-workspace-bootstrap.md) | A | — | pending |
-| 02 | [Decision pack mục 43 PRD](phase-02-business-decision-pack.md) | A | 01 | pending |
-| 03 | [ERD v1 và state model](phase-03-erd-state-model.md) | A | 02 | pending |
-| 04 | [ADR và ma trận quyền/rủi ro](phase-04-adr-policy-matrices.md) | A | 02, 03 | pending |
-| 05 | [PoC D1 guarded write, concurrency, restore](phase-05-poc-d1-guarded-write.md) | B | 01, 04 (ADR-003 draft) | pending |
-| 06 | [PoC GoClaw + Lark identity, kill switch, GoClaw down](phase-06-poc-goclaw-lark-identity.md) | B | 01, 04 (ADR-002/004 draft) | pending |
-| 07 | [PoC MISA coverage (song song, không chặn)](phase-07-poc-misa-coverage.md) | B | 02 | pending |
+| 01 | [Khởi tạo repo và workspace](phase-01-repo-workspace-bootstrap.md) | A | — | completed |
+| 02 | [Decision pack mục 43 PRD](phase-02-business-decision-pack.md) | A | 01 | completed |
+| 03 | [ERD v1 và state model](phase-03-erd-state-model.md) | A | 02 | completed |
+| 04 | [ADR và ma trận quyền/rủi ro](phase-04-adr-policy-matrices.md) | A | 02, 03 | completed |
+| 05 | [PoC D1 guarded write, concurrency, restore](phase-05-poc-d1-guarded-write.md) | B | 01, 04 (ADR-003 draft) | completed |
+| 06 | [PoC GoClaw + Lark identity, kill switch, GoClaw down](phase-06-poc-goclaw-lark-identity.md) | B | 01, 04 (ADR-002/004 draft) | in-progress (local PASS, live chờ user) |
+| 07 | [PoC MISA coverage (song song, không chặn)](phase-07-poc-misa-coverage.md) | B | 02 | waiting (chờ kế toán) |
 | 08 | [MVP0 exit gate, runbook GoClaw, tài sản đào tạo](phase-08-mvp0-exit-gate.md) | A+B | 02–07 | pending |
 
 Phase 05, 06, 07 chạy song song được; file ownership tách theo thư mục `poc/d1-guard/`, `poc/goclaw-identity/`, `docs/integrations/misa/`.

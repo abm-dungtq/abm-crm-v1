@@ -5,7 +5,7 @@
 - Coordinator/advisor: Claude Opus 5.5 (terminal Orca hiện tại). Quyền duyệt chất lượng phase và trả lời câu hỏi worker dựa trên docs đã có.
 - Worker: Codex `gpt-6.1-sol`, effort `medium`, `--worktree current` (D:/TQD/CRM, nhánh main).
 - Phạm vi: phase 01 → 07. Phase 08 không nằm trong lượt này.
-- Run ID: (ghi sau run-create)
+- Run ID: run_f74b66bd0da4
 
 ## Thứ tự thực thi
 
@@ -34,16 +34,19 @@ Tối đa 2 worker song song; file ownership tách theo thư mục.
 
 ## Trạng thái phase
 
-| Phase | Task ID | Dispatch | Kết quả | Commit |
-|---|---|---|---|---|
-| 01 | | | pending | |
-| 02 | | | pending | |
-| 03 | | | pending | |
-| 04 | | | pending | |
-| 05 | | | pending | |
-| 06 | | | pending | |
-| 07 | | | pending | |
+| Phase | Task ID | Kết quả | Commit |
+|---|---|---|---|
+| 01 | task_d17c7a265f11 | PASS | 0d2b7c7 |
+| 02 | task_8327412750e8 | PASS, user duyệt 2026-10-03 | 11cfbbd |
+| 03 | task_d40cea11b4bd | PASS, user duyệt 2026-10-03 | 117e461 |
+| 04 | task_726794bef62a | PASS; ADR-001/005 accepted | da25460 |
+| 05 | task_c9a06e2e470e | PASS remote (race 20/20, restore ~5s); ADR-003 accepted; tài nguyên PoC đã xóa | 0d847e9 |
+| 06 | task_a12757e5441c | Local PASS (8 test); 6.3–6.7 live chờ user; ADR-002/004 proposed | 8889c74 |
+| 07 | task_46b3e7e3a8cf | Docs PASS; kết luận chờ kế toán | eb584b9 |
 
+Ghi chú vận hành: pnpm 12 cần `allowBuilds` cho esbuild/workerd; test dùng Vitest 4.1.11 + `@cloudflare/vitest-plugin` 1.3.6 (lệch ADR-001, cần cập nhật ADR-001). Worker Orca chết khi phiên điều phối khởi động lại; Codex có lúc chặn khởi động bằng màn hình duyệt hooks.
 ## Câu hỏi đang chờ user
 
-(trống)
+- Phase 06 live: chọn buổi làm cùng user (backup GoClaw, nhóm Lark CRM-PoC, merge contact, credential, downtime).
+- Phase 07: 5 câu hỏi kế toán trong docs/integrations/misa/misa-coverage-v1.md.
+- Danh sách phòng ban/Leader (trước plan MVP1) và sản phẩm mẫu (trước MVP2).
