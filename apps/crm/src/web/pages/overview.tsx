@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { keepPreviousData } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { sourceLabel, stageLabel } from '@abm/contracts';
 import { useActor } from '../actor-context';
@@ -28,7 +29,7 @@ export function OverviewPage() {
   const allowed = actor.role === 'admin' || actor.role === 'director';
   const [period, setPeriod] = useState<OverviewPeriod>('month');
   const [department, setDepartment] = useState('');
-  const q = useApi<Overview>(allowed ? `/overview?period=${period}${department ? `&department=${encodeURIComponent(department)}` : ''}` : null);
+  const q = useApi<Overview>(allowed ? `/overview?period=${period}${department ? `&department=${encodeURIComponent(department)}` : ''}` : null, { placeholderData: keepPreviousData });
   if (!allowed) return <Alert tone="warn">Chỉ Admin và Giám đốc xem trang này.</Alert>;
 
   return (
@@ -212,7 +213,7 @@ function HeatMatrix({ data }: { data: Overview }) {
   const rows: OverviewMatrixRow[] = byTeam ? data.matrix.teams : data.matrix.departments;
   return (
     <section className="card" aria-labelledby="ov-heat-h" style={{ marginTop: 16 }}>
-      <div className="card-head">
+      <div className="card-head" style={{ flexWrap: 'wrap' }}>
         <h2 id="ov-heat-h">Bản đồ nhiệt lead đang mở</h2><span className="spacer" />
         <div className="row" role="group" aria-label="Nhóm theo">
           <button type="button" className="chip" aria-pressed={!byTeam} onClick={() => setByTeam(false)}>Theo phòng ban</button>

@@ -38,7 +38,7 @@ Mọi vai trò khác nhận 403.
   period: { key: 'month' | 'quarter' | 'year'; start: string /* YYYY-MM-DD, Saigon */ };
   departments: { id: string; name: string }[];          // mọi phòng ban của tổ chức, xếp theo tên
   departmentId: string | null;                          // bộ lọc đang áp dụng
-  truncated: { shown: number; total: number } | null;   // khác null khi số lead bị cắt ở giới hạn 2000
+  truncated: { shown: number; total: number } | null;   // khác null khi số lead bị cắt ở giới hạn 1000
   kpi: {
     openLeads: number; pipelineValue: number; queueLeads: number;
     wonCount: number; wonValue: number; lostCount: number; lostValue: number;
@@ -115,7 +115,7 @@ type OverviewCard = { id: string; code: string; title: string /* tên account, n
      - từng stage active;
      - `won`, `lost`;
      - các KPI tương ứng.
-  4. Thẻ và rủi ro: `${LEAD_SELECT} WHERE <scope> AND (l.status IN ('queue','active') OR l.closed_at >= ?) ORDER BY l.updated_at DESC LIMIT 2000`, map qua `toLeadItem(row, now)`. `total` = tổng `n` ở bước 3. Nếu `total > rows.length` thì đặt `truncated = { shown, total }`.
+  4. Thẻ và rủi ro: `${LEAD_SELECT} WHERE <scope> AND (l.status IN ('queue','active') OR l.closed_at >= ?) ORDER BY l.updated_at DESC LIMIT 1000`, map qua `toLeadItem(row, now)`. `total` = tổng `n` ở bước 3. Nếu `total > rows.length` thì đặt `truncated = { shown, total }`.
   5. Với mỗi cột:
      - `atRisk` = số lead có `needsAttention`, chỉ tính cho lead active;
      - `leads` = sắp lead rủi ro lên trước, giữ thứ tự `updated_at`, lấy 8 lead đầu, map sang `OverviewCard`.

@@ -7,7 +7,7 @@ import { leadScope } from './scope';
 export const canSeeOverview = (actor: Actor) => actor.role === 'admin' || actor.role === 'director';
 
 type PeriodKey = 'month' | 'quarter' | 'year';
-const LEAD_LIMIT = 2000;
+const LEAD_LIMIT = 1000;
 const CARDS_PER_COLUMN = 8;
 
 /** Start of the month, quarter or year to date on the Vietnam calendar. */
@@ -90,13 +90,11 @@ export async function overviewData(db: D1Database, actor: Actor, opts: { period?
   const column = (key: 'queue' | StageCode, match: (s: { status: string; stage: string }) => boolean) => {
     const items = leads.filter(match);
     const closed = key === 'won' || key === 'lost';
+    const cards = items.map(toCard);
     const ordered = closed
-      ? [...items].sort((a, b) => (b.closedAt ?? '').localeCompare(a.closedAt ?? ''))
-      : [...items.filter((l) => toCard(l).risk), ...items.filter((l) => !toCard(l).risk)];
-    return {
-      key, ...tally(match), atRisk: items.filter((l) => l.status === 'active' && needsAttention(l)).length,
-      leads: ordered.slice(0, CARDS_PER_COLUMN).map(toCard),
-    };
+      ? cards.sort((a, b) => (b.closedAt ?? '').localeCompare(a.closedAt ?? ''))
+      : [...cards.filter((c) => c.risk), ...cards.filter((c) => !c.risk)];
+    return { key, ...tally(match), atRisk: cards.filter((c) => c.risk).length, leads: ordered.slice(0, CARDS_PER_COLUMN) };
   };
   const columns = [
     column('queue', (l) => l.status === 'queue'),
