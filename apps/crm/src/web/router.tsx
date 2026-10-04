@@ -1,4 +1,4 @@
-import { Outlet, createRootRoute, createRoute, createRouter } from '@tanstack/react-router';
+import { Outlet, createRootRoute, createRoute, createRouter, type ErrorComponentProps } from '@tanstack/react-router';
 import { ActorContext } from './actor-context';
 import { ApiFailure, currentDemoUser, useApi, useAuthMode } from './api';
 import { RolePicker, Shell } from './components/layout';
@@ -53,8 +53,16 @@ function DemoRoot() {
   );
 }
 
+function RootError({ reset }: ErrorComponentProps) {
+  return <div className="content"><Alert tone="danger">Không thể hiển thị trang. Thử lại hoặc tải lại trang để tiếp tục.</Alert>
+    <button className="btn" onClick={reset}>Thử lại</button>
+    <button className="btn" onClick={() => window.location.reload()}>Tải lại trang</button>
+  </div>;
+}
+
 const rootRoute = createRootRoute({
   component: Root,
+  errorComponent: RootError,
   notFoundComponent: () => <div className="empty"><strong>Không tìm thấy trang</strong></div>,
 });
 

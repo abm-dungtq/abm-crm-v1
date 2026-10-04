@@ -3,7 +3,7 @@ import { lostReasonLabel, stageLabel } from '@abm/contracts';
 import { useActor } from '../actor-context';
 import { useApi } from '../api';
 import { SCOPE_LABEL } from '../components/layout';
-import { Avatar, Badge, Empty, ErrorState, HealthBadges, Kpi, Loading, StageBadge } from '../components/ui';
+import { Alert, Avatar, Badge, Empty, ErrorState, HealthBadges, Kpi, Loading, StageBadge } from '../components/ui';
 import { fmtDue, fmtMoney } from '../format';
 import type { Dashboard } from '../types';
 
@@ -30,15 +30,20 @@ export function DashboardPage() {
 
 function DashboardBody({ data, isSale, canQueue }: { data: Dashboard; isSale: boolean; canQueue: boolean }) {
   const { kpi } = data;
+  const partialHealth = Boolean(data.truncated.leads);
   const maxCount = Math.max(1, ...data.pipeline.map((p) => p.count));
   return (
     <>
+      {(data.truncated.leads || data.truncated.tasks || data.truncated.attention || data.truncated.upcoming) && <Alert tone="warn">
+        Danh sách cần xử lý và việc sắp tới chỉ hiển thị một phần. Số đếm lead, giá trị và việc được tính toàn bộ trong phạm vi của bạn.
+        {partialHealth && ' Số trễ liên hệ lần đầu và quá SLA là số tối thiểu trên 500 lead gần nhất, kể cả cột Quá SLA theo Sale.'}
+      </Alert>}
       <div className="kpis">
         <Kpi label={isSale ? 'Lead đang mở của tôi' : 'Lead đang mở'} value={kpi.activeLeads} note={`Pipeline ${fmtMoney(kpi.pipelineValue)}`} to="/leads" />
         <Kpi label="Việc hôm nay" value={kpi.tasksToday} to="/tasks" />
         <Kpi label="Việc quá hạn" value={kpi.overdueTasks} tone={kpi.overdueTasks ? 'danger' : undefined} to="/tasks" />
-        <Kpi label="Trễ liên hệ lần đầu" value={kpi.firstContactBreaches} note="SLA 4 giờ làm việc" tone={kpi.firstContactBreaches ? 'danger' : undefined} />
-        <Kpi label="Quá SLA stage" value={kpi.staleLeads} tone={kpi.staleLeads ? 'warn' : undefined} />
+        <Kpi label="Trễ liên hệ lần đầu" value={`${partialHealth ? '≥ ' : ''}${kpi.firstContactBreaches}`} note="SLA 4 giờ làm việc" tone={kpi.firstContactBreaches ? 'danger' : undefined} />
+        <Kpi label="Quá SLA stage" value={`${partialHealth ? '≥ ' : ''}${kpi.staleLeads}`} tone={kpi.staleLeads ? 'warn' : undefined} />
         {canQueue && <Kpi label="Hàng chờ chưa giao" value={kpi.queueLeads} tone={kpi.queueLeads ? 'warn' : undefined} to="/leads" search={{ tab: 'queue' }} />}
         <Kpi label="Won tháng này" value={kpi.wonCount} note={`${fmtMoney(kpi.wonValue)} · Lost ${kpi.lostCount}`} />
       </div>
@@ -48,7 +53,7 @@ function DashboardBody({ data, isSale, canQueue }: { data: Dashboard; isSale: bo
           <section className="card" aria-labelledby="attention-h">
             <div className="card-head"><h2 id="attention-h">Cần xử lý</h2><span className="spacer" /><Badge tone={data.attention.length ? 'danger' : 'ok'}>{data.attention.length}</Badge></div>
             {data.attention.length === 0
-              ? <Empty title="Không có lead trễ hạn" icon="check">Mọi lead đang mở đều đúng SLA và có Next Action còn hạn.</Empty>
+              ? <Empty title={partialHealth ? 'Không có lead trễ hạn trong phần đã tải' : 'Không có lead trễ hạn'} icon="check">{partialHealth ? 'Thu hẹp bộ lọc trên trang Lead để kiểm tra thêm.' : 'Mọi lead đang mở đều đúng SLA và có Next Action còn hạn.'}</Empty>
               : (
                 <ul className="list">
                   {data.attention.map((l) => (
@@ -86,7 +91,7 @@ function DashboardBody({ data, isSale, canQueue }: { data: Dashboard; isSale: bo
                         <td className="right num" data-label="Đang mở">{s.active}</td>
                         <td className="right num" data-label="Pipeline">{fmtMoney(s.value)}</td>
                         <td className="right num" data-label="Quá hạn">{s.overdue ? <Badge tone="danger">{s.overdue}</Badge> : 0}</td>
-                        <td className="right num" data-label="Quá SLA">{s.stale ? <Badge tone="warn">{s.stale}</Badge> : 0}</td>
+                        <td className="right num" data-label="Quá SLA">{partialHealth ? '≥ ' : ''}{s.stale ? <Badge tone="warn">{s.stale}</Badge> : 0}</td>
                         <td className="right num" data-label="Won / Lost">{s.won} / {s.lost}</td>
                       </tr>
                     ))}

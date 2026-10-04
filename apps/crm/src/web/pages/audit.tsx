@@ -1,14 +1,17 @@
 import { useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { useApi } from '../api';
-import { Empty, ErrorState, Loading } from '../components/ui';
+import { canViewAudit, useActor } from '../actor-context';
+import { Alert, Empty, ErrorState, Loading } from '../components/ui';
 import { fmtDateTime } from '../format';
 import type { AuditItem } from '../types';
 import { AuditDiff, commandLabel } from './lead-detail';
 
 export function AuditPage() {
-  const q = useApi<AuditItem[]>('/audit');
+  const allowed = canViewAudit(useActor().role);
+  const q = useApi<AuditItem[]>(allowed ? '/audit' : null);
   const [command, setCommand] = useState('');
+  if (!allowed) return <Alert tone="warn">Sale không có quyền xem nhật ký audit. Chỉ Leader, Trưởng phòng, Giám đốc và Admin xem trang này.</Alert>;
   const commands = [...new Set((q.data ?? []).map((a) => a.command))];
   const rows = (q.data ?? []).filter((a) => !command || a.command === command);
   return (

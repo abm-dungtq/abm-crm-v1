@@ -4,9 +4,10 @@ import { ACTIVE_STAGES, sourceLabel, stageLabel } from '@abm/contracts';
 import { useActor } from '../actor-context';
 import { useApi } from '../api';
 import { AssignDialog } from '../components/lead-actions';
-import { Avatar, Empty, ErrorState, HealthBadges, Loading, StageBadge } from '../components/ui';
+import { Alert, Avatar, Empty, ErrorState, HealthBadges, Loading, StageBadge } from '../components/ui';
+import { leadListPath } from '../list-query';
 import { fmtAgo, fmtDue, fmtMoney } from '../format';
-import type { LeadItem, Member } from '../types';
+import type { LeadItem, LeadPage, Member } from '../types';
 
 const TABS = [
   { id: 'active', label: 'Đang mở', status: 'active' },
@@ -27,16 +28,11 @@ export function LeadsPage() {
     return () => clearTimeout(t);
   }, [text]); // keep URL in sync with the box without a navigation per keystroke
 
-  const all = useApi<LeadItem[]>(search.department ? `/leads?department=${encodeURIComponent(search.department)}` : '/leads');
+  const all = useApi<LeadPage>(leadListPath(search));
   const members = useApi<Member[]>(actor.role === 'leader' ? '/team-members' : null);
   const [assigning, setAssigning] = useState<LeadItem | null>(null);
-  const status = TABS.find((t) => t.id === tab)?.status ?? '';
-  const needle = (search.q ?? '').toLowerCase();
-  const rows = (all.data ?? []).filter((l) =>
-    (!status || l.status === status)
-    && (!search.stage || l.stage === search.stage)
-    && (!needle || [l.code, l.contactName, l.account?.name, l.owner?.name, l.needSummary].some((v) => v?.toLowerCase().includes(needle))));
-  const countFor = (s: string) => (all.data ?? []).filter((l) => !s || l.status === s).length;
+  const rows = all.data?.items ?? [];
+  const countFor = (s: string) => all.data?.counts?.[s || 'all'] ?? '';
   const visibleTabs = TABS.filter((t) => t.id !== 'queue' || actor.role !== 'sale');
 
   return (
@@ -51,7 +47,7 @@ export function LeadsPage() {
       <div className="tabs" role="tablist" aria-label="Trạng thái lead">
         {visibleTabs.map((t) => (
           <Link key={t.id} role="tab" aria-selected={tab === t.id} to="/leads" search={(s) => ({ ...s, tab: t.id })}>
-            {t.label}<span className="count">{all.data ? countFor(t.status) : ''}</span>
+            {t.label}{all.data?.counts && <span className="count">{countFor(t.status)}</span>}
           </Link>
         ))}
       </div>
@@ -74,6 +70,7 @@ export function LeadsPage() {
         </div>
       </div>
 
+      {all.data?.truncated && <Alert tone="warn">Danh sách đã giới hạn. Hãy thu hẹp trạng thái, stage hoặc từ khóa; kết quả tìm kiếm có thể chưa bao gồm lead cũ.</Alert>}
       <div className="card">
         {all.isLoading && <div className="card-body"><Loading /></div>}
         {all.error && <div className="card-body"><ErrorState error={all.error} onRetry={() => all.refetch()} /></div>}

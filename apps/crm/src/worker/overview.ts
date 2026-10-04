@@ -2,6 +2,7 @@ import { ACTIVE_STAGES, type StageCode } from '@abm/contracts';
 import type { Actor } from './env';
 import { AUDIT_SELECT, LEAD_SELECT, needsAttention, toLeadItem, vnDate, type LeadItem, type LeadListRow } from './queries';
 import { leadScope } from './scope';
+import { AGENT_WRITES_OPEN } from './commands';
 
 /** The organization overview is for the people who run the company: Admin and the Board. */
 export const canSeeOverview = (actor: Actor) => actor.role === 'admin' || actor.role === 'director';
@@ -56,7 +57,7 @@ export async function overviewData(db: D1Database, actor: Actor, opts: { period?
       .all<{ id: string; kind: string; to_stage: string | null; requested_by_kind: 'human' | 'agent'; created_at: string; lead_id: string; lead_code: string; requester: string | null }>(),
     // Bot figures cover the whole system, whatever department is selected.
     db.prepare(`SELECT
-        COALESCE((SELECT MAX(enabled) FROM agent_kill_switch), 0) AS open,
+        (${AGENT_WRITES_OPEN}) AS open,
         (SELECT COUNT(*) FROM agent_token WHERE revoked_at IS NULL) AS tokens,
         (SELECT COUNT(*) FROM audit_log WHERE actor_kind = 'agent' AND created_at >= ?) AS today,
         (SELECT COUNT(*) FROM audit_log WHERE actor_kind = 'agent' AND created_at >= ?) AS week`)

@@ -11,7 +11,7 @@ import { runCommand } from './commands';
 import type { AppBindings } from './env';
 import {
   accountDetail, adminOverview, canReadAudit, dashboard, leadDetail, listAccounts, listApprovals,
-  listAudit, listLeads, listTasks, search, teamMembers,
+  listAudit, listLeads, leadPage, accountPage, listTasks, search, teamMembers,
 } from './queries';
 
 const STATUS: Record<string, 200 | 400 | 401 | 403 | 404 | 409 | 422> = {
@@ -58,7 +58,7 @@ app.use('*', async (c, next) => {
 
 app.get('/me', (c) => c.json(data({ ...c.get('actor'), mustChangePassword: c.get('mustChangePassword') })));
 app.get('/dashboard', async (c) => c.json(data(await dashboard(c.env.DB, c.get('actor')))));
-app.get('/leads', async (c) => c.json(data(await listLeads(c.env.DB, c.get('actor'), {
+app.get('/leads', async (c) => c.json(data(await (c.req.query('view') === 'page' ? leadPage : listLeads)(c.env.DB, c.get('actor'), {
   status: c.req.query('status') || undefined, stage: c.req.query('stage') || undefined,
   ownerId: c.req.query('owner') || undefined, q: c.req.query('q') || undefined,
   departmentId: c.req.query('department') || undefined,
@@ -68,7 +68,7 @@ app.get('/leads/:id', async (c) => {
   return detail ? c.json(data(detail)) : c.json(notFound, 404);
 });
 app.get('/tasks', async (c) => c.json(data(await listTasks(c.env.DB, c.get('actor'), c.req.query('status') === 'completed' ? 'completed' : 'open'))));
-app.get('/accounts', async (c) => c.json(data(await listAccounts(c.env.DB, c.get('actor'), c.req.query('q') || undefined))));
+app.get('/accounts', async (c) => c.json(data(await (c.req.query('view') === 'page' ? accountPage : listAccounts)(c.env.DB, c.get('actor'), c.req.query('q') || undefined))));
 app.get('/accounts/:id', async (c) => {
   const detail = await accountDetail(c.env.DB, c.get('actor'), c.req.param('id'));
   return detail ? c.json(data(detail)) : c.json(notFound, 404);

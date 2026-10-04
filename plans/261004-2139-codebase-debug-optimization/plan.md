@@ -1,6 +1,6 @@
 ---
 title: Debug codebase CRM và đề xuất tối ưu (Orca điều phối codex, grok, agy)
-status: in-progress
+status: completed
 created: 2026-10-04
 mode: orca-cook-plan
 ---
@@ -18,7 +18,7 @@ phương án tối ưu. Orca điều phối; coordinator chỉ giao việc, ki�
 | 01 | [Chạy test, typecheck, build và debug lỗi (ak-test)](phase-01-test-and-debug.md) | codex | — | completed |
 | 02 | [Review worker/API và contracts (ak-code-review)](phase-02-review-worker-api.md) | grok | — | completed |
 | 03 | [Review giao diện web (ak-code-review)](phase-03-review-web-ui.md) | antigravity | — | completed |
-| 04 | [Sửa lỗi đã xác nhận kèm test hồi quy](phase-04-fix-confirmed-bugs.md) | codex | 01, 02, 03 | pending |
+| 04 | [Sửa lỗi đã xác nhận kèm test hồi quy](phase-04-fix-confirmed-bugs.md) | codex | 01, 02, 03 | completed |
 | 05 | [Phương án tối ưu codebase](phase-05-optimization-proposal.md) | antigravity | 01, 02, 03 | completed |
 
 ## Acceptance criteria

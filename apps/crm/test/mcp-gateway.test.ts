@@ -47,6 +47,27 @@ const approvalFor = (leadId: string, kind: string) =>
 const decide = (user: string, approval: { id: string; version: number }) =>
   web(user, 'decideApproval', { approvalId: approval.id, expectedVersion: approval.version, decision: 'approve' });
 
+test('a recent MCP replay obeys a newly enabled kill switch', async () => {
+  const args = { lead_code: 'L-0004', type: 'note', summary: 'Replay after switch' };
+  expect((await tool('u-admin', 'log_activity', args)).isError).toBe(false);
+  await db.prepare('UPDATE agent_kill_switch SET enabled = 1 WHERE id = 1').run();
+  expect(await tool('u-admin', 'log_activity', args)).toMatchObject({ isError: true, data: { code: 'KILL_SWITCH_ON' } });
+});
+
+test('a recent MCP replay cannot return a lead after it leaves the actor scope', async () => {
+  const args = { lead_code: 'L-0004', type: 'note', summary: 'Replay after reassignment' };
+  expect((await tool('u-lan', 'log_activity', args)).isError).toBe(false);
+  await db.prepare("UPDATE lead SET owner_user_id = 'u-long' WHERE id = 'lead-04'").run();
+  expect(await tool('u-lan', 'log_activity', args)).toMatchObject({ isError: true, data: { code: 'NOT_FOUND' } });
+});
+
+test('agent lead detail excludes audit even when its human user can read audit', async () => {
+  await web('u-admin', 'logActivity', { leadId: 'lead-04', expectedVersion: 1, type: 'note', summary: 'Human audit' });
+  const detail = await tool('u-admin', 'get_lead', { lead_code: 'L-0004' });
+  expect(detail.isError).toBe(false);
+  expect(detail.data).not.toHaveProperty('audit');
+});
+
 describe('auth', () => {
   test('rejects calls without a valid bearer token', async () => {
     expect((await mcp(rpc('tools/list'))).status).toBe(401);

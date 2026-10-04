@@ -41,13 +41,21 @@ function messageText(a: ApprovalForDm, payload: { toStage?: string; toUserId?: s
  */
 export async function deliverApprovalDm(env: Pick<Env, 'DB' | 'LARK_APP_ID' | 'LARK_APP_SECRET'>, outboxId: string, origin: string): Promise<string | null> {
   const db = env.DB;
-  const row = await db.prepare(`SELECT payload_json FROM outbox WHERE id = ? AND event_type = 'approval.requested' AND status IN ('pending', 'failed')`)
+  const row = await db.prepare(`SELECT payload_json FROM outbox WHERE id = ? AND event_type = 'approval.requested'`)
     .bind(outboxId).first<{ payload_json: string }>();
   if (!row) return null;
+  // sent_at holds the lease start only while sending; a crashed sender can be reclaimed after five minutes.
+  const lease = new Date().toISOString();
+  const expired = new Date(Date.now() - 5 * 60_000).toISOString();
+  const claimed = await db.prepare(`UPDATE outbox SET status = 'sending', sent_at = ?
+    WHERE id = ? AND (status IN ('pending', 'failed') OR (status = 'sending' AND COALESCE(sent_at, created_at) < ?))`)
+    .bind(lease, outboxId, expired).run();
+  if (claimed.meta.changes !== 1) return null;
   const finish = async (status: string, error: string | null = null, attempted = true) => {
-    await db.prepare(`UPDATE outbox SET status = ?, last_error = ?, attempts = attempts + ?, sent_at = CASE WHEN ? = 'sent' THEN ? ELSE sent_at END WHERE id = ?`)
-      .bind(status, error, attempted ? 1 : 0, status, new Date().toISOString(), outboxId).run();
-    return status;
+    const completed = await db.prepare(`UPDATE outbox SET status = ?, last_error = ?, attempts = attempts + ?, sent_at = CASE WHEN ? = 'sent' THEN ? ELSE NULL END
+      WHERE id = ? AND status = 'sending' AND sent_at = ?`)
+      .bind(status, error, attempted ? 1 : 0, status, new Date().toISOString(), outboxId, lease).run();
+    return completed.meta.changes === 1 ? status : null;
   };
   try {
     const { approvalId } = JSON.parse(row.payload_json) as { approvalId: string };
@@ -66,6 +74,9 @@ export async function deliverApprovalDm(env: Pick<Env, 'DB' | 'LARK_APP_ID' | 'L
     const text = messageText(approval, payload, toUserName, origin);
     const errors: string[] = [];
     for (const r of recipients) {
+      const ownsLease = await db.prepare("SELECT 1 AS owned FROM outbox WHERE id = ? AND status = 'sending' AND sent_at = ?")
+        .bind(outboxId, lease).first();
+      if (!ownsLease) return null;
       try {
         await sendText(env, r.lark_open_id, text);
       } catch (error) {

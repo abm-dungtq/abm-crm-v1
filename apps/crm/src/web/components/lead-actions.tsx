@@ -4,7 +4,7 @@ import {
   type ChangeStageInput, type CompleteTaskInput, type DecideApprovalInput, type LogActivityInput, type LostReasonCode, type StageCode,
 } from '@abm/contracts';
 import { useCommand } from '../api';
-import { fmtMoney, fromLocalInput, toLocalInput } from '../format';
+import { fmtMoney, fromLocalInput, parseWonAmount, toLocalInput } from '../format';
 import type { ApprovalItem, Member } from '../types';
 import { Alert, Field, FormError, Modal, fieldErrors, useToast } from './ui';
 
@@ -102,14 +102,14 @@ export function ChangeStageDialog({ open, onClose, lead, initial }: {
   const toast = useToast();
   const errors = fieldErrors(mutation.error);
   useEffect(() => { if (open) { setTo(initial ?? options[0] ?? 'lost'); setReason(''); setNote(''); setWonValue(''); setWonNote(''); mutation.reset(); } }, [open]);
-  // Dots and spaces are thousands separators; a comma means a decimal, which đồng never has.
-  const wonAmount = wonValue.includes(',') ? 0 : Number(wonValue.replace(/[.\s]/g, ''));
+  const wonAmount = parseWonAmount(wonValue);
+  const wonValueError = wonValue.trim() && !wonAmount ? 'Nhập số nguyên đồng lớn hơn 0; dấu phân cách phải chia nhóm 3 chữ số.' : errors.wonValue;
   const wonIncomplete = to === 'won' && (!wonAmount || !wonNote.trim());
   const needsContact = lead.stage === 'new' && to === 'contacted' && !lead.firstContactAt;
   const submit = () => mutation.mutate(
     {
       leadId: lead.id, expectedVersion: lead.version, toStage: to, lostReason: reason || undefined, lostNote: note || undefined,
-      wonValue: to === 'won' ? wonAmount : undefined, wonNote: to === 'won' ? wonNote : undefined,
+      wonValue: to === 'won' ? wonAmount ?? undefined : undefined, wonNote: to === 'won' ? wonNote : undefined,
     },
     { onSuccess: () => { toast(`${lead.code}: ${stageLabel(lead.stage)} → ${stageLabel(to)}`); onClose(); } },
   );
@@ -140,9 +140,9 @@ export function ChangeStageDialog({ open, onClose, lead, initial }: {
       )}
       {to === 'won' && (
         <>
-          <Field label="Giá trị chốt (đồng)" required error={errors.wonValue} htmlFor="won-value" hint={wonAmount ? fmtMoney(wonAmount, false) : 'Số nguyên đồng, lớn hơn 0.'}>
-            <input id="won-value" type="text" inputMode="numeric" value={wonValue} placeholder="VD: 350000000" aria-invalid={Boolean(errors.wonValue)}
-              onChange={(e) => setWonValue(e.target.value.replace(/[^\d.,\s]/g, ''))} />
+          <Field label="Giá trị chốt (đồng)" required error={wonValueError} htmlFor="won-value" hint={wonAmount ? fmtMoney(wonAmount, false) : 'Số nguyên đồng, lớn hơn 0.'}>
+            <input id="won-value" type="text" inputMode="numeric" value={wonValue} placeholder="VD: 350,000,000" aria-invalid={Boolean(wonValueError)}
+              onChange={(e) => setWonValue(e.target.value)} />
           </Field>
           <Field label="Bằng chứng chốt" required error={errors.wonNote} htmlFor="won-note" hint="VD: số hợp đồng, PO, email xác nhận.">
             <textarea id="won-note" value={wonNote} onChange={(e) => setWonNote(e.target.value)} aria-invalid={Boolean(errors.wonNote)} />

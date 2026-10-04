@@ -74,7 +74,7 @@ async function replay(db: D1Database, actor: Actor, key: string, command: string
 }
 
 // A missing switch row counts as off, so an emptied table never blocks every agent write.
-const AGENT_WRITES_OPEN = 'SELECT COALESCE(MAX(enabled), 0) = 0 FROM agent_kill_switch WHERE id = 1';
+export const AGENT_WRITES_OPEN = 'SELECT COALESCE(MAX(enabled), 0) = 0 FROM agent_kill_switch WHERE id = 1';
 
 async function agentWritesBlocked(db: D1Database) {
   const row = await db.prepare(`SELECT (${AGENT_WRITES_OPEN}) AS open`).first<{ open: number }>();
@@ -133,7 +133,9 @@ export async function runCommand(db: D1Database, actor: Actor, name: CommandName
  * exempt: it only returns the id the creator already received, and refusing it would push a
  * retrying client into creating a duplicate.
  */
-async function replayInScope(db: D1Database, actor: Actor, name: CommandName, input: unknown, stored: ApiResult<unknown>): Promise<ApiResult<unknown>> {
+export async function replayInScope(db: D1Database, actor: Actor, name: CommandName, input: unknown, stored: ApiResult<unknown>): Promise<ApiResult<unknown>> {
+  if (!(COMMANDS[name].roles as readonly string[]).includes(actor.role)) return fail('FORBIDDEN', 'Vai trò hiện tại không được thực hiện thao tác này');
+  if (actor.kind === 'agent' && await agentWritesBlocked(db)) return killSwitchOn();
   if (name === 'createLead') return stored;
   const fields = input as { leadId?: string; taskId?: string; approvalId?: string };
   const leadId = fields.leadId
@@ -237,7 +239,7 @@ async function createLead({ db, actor, input, tx }: Ctx<CreateLeadInput>) {
   // Company names are compared folded (case, diacritics, spacing) in JS because SQLite lower() is ASCII-only.
   const companyKey = companyName ? foldText(companyName) : null;
   const sameName = companyKey
-    ? (await db.prepare('SELECT id, name FROM account WHERE organization_id = ?').bind(actor.organizationId).all<{ id: string; name: string }>())
+    ? (await db.prepare('SELECT id, name FROM account WHERE organization_id = ? ORDER BY updated_at DESC, id LIMIT 2000').bind(actor.organizationId).all<{ id: string; name: string }>())
       .results.filter((a) => foldText(a.name) === companyKey).map((a) => a.id)
     : [];
   const matches = (await db.prepare(`

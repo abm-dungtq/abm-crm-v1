@@ -19,7 +19,7 @@ const APPROVAL_KIND: Record<string, string> = {
   agent_assign: 'Bot đề xuất giao lead',
 };
 const OUTBOX_STATUS: Record<string, string> = {
-  pending: 'Chờ gửi', sent: 'Đã gửi', failed: 'Lỗi', no_recipient: 'Không có người nhận', skipped: 'Bỏ qua',
+  pending: 'Chờ gửi', sending: 'Đang gửi', sent: 'Đã gửi', failed: 'Lỗi', no_recipient: 'Không có người nhận', skipped: 'Bỏ qua',
 };
 const pct = (rate: number | null) => (rate === null ? '—' : `${Math.round(rate * 100)}%`);
 const columnLabel = (key: OverviewColumn['key']) => (key === 'queue' ? 'Hàng chờ' : stageLabel(key));

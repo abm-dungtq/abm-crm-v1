@@ -1,5 +1,5 @@
 import { foldText, type ApiError, type ApiResult, type CommandName } from '@abm/contracts';
-import { runCommand, sha256 } from './commands';
+import { replayInScope, runCommand, sha256 } from './commands';
 import type { Actor } from './env';
 import type { GuardedTx } from './guarded-tx';
 import { dashboard, leadDetail, listLeads, listTasks } from './queries';
@@ -107,13 +107,15 @@ async function command(db: D1Database, actor: Actor, tool: string, args: Args, n
   const recent = await db.prepare(`SELECT key, created_at, result_json FROM idempotency_key
     WHERE actor_user_id = ? AND key >= ? AND key < ? ORDER BY created_at DESC LIMIT 1`)
     .bind(actor.id, base, `${base.slice(0, -1)};`).first<{ key: string; created_at: string; result_json: string }>();
-  if (recent && Date.now() - Date.parse(recent.created_at) < REPLAY_WINDOW_MS) return JSON.parse(recent.result_json) as ApiResult<unknown>;
+  if (recent && Date.now() - Date.parse(recent.created_at) < REPLAY_WINDOW_MS) {
+    return replayInScope(db, actor, name, input, JSON.parse(recent.result_json) as ApiResult<unknown>);
+  }
   const key = `${base}${recent ? Date.now() : 0}`;
   const result = await runCommand(db, actor, name, input, key, onCommitted);
   if (result.ok || result.error.code !== 'IDEMPOTENCY_CONFLICT') return result;
   // A concurrent identical call won the key with a different expectedVersion: return its result.
   const winner = await db.prepare('SELECT result_json FROM idempotency_key WHERE actor_user_id = ? AND key = ?').bind(actor.id, key).first<{ result_json: string }>();
-  return winner ? JSON.parse(winner.result_json) as ApiResult<unknown> : result;
+  return winner ? replayInScope(db, actor, name, input, JSON.parse(winner.result_json) as ApiResult<unknown>) : result;
 }
 async function writeTool(db: D1Database, actor: Actor, name: string, args: Args, onCommitted: OnCommitted): Promise<ApiResult<unknown>> {
   if (name === 'create_lead') {

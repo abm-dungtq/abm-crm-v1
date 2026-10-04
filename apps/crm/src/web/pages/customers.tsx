@@ -1,17 +1,22 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useParams } from '@tanstack/react-router';
 import { activityLabel } from '@abm/contracts';
 import { useApi } from '../api';
 import { Icon } from '../components/icons';
-import { Avatar, Badge, Empty, ErrorState, Loading, StageBadge } from '../components/ui';
+import { Alert, Avatar, Badge, Empty, ErrorState, Loading, StageBadge } from '../components/ui';
+import { accountListPath } from '../list-query';
 import { fmtAgo, fmtDateTime, fmtDue, fmtMoney } from '../format';
-import type { AccountDetail, AccountItem } from '../types';
+import type { AccountDetail, AccountItem, ListPage } from '../types';
 
 export function CustomersPage() {
   const [q, setQ] = useState('');
-  const list = useApi<AccountItem[]>('/accounts');
-  const needle = q.trim().toLowerCase();
-  const rows = (list.data ?? []).filter((a) => !needle || a.name.toLowerCase().includes(needle) || (a.taxCode ?? '').includes(needle));
+  const [query, setQuery] = useState('');
+  useEffect(() => {
+    const timer = setTimeout(() => setQuery(q.trim()), 250);
+    return () => clearTimeout(timer);
+  }, [q]);
+  const list = useApi<ListPage<AccountItem>>(accountListPath(query));
+  const rows = list.data?.items ?? [];
   return (
     <>
       <div className="page-head">
@@ -24,6 +29,7 @@ export function CustomersPage() {
         <label htmlFor="acc-filter" className="visually-hidden">Lọc khách hàng</label>
         <input id="acc-filter" type="search" placeholder="Lọc theo tên công ty, mã số thuế…" value={q} onChange={(e) => setQ(e.target.value)} />
       </div>
+      {list.data?.truncated && <Alert tone="warn">Danh sách đã giới hạn. Hãy thu hẹp tên công ty hoặc mã số thuế; kết quả có thể chưa bao gồm khách hàng cũ.</Alert>}
       <div className="card">
         {list.isLoading && <div className="card-body"><Loading /></div>}
         {list.error && <div className="card-body"><ErrorState error={list.error} onRetry={() => list.refetch()} /></div>}

@@ -86,41 +86,69 @@ export interface LeadFilter {
 }
 
 export async function listLeads(db: D1Database, actor: Actor, filter: LeadFilter = {}) {
+  return (await leadPage(db, actor, filter)).items;
+}
+
+const SEARCH_CANDIDATE_LIMIT = 2000;
+const LEAD_PAGE_LIMIT = 500;
+
+function leadWhere(actor: Actor, filter: LeadFilter, includeStatus = true) {
   const scope = leadScope(actor);
   const where = [scope.sql];
   const binds = [...scope.binds];
-  if (filter.status === 'open') where.push(`l.status IN ('queue', 'active')`);
-  else if (filter.status) { where.push('l.status = ?'); binds.push(filter.status); }
+  if (includeStatus && filter.status === 'open') where.push(`l.status IN ('queue', 'active')`);
+  else if (includeStatus && filter.status) { where.push('l.status = ?'); binds.push(filter.status); }
   if (filter.stage) { where.push('l.stage = ?'); binds.push(filter.stage); }
   if (filter.ownerId) { where.push('l.owner_user_id = ?'); binds.push(filter.ownerId); }
   if (filter.accountId) { where.push('l.account_id = ?'); binds.push(filter.accountId); }
   if (filter.departmentId) { where.push('l.department_id = ?'); binds.push(filter.departmentId); }
-  const matcher = filter.q ? searchMatcher(filter.q) : null;
-  // Text search folds Vietnamese case/diacritics in JS (SQLite lower() is ASCII-only), so it
-  // filters the scoped rows before the page limit instead of inside SQL.
+  return { sql: where.join(' AND '), binds };
+}
+
+/** Page view is opt-in; legacy callers still receive an array from listLeads. */
+export async function leadPage(db: D1Database, actor: Actor, filter: LeadFilter = {}) {
+  const where = leadWhere(actor, filter);
+  const q = filter.q?.trim();
+  const matcher = q ? searchMatcher(q) : null;
+  const limit = matcher ? SEARCH_CANDIDATE_LIMIT : LEAD_PAGE_LIMIT;
+  const total = (await db.prepare(`SELECT COUNT(*) AS n FROM lead l WHERE ${where.sql}`).bind(...where.binds).first<{ n: number }>())?.n ?? 0;
+  // Evaluate contact matches in SQL, returning a boolean rather than every customer's contact points.
+  const pointBinds = q ? [foldText(q), phoneQuery(q) ?? ''] : [];
   const select = matcher
-    ? LEAD_SELECT.replace('FROM lead l', `, (SELECT group_concat(cp.normalized_value, ' ') FROM contact_point cp WHERE cp.contact_id = l.contact_id) AS points
+    ? LEAD_SELECT.replace('FROM lead l', `, EXISTS(SELECT 1 FROM contact_point cp WHERE cp.contact_id = l.contact_id
+      AND (instr(lower(cp.normalized_value), ?) > 0 OR (cp.type = 'phone' AND ? <> '' AND instr(cp.normalized_value, ?2) > 0))) AS point_match
   FROM lead l`)
     : LEAD_SELECT;
-  const rows = await db.prepare(`${select} WHERE ${where.join(' AND ')} ORDER BY l.updated_at DESC${matcher ? '' : ' LIMIT 500'}`)
-    .bind(...binds).all<LeadListRow & { points?: string | null }>();
+  const rows = await db.prepare(`${select} WHERE ${where.sql} ORDER BY l.updated_at DESC, l.id LIMIT ${limit}`)
+    .bind(...pointBinds, ...where.binds).all<LeadListRow & { point_match?: number }>();
   const now = new Date();
   const found = matcher
-    ? rows.results.filter((r) => matcher([r.code, r.contact_name, r.account_name, r.need_summary, r.points])).slice(0, 500)
+    ? rows.results.filter((r) => r.point_match || matcher([r.code, r.contact_name, r.account_name, r.owner_name, r.need_summary]))
     : rows.results;
-  return found.map((r) => toLeadItem(r, now));
+  let counts: Record<string, number> | null = null;
+  if (!q) {
+    const allStatuses = leadWhere(actor, filter, false);
+    const groups = await db.prepare(`SELECT l.status, COUNT(*) AS n FROM lead l WHERE ${allStatuses.sql} GROUP BY l.status`)
+      .bind(...allStatuses.binds).all<{ status: string; n: number }>();
+    counts = { active: 0, queue: 0, won: 0, lost: 0, all: 0 };
+    for (const g of groups.results) { counts[g.status] = g.n; counts.all = (counts.all ?? 0) + g.n; }
+  }
+  return { items: found.slice(0, LEAD_PAGE_LIMIT).map((r) => toLeadItem(r, now)), truncated: total > limit || found.length > LEAD_PAGE_LIMIT, counts };
 }
 
 /**
  * Text matches folded fields; a query that looks like a phone number (only digits and phone
  * punctuation) also matches normalized phone numbers, so plain words never match on digits.
  */
-function searchMatcher(q: string) {
-  const text = foldText(q);
+function phoneQuery(q: string) {
   const digits = q.replace(/\D/g, '');
   // Only a full number or an explicit +84 is rewritten to 0…; a fragment like "8451" stays as typed.
-  const phone = /^[\d\s+().-]+$/.test(q.trim()) && digits.length >= 3
+  return /^[\d\s+().-]+$/.test(q.trim()) && digits.length >= 3
     ? (q.includes('+') || digits.length >= 9 ? normalizePhone(q) : digits) : null;
+}
+function searchMatcher(q: string) {
+  const text = foldText(q);
+  const phone = phoneQuery(q);
   return (fields: (string | null | undefined)[]) => fields.some((f) => {
     if (!f) return false;
     if (foldText(f).includes(text)) return true;
@@ -170,47 +198,75 @@ export async function dashboard(db: D1Database, actor: Actor) {
   const [leads, tasks] = await Promise.all([listLeads(db, actor), listTasks(db, actor)]);
   const now = new Date();
   const monthStart = `${vnDate(now).slice(0, 7)}-01`;
-  const inMonth = (iso: string | null) => Boolean(iso && vnDate(new Date(iso)) >= monthStart);
+  const since = new Date(`${monthStart}T00:00:00+07:00`).toISOString();
+  const today = new Date(`${vnDate(now)}T00:00:00+07:00`).toISOString();
+  const tomorrow = new Date(Date.parse(today) + 86_400_000).toISOString();
+  const scope = leadScope(actor);
+  const taskFilter = taskScope(actor);
+  const [groups, taskCounts] = await Promise.all([
+    db.prepare(`SELECT l.status, l.stage, l.owner_user_id, u.display_name AS owner_name, l.lost_reason,
+      COUNT(*) AS n, COALESCE(SUM(l.expected_value), 0) AS v,
+      SUM(CASE WHEN l.closed_at >= ? THEN 1 ELSE 0 END) AS month_n,
+      COALESCE(SUM(CASE WHEN l.closed_at >= ? THEN l.expected_value ELSE 0 END), 0) AS month_v,
+      SUM(CASE WHEN l.status = 'active' AND na.due_at < ? THEN 1 ELSE 0 END) AS overdue
+      FROM lead l LEFT JOIN app_user u ON u.id = l.owner_user_id LEFT JOIN task na ON na.id = l.next_action_task_id
+      WHERE ${scope.sql} GROUP BY l.status, l.stage, l.owner_user_id, l.lost_reason`)
+      .bind(since, since, now.toISOString(), ...scope.binds)
+      .all<{ status: string; stage: string; owner_user_id: string | null; owner_name: string | null; lost_reason: string | null;
+        n: number; v: number; month_n: number; month_v: number; overdue: number }>(),
+    db.prepare(`SELECT COUNT(*) AS total,
+      COALESCE(SUM(tk.due_at < ?), 0) AS overdue,
+      COALESCE(SUM(tk.due_at >= ? AND tk.due_at >= ? AND tk.due_at < ?), 0) AS today
+      FROM task tk JOIN lead l ON l.id = tk.lead_id WHERE ${taskFilter.sql} AND tk.status = 'open'`)
+      .bind(now.toISOString(), now.toISOString(), today, tomorrow, ...taskFilter.binds).first<{ total: number; overdue: number; today: number }>(),
+  ]);
   const active = leads.filter((l) => l.status === 'active');
-  const won = leads.filter((l) => l.status === 'won' && inMonth(l.closedAt));
-  const lost = leads.filter((l) => l.status === 'lost' && inMonth(l.closedAt));
-  const sum = (items: LeadItem[]) => items.reduce((s, l) => s + (l.expectedValue ?? 0), 0);
+  const tally = (status: string, field: 'n' | 'v' | 'month_n' | 'month_v') => groups.results.filter((g) => g.status === status).reduce((s, g) => s + g[field], 0);
 
   const owners = new Map<string, { id: string; name: string; active: number; overdue: number; stale: number; won: number; lost: number; value: number }>();
-  for (const l of leads) {
-    if (!l.owner) continue;
-    const o = owners.get(l.owner.id) ?? { id: l.owner.id, name: l.owner.name ?? '', active: 0, overdue: 0, stale: 0, won: 0, lost: 0, value: 0 };
-    if (l.status === 'active') {
-      o.active++; o.value += l.expectedValue ?? 0;
-      if (l.health.nextActionOverdue) o.overdue++;
-      if (l.health.stageSla?.state === 'breach') o.stale++;
+  for (const g of groups.results) {
+    if (!g.owner_user_id) continue;
+    const o = owners.get(g.owner_user_id) ?? { id: g.owner_user_id, name: g.owner_name ?? '', active: 0, overdue: 0, stale: 0, won: 0, lost: 0, value: 0 };
+    if (g.status === 'active') {
+      o.active += g.n; o.value += g.v; o.overdue += g.overdue;
     }
-    if (l.status === 'won' && inMonth(l.closedAt)) o.won++;
-    if (l.status === 'lost' && inMonth(l.closedAt)) o.lost++;
-    owners.set(l.owner.id, o);
+    if (g.status === 'won') o.won += g.month_n;
+    if (g.status === 'lost') o.lost += g.month_n;
+    owners.set(o.id, o);
+  }
+  for (const l of active) {
+    const owner = l.owner && owners.get(l.owner.id);
+    if (owner && l.health.stageSla?.state === 'breach') owner.stale++;
   }
   const lostReasons = new Map<string, number>();
-  for (const l of lost) lostReasons.set(l.lostReason ?? 'other', (lostReasons.get(l.lostReason ?? 'other') ?? 0) + 1);
+  for (const g of groups.results) if (g.status === 'lost' && g.month_n) lostReasons.set(g.lost_reason ?? 'other', (lostReasons.get(g.lost_reason ?? 'other') ?? 0) + g.month_n);
+  const leadTotal = groups.results.reduce((s, g) => s + g.n, 0);
+  const attention = active.filter(needsAttention);
+  const limited = (shown: number, total: number) => total > shown ? { shown, total } : null;
 
   return {
     kpi: {
-      activeLeads: active.length,
-      queueLeads: leads.filter((l) => l.status === 'queue').length,
-      pipelineValue: sum(active),
-      tasksToday: tasks.filter((t) => t.bucket === 'today').length,
-      overdueTasks: tasks.filter((t) => t.bucket === 'overdue').length,
+      activeLeads: tally('active', 'n'),
+      queueLeads: tally('queue', 'n'),
+      pipelineValue: tally('active', 'v'),
+      tasksToday: taskCounts?.today ?? 0,
+      overdueTasks: taskCounts?.overdue ?? 0,
       firstContactBreaches: active.filter((l) => l.health.firstContact && ['breach', 'release'].includes(l.health.firstContact.state)).length,
       staleLeads: active.filter((l) => l.health.stageSla?.state === 'breach').length,
-      wonCount: won.length, wonValue: sum(won), lostCount: lost.length,
+      wonCount: tally('won', 'month_n'), wonValue: tally('won', 'month_v'), lostCount: tally('lost', 'month_n'),
     },
     pipeline: ACTIVE_STAGES.map((code) => {
-      const items = active.filter((l) => l.stage === code);
-      return { stage: code, count: items.length, value: sum(items) };
+      const items = groups.results.filter((g) => g.status === 'active' && g.stage === code);
+      return { stage: code, count: items.reduce((s, g) => s + g.n, 0), value: items.reduce((s, g) => s + g.v, 0) };
     }),
     bySale: actor.role === 'sale' ? [] : [...owners.values()].sort((a, b) => b.active - a.active),
-    attention: active.filter(needsAttention).slice(0, 12),
+    attention: attention.slice(0, 12),
     upcoming: tasks.filter((t) => t.bucket !== 'done').slice(0, 10),
     lostReasons: [...lostReasons.entries()].map(([code, count]) => ({ code, count })),
+    truncated: {
+      leads: limited(leads.length, leadTotal), tasks: limited(tasks.length, taskCounts?.total ?? 0),
+      attention: limited(Math.min(12, attention.length), attention.length), upcoming: limited(Math.min(10, tasks.length), taskCounts?.total ?? 0),
+    },
   };
 }
 
@@ -311,7 +367,7 @@ export async function leadDetail(db: D1Database, actor: Actor, leadId: string) {
     db.prepare(`SELECT ac.id, ac.type, ac.summary, ac.occurred_at AS occurredAt, ac.actor_kind AS actorKind, u.display_name AS actorName
       FROM activity ac LEFT JOIN app_user u ON u.id = ac.actor_user_id WHERE ac.lead_id = ? ORDER BY ac.occurred_at DESC, ac.created_at DESC`).bind(leadId).all(),
     listApprovals(db, actor, undefined, leadId),
-    canReadAudit(actor) ? listAudit(db, actor, leadId) : Promise.resolve(null),
+    actor.kind !== 'agent' && canReadAudit(actor) ? listAudit(db, actor, leadId) : Promise.resolve(null),
     isAdmin && !row.team_id ? departmentMembers(db, extra?.department_id ?? null) : teamMembers(db, row.team_id ?? actor.teamId),
   ]);
   const isOwner = row.owner_user_id === actor.id;
@@ -324,7 +380,7 @@ export async function leadDetail(db: D1Database, actor: Actor, leadId: string) {
     tasks: tasks.results,
     activities: activities.results,
     approvals,
-    audit,
+    ...(actor.kind !== 'agent' ? { audit } : {}),
     teamMembers: members,
     permissions: {
       assign: (isTeamLeader || isAdmin) && (row.status === 'queue' || row.status === 'active'),
@@ -339,8 +395,16 @@ export async function leadDetail(db: D1Database, actor: Actor, leadId: string) {
 }
 
 export async function listAccounts(db: D1Database, actor: Actor, q?: string) {
+  return (await accountPage(db, actor, q)).items;
+}
+
+export async function accountPage(db: D1Database, actor: Actor, query?: string) {
+  const q = query?.trim();
   const scope = leadScope(actor);
   const ownerScope = leadScope(actor, 'l2');
+  const limit = q ? SEARCH_CANDIDATE_LIMIT : 300;
+  const total = (await db.prepare(`SELECT COUNT(DISTINCT l.account_id) AS n FROM lead l WHERE ${scope.sql}`)
+    .bind(...scope.binds).first<{ n: number }>())?.n ?? 0;
   const rows = await db.prepare(`
     SELECT a.id, a.name, a.tax_code AS taxCode, a.industry, a.city,
       COUNT(l.id) AS leadCount, SUM(l.status IN ('queue', 'active')) AS openCount,
@@ -351,11 +415,10 @@ export async function listAccounts(db: D1Database, actor: Actor, q?: string) {
         WHERE l2.account_id = a.id AND l2.status = 'active' AND ${ownerScope.sql}) AS owners
     FROM account a JOIN lead l ON l.account_id = a.id
     WHERE ${scope.sql}
-    GROUP BY a.id ORDER BY lastActivityAt DESC NULLS LAST, a.name${q ? '' : ' LIMIT 300'}`)
+    GROUP BY a.id ORDER BY lastActivityAt DESC NULLS LAST, a.name, a.id LIMIT ${limit}`)
     .bind(...ownerScope.binds, ...scope.binds).all<Record<string, unknown> & { name: string; taxCode: string | null }>();
-  if (!q) return rows.results;
-  const text = foldText(q);
-  return rows.results.filter((r) => foldText(r.name).includes(text) || (r.taxCode ?? '').includes(q.trim())).slice(0, 300);
+  const found = q ? rows.results.filter((r) => foldText(r.name).includes(foldText(q)) || (r.taxCode ?? '').includes(q)) : rows.results;
+  return { items: found.slice(0, 300), truncated: total > limit || found.length > 300 };
 }
 
 export async function accountDetail(db: D1Database, actor: Actor, accountId: string) {
@@ -406,7 +469,7 @@ export async function adminOverview(db: D1Database, actor: Actor) {
       FROM app_user u LEFT JOIN team t ON t.id = u.team_id LEFT JOIN department d ON d.id = u.department_id
       WHERE u.organization_id = ? ORDER BY u.role, u.display_name`).bind(actor.organizationId).all(),
     db.prepare(`SELECT (SELECT COUNT(*) FROM lead) AS leads, (SELECT COUNT(*) FROM audit_log) AS audit,
-      (SELECT COUNT(*) FROM outbox WHERE status = 'pending') AS outboxPending, (SELECT COUNT(*) FROM approval WHERE status = 'pending') AS approvalsPending,
+      (SELECT COUNT(*) FROM outbox WHERE status IN ('pending', 'sending')) AS outboxPending, (SELECT COUNT(*) FROM approval WHERE status = 'pending') AS approvalsPending,
       (SELECT COALESCE(MAX(enabled), 0) FROM agent_kill_switch WHERE id = 1) = 1 AS agentKillSwitch`).first(),
   ]);
   return { departments: departments.results, teams: teams.results, users: users.results, counts };

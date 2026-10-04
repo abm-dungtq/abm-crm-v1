@@ -1,7 +1,7 @@
 ---
 phase: 4
 title: Sửa lỗi đã xác nhận kèm test hồi quy
-status: pending
+status: completed
 runtime: codex
 depends_on: [1, 2, 3]
 ---

@@ -339,8 +339,9 @@ adminRoutes.post('/outbox/:id/resend', async (c) => {
   const id = c.req.param('id');
   const before = await db.prepare(`SELECT status FROM outbox WHERE id = ? AND event_type = 'approval.requested'`).bind(id).first<{ status: string }>();
   if (!before) return c.json(notFound, 404);
-  if (before.status === 'no_recipient') await db.prepare(`UPDATE outbox SET status = 'pending' WHERE id = ?`).bind(id).run();
-  const status = await deliverApprovalDm(c.env, id, new URL(c.req.url).origin) ?? before.status;
+  if (before.status === 'no_recipient') await db.prepare(`UPDATE outbox SET status = 'pending' WHERE id = ? AND status = 'no_recipient'`).bind(id).run();
+  await deliverApprovalDm(c.env, id, new URL(c.req.url).origin);
+  const status = (await db.prepare('SELECT status FROM outbox WHERE id = ?').bind(id).first<{ status: string }>())?.status ?? before.status;
   await auditRow(db, actor, 'resendApprovalDm', 'outbox', id, { status: before.status }, { status }, new Date().toISOString()).run();
   return c.json(ok({ status }));
 });

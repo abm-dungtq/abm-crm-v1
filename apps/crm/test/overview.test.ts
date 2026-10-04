@@ -20,6 +20,22 @@ async function get(user: string, path: string) {
 }
 const overview = async (user = 'u-admin', query = '') => (await get(user, `/overview${query}`)).body.data;
 const count = async (sql: string) => (await db.prepare(sql).first<{ n: number }>())!.n;
+test('overview reports agent write availability consistently with the kill switch', async () => {
+  for (const enabled of [0, 1]) {
+    await db.prepare('INSERT INTO agent_kill_switch (id, enabled) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled').bind(enabled).run();
+    expect((await overview()).bot.agentWritesOpen).toBe(enabled === 0);
+  }
+  await db.prepare('DELETE FROM agent_kill_switch').run();
+  expect((await overview()).bot.agentWritesOpen).toBe(true);
+});
+
+test('sending outbox rows remain visible as unfinished in admin and overview', async () => {
+  await db.prepare("INSERT INTO outbox (id, event_type, payload_json, status, created_at, sent_at) VALUES ('sending-test', 'approval.requested', '{}', 'sending', ?, ?)")
+    .bind(new Date().toISOString(), new Date().toISOString()).run();
+  const pending = await count("SELECT COUNT(*) AS n FROM outbox WHERE status IN ('pending', 'sending')");
+  expect((await get('u-admin', '/admin/overview')).body.data.counts.outboxPending).toBe(pending);
+  expect((await overview()).bot.outbox).toContainEqual({ status: 'sending', count: 1 });
+});
 const addDepartment = (id: string) => db.prepare(`INSERT INTO department (id, organization_id, name, created_at, updated_at)
   VALUES (?, 'org-abm', 'Phòng thử', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`).bind(id).run();
 

@@ -58,6 +58,10 @@ export interface LeadItem {
   health: LeadHealth;
 }
 
+/** Opt-in /leads?view=page and /accounts?view=page; legacy endpoints return arrays. */
+export interface ListPage<T> { items: T[]; truncated: boolean }
+export interface LeadPage extends ListPage<LeadItem> { counts: Record<string, number> | null }
+
 export interface TaskItem {
   id: string;
   title: string;
@@ -73,6 +77,12 @@ export interface TaskItem {
 }
 
 export interface Dashboard {
+  truncated: {
+    leads: { shown: number; total: number } | null;
+    tasks: { shown: number; total: number } | null;
+    attention: { shown: number; total: number } | null;
+    upcoming: { shown: number; total: number } | null;
+  };
   kpi: {
     activeLeads: number; queueLeads: number; pipelineValue: number; tasksToday: number; overdueTasks: number;
     firstContactBreaches: number; staleLeads: number; wonCount: number; wonValue: number; lostCount: number;

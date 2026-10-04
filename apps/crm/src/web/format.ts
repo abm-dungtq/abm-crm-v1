@@ -1,4 +1,14 @@
+import { MAX_DEAL_VALUE } from '@abm/contracts';
+
 const TZ = 'Asia/Ho_Chi_Minh';
+
+/** Đồng amounts accept ungrouped integers or consistent groups of three digits. */
+export function parseWonAmount(input: string): number | null {
+  const text = input.trim();
+  if (!/^(?:\d+|\d{1,3}([., ])\d{3}(?:\1\d{3})*)$/.test(text)) return null;
+  const amount = Number(text.replace(/[., ]/g, ''));
+  return Number.isSafeInteger(amount) && amount > 0 && amount <= MAX_DEAL_VALUE ? amount : null;
+}
 
 const dateTime = new Intl.DateTimeFormat('vi-VN', { timeZone: TZ, day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const dateOnly = new Intl.DateTimeFormat('vi-VN', { timeZone: TZ, day: '2-digit', month: '2-digit', year: 'numeric' });
