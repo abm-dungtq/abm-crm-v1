@@ -1,6 +1,6 @@
 # ADR-003: Guarded write nguyên tử trên D1
 
-Trạng thái: proposed [ADR-PROPOSED]
+Trạng thái: accepted [ADR-ACCEPTED]
 Ngày: 2026-10-03
 
 ## Bối cảnh
@@ -34,8 +34,10 @@ Writer thua không có nonce của writer thắng, nên CHECK fail và rollback 
 
 ## Hệ quả
 
-Guard lỗi không được biến thành success; stale version trả `STALE_VERSION`, không replay side effect. Guard/constraint bất thường cần phân loại nội bộ, không trả raw SQL/PII. Migrations phải backup trước apply. Pattern chưa accepted trước PoC remote.
+Guard lỗi không được biến thành success; stale version trả `STALE_VERSION`, không replay side effect. Guard/constraint bất thường cần phân loại nội bộ, không trả raw SQL/PII. Migrations phải backup trước apply. Pattern được accepted sau PoC local và remote ngày 2026-10-04; phạm vi bằng chứng và giới hạn nằm trong báo cáo.
 
 ## Bằng chứng/PoC
 
 [D1 batch documentation](https://developers.cloudflare.com/d1/worker-api/d1-database/#batch) mô tả rollback khi statement lỗi. Phase 05 phải chứng minh stale write, missing row, hai writer song song (một thắng), lỗi giữa batch, không audit/outbox mồ côi, idempotency và Time Travel restore trên staging cô lập; không dùng local pass thay remote evidence.
+
+[Báo cáo PoC D1](../../plans/reports/poc-d1-guarded-write-result.md): 8 test local pass; 20 cặp writer remote mỗi cặp đúng một thắng và một stale, 20 audit/outbox/idempotency, guard rỗng; Time Travel khôi phục stage trước mutation trong 4,964 giây. Database và Worker chỉ chứa dữ liệu tổng hợp, tên `abm-crm-poc`. Bằng chứng không thay thế kiểm quyền, approval, kill switch hay kiểm thử RPO/RTO production.
