@@ -22,6 +22,10 @@ Viết một phương án tối ưu có thứ tự ưu tiên để user chọn v
 - Chỉ ghi `plans/261004-2139-codebase-debug-optimization/reports/optimization-proposal.md`.
 - Không sửa code.
 
+## Chạy song song với phase 04
+
+Phase 04 đang sửa 10 mục trong mục "Danh sách sửa đã chốt" của `phase-04-fix-confirmed-bugs.md`. Không đề xuất lại các mục đó, chỉ ghi "đang sửa ở đợt vá lỗi". Riêng phần còn lại của mục 3 (cột tên đã fold) vẫn thuộc phase này. Các mục trong "Không làm trong phase này" phải có trong đề xuất.
+
 ## Steps
 
 1. Gom mục "Cơ hội tối ưu" và các phát hiện medium/low chưa sửa.
