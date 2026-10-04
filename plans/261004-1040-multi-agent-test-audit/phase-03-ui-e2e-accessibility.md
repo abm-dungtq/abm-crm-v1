@@ -1,7 +1,7 @@
 ---
 phase: 3
 title: "Giao diện, E2E, khả năng tiếp cận"
-status: pending
+status: completed
 priority: P1
 runtime: antigravity
 dependencies: []

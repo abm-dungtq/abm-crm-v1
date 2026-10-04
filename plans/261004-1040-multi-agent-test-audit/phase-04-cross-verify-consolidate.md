@@ -1,7 +1,7 @@
 ---
 phase: 4
 title: "Đối chiếu chéo và hợp nhất"
-status: pending
+status: completed
 priority: P1
 runtime: claude
 dependencies: [1, 2, 3]
