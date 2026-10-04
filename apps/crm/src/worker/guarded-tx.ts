@@ -1,6 +1,6 @@
 import type { Actor } from './env';
 
-type GuardedTable = 'lead' | 'task' | 'approval';
+type GuardedTable = 'lead' | 'task' | 'approval' | 'app_user' | 'department' | 'team';
 
 interface RowRef {
   table: GuardedTable;

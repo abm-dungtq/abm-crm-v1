@@ -6,7 +6,8 @@ export default defineConfig(async () => ({
     wrangler: { configPath: './wrangler.jsonc' },
     remoteBindings: false,
     miniflare: {
-      bindings: { TEST_MIGRATIONS: await readD1Migrations('./migrations') },
+      // Tests default to the evaluation identity path; password-mode tests opt in per request.
+      bindings: { TEST_MIGRATIONS: await readD1Migrations('./migrations'), AUTH_MODE: '' },
     },
   })],
   test: { include: ['test/**/*.test.ts'] },

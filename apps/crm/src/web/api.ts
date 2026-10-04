@@ -17,6 +17,10 @@ export function setDemoUser(id: string | null) {
 let memoryUser: string | null = getDemoUser();
 export const currentDemoUser = () => memoryUser;
 
+export type AuthMode = 'password' | 'demo' | 'unconfigured';
+let authMode: AuthMode | null = null;
+export const currentAuthMode = () => authMode;
+
 export class ApiFailure extends Error {
   constructor(readonly error: ApiError, readonly status: number) {
     super(error.message);
@@ -26,7 +30,8 @@ export class ApiFailure extends Error {
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
-  if (memoryUser) headers.set('X-Demo-User', memoryUser);
+  // The session cookie travels on its own; the demo header only matters in demo mode.
+  if (memoryUser && authMode !== 'password') headers.set('X-Demo-User', memoryUser);
   if (init.body) headers.set('Content-Type', 'application/json');
   let response: Response;
   try {
@@ -42,6 +47,8 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export const api = {
   get: <T>(path: string) => request<T>(path),
+  post: <T>(path: string, body: unknown = {}) => request<T>(path, { method: 'POST', body: JSON.stringify(body) }),
+  patch: <T>(path: string, body: unknown) => request<T>(path, { method: 'PATCH', body: JSON.stringify(body) }),
   command: <T>(name: CommandName, input: unknown, idempotencyKey: string) =>
     request<T>(`/commands/${name}`, { method: 'POST', body: JSON.stringify(input), headers: { 'Idempotency-Key': idempotencyKey } }),
 };
@@ -52,6 +59,19 @@ export function useApi<T>(path: string | null, options: Partial<UseQueryOptions<
     queryFn: () => api.get<T>(path!),
     enabled: path !== null,
     ...options,
+  });
+}
+
+/** Asked once per page load; everything else depends on it, so it is fetched before any identity. */
+export function useAuthMode() {
+  return useQuery<AuthMode, ApiFailure>({
+    queryKey: ['auth-mode'],
+    queryFn: async () => {
+      authMode = (await api.get<{ mode: AuthMode }>('/auth/mode')).mode;
+      if (authMode === 'password') setDemoUser(null);
+      return authMode;
+    },
+    staleTime: Infinity,
   });
 }
 

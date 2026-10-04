@@ -13,3 +13,4 @@ coverage/
 *.sqlite3
 exports/
 .tokens.local
+.admin-bootstrap.local

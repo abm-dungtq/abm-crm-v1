@@ -1,6 +1,9 @@
 import { Hono } from 'hono';
 import { COMMANDS, SEARCH_MAX_LENGTH, type ApiResult, type CommandName } from '@abm/contracts';
-import { requireActor } from './actor';
+import { isDemoMode, requireActor } from './actor';
+import { adminRoutes } from './admin-routes';
+import { publicAuth, sessionAuth } from './auth-routes';
+import { originGuard } from './session';
 import { runCommand } from './commands';
 import type { AppBindings } from './env';
 import {
@@ -21,10 +24,12 @@ app.onError((error, c) => {
 });
 
 app.get('/health', (c) => c.json({ ok: true }));
+app.use('*', originGuard);
+app.route('/auth', publicAuth);
 
 // The demo user picker needs the synthetic roster before any identity exists.
 app.get('/demo-users', async (c) => {
-  if (c.env.DEMO_MODE !== '1') return c.json({ ok: false, error: { code: 'FORBIDDEN', message: 'Không ở chế độ demo' } }, 403);
+  if (!isDemoMode(c.env)) return c.json({ ok: false, error: { code: 'FORBIDDEN', message: 'Không ở chế độ demo' } }, 403);
   const rows = await c.env.DB.prepare(`SELECT u.id, u.display_name AS name, u.role, t.name AS teamName
     FROM app_user u LEFT JOIN team t ON t.id = u.team_id WHERE u.status = 'active'
     ORDER BY CASE u.role WHEN 'sale' THEN 1 WHEN 'leader' THEN 2 WHEN 'head' THEN 3 WHEN 'director' THEN 4 ELSE 5 END, u.display_name`).all();
@@ -32,6 +37,8 @@ app.get('/demo-users', async (c) => {
 });
 
 app.use('*', requireActor);
+app.route('/auth', sessionAuth);
+app.route('/admin', adminRoutes);
 
 const data = <T>(value: T) => ({ ok: true as const, data: value });
 const notFound = { ok: false as const, error: { code: 'NOT_FOUND' as const, message: 'Không tìm thấy trong phạm vi của bạn' } };
@@ -44,7 +51,7 @@ app.use('*', async (c, next) => {
   await next();
 });
 
-app.get('/me', (c) => c.json(data(c.get('actor'))));
+app.get('/me', (c) => c.json(data({ ...c.get('actor'), mustChangePassword: c.get('mustChangePassword') })));
 app.get('/dashboard', async (c) => c.json(data(await dashboard(c.env.DB, c.get('actor')))));
 app.get('/leads', async (c) => c.json(data(await listLeads(c.env.DB, c.get('actor'), {
   status: c.req.query('status') || undefined, stage: c.req.query('stage') || undefined,

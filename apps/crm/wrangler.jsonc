@@ -10,8 +10,9 @@
     "run_worker_first": ["/api/*"]
   },
   "vars": {
-    // Evaluation build only: lets the viewer pick a synthetic user. Never set on a real deployment.
-    "DEMO_MODE": "1"
+    // Email + password sign-in (docs/adr/adr-006-password-login.md). The demo user picker
+    // (DEMO_MODE=1) is for tests and local runs only and is off whenever AUTH_MODE is set.
+    "AUTH_MODE": "password"
   },
   "d1_databases": [
     {

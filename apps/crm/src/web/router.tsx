@@ -1,10 +1,13 @@
 import { Outlet, createRootRoute, createRoute, createRouter } from '@tanstack/react-router';
 import { ActorContext } from './actor-context';
-import { ApiFailure, currentDemoUser, useApi } from './api';
+import { ApiFailure, currentDemoUser, useApi, useAuthMode } from './api';
 import { RolePicker, Shell } from './components/layout';
-import { ErrorState, Loading } from './components/ui';
-import type { Actor } from './types';
+import { Alert, ErrorState, Loading } from './components/ui';
+import type { Actor, Me } from './types';
 import { AdminPage } from './pages/admin';
+import { AdminUsersPage } from './pages/admin-users';
+import { ChangePasswordPage } from './pages/change-password';
+import { LoginPage } from './pages/login';
 import { ApprovalsPage } from './pages/approvals';
 import { AuditPage } from './pages/audit';
 import { AccountDetailPage, CustomersPage } from './pages/customers';
@@ -16,6 +19,27 @@ import { PipelinePage } from './pages/pipeline';
 import { TasksPage } from './pages/tasks';
 
 function Root() {
+  const mode = useAuthMode();
+  if (mode.isLoading) return <div className="content"><Loading /></div>;
+  if (mode.error || !mode.data) return <div className="content"><ErrorState error={mode.error} onRetry={() => mode.refetch()} /></div>;
+  if (mode.data === 'unconfigured') return <div className="content"><Alert tone="danger">Máy chủ chưa cấu hình cách đăng nhập (AUTH_MODE). Liên hệ Admin.</Alert></div>;
+  return mode.data === 'password' ? <PasswordRoot /> : <DemoRoot />;
+}
+
+function PasswordRoot() {
+  const me = useApi<Me>('/me', { retry: false });
+  if (me.error instanceof ApiFailure && me.error.code === 'UNAUTHENTICATED') return <LoginPage />;
+  if (me.isLoading) return <div className="content"><Loading /></div>;
+  if (me.error || !me.data) return <div className="content"><ErrorState error={me.error} onRetry={() => me.refetch()} /></div>;
+  if (me.data.mustChangePassword) return <ChangePasswordPage forced />;
+  return (
+    <ActorContext.Provider value={me.data}>
+      <Shell actor={me.data}><Outlet /></Shell>
+    </ActorContext.Provider>
+  );
+}
+
+function DemoRoot() {
   const hasUser = Boolean(currentDemoUser());
   const me = useApi<Actor>(hasUser ? '/me' : null, { retry: false });
   if (!hasUser || (me.error instanceof ApiFailure && me.error.code === 'UNAUTHENTICATED')) return <RolePicker />;
@@ -62,6 +86,8 @@ const routes = [
   createRoute({ getParentRoute: () => rootRoute, path: '/approvals', component: ApprovalsPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/audit', component: AuditPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/admin', component: AdminPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/admin/users', component: AdminUsersPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/account/password', component: () => <ChangePasswordPage /> }),
 ] as const;
 
 export const router = createRouter({ routeTree: rootRoute.addChildren(routes), defaultPreload: 'intent', scrollRestoration: true });

@@ -384,7 +384,9 @@ export async function adminOverview(db: D1Database, actor: Actor) {
     db.prepare('SELECT id, name FROM department WHERE organization_id = ? ORDER BY name').bind(actor.organizationId).all(),
     db.prepare(`SELECT t.id, t.name, d.name AS departmentName FROM team t JOIN department d ON d.id = t.department_id
       WHERE d.organization_id = ? ORDER BY t.name`).bind(actor.organizationId).all(),
-    db.prepare(`SELECT u.id, u.display_name AS name, u.email, u.role, u.status, t.name AS teamName, d.name AS departmentName
+    db.prepare(`SELECT u.id, u.display_name AS name, u.email, u.role, u.status, u.version, t.name AS teamName, d.name AS departmentName,
+        u.must_change_password = 1 AS mustChangePassword, u.password_hash IS NOT NULL AS hasPassword,
+        u.temp_password_expires_at AS tempPasswordExpiresAt, u.lark_link_status AS larkLinkStatus, u.lark_checked_at AS larkCheckedAt
       FROM app_user u LEFT JOIN team t ON t.id = u.team_id LEFT JOIN department d ON d.id = u.department_id
       WHERE u.organization_id = ? ORDER BY u.role, u.display_name`).bind(actor.organizationId).all(),
     db.prepare(`SELECT (SELECT COUNT(*) FROM lead) AS leads, (SELECT COUNT(*) FROM audit_log) AS audit,

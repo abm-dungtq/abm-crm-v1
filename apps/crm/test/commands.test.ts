@@ -9,6 +9,7 @@ declare global {
       DB: D1Database;
       TEST_MIGRATIONS: D1Migration[];
       DEMO_MODE: string;
+      AUTH_MODE: string;
     }
   }
 }

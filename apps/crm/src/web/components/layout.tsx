@@ -2,7 +2,8 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, Navigate, useRouterState } from '@tanstack/react-router';
 import { useQueryClient } from '@tanstack/react-query';
 import { ROLES, type RoleCode } from '@abm/contracts';
-import { setDemoUser, useApi } from '../api';
+import { currentAuthMode, setDemoUser, useApi } from '../api';
+import { LogoutButton } from '../pages/change-password';
 import type { AccountItem, Actor, ApprovalItem, DemoUser, LeadItem } from '../types';
 import { Icon, type IconName } from './icons';
 import { Avatar, ErrorState, Loading, StageBadge } from './ui';
@@ -37,8 +38,12 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
     { to: '/tasks', label: 'Việc của tôi', icon: 'check', roles: ['sale', 'leader', 'head', 'director'] },
     { to: '/approvals', label: 'Hàng chờ duyệt', icon: 'approve', roles: ['sale', 'leader', 'head', 'director'], badge: pending },
     { to: '/audit', label: 'Nhật ký audit', icon: 'audit', roles: ['leader', 'head', 'director'] },
+    { to: '/admin/users', label: 'Người dùng', icon: 'leads', roles: ['admin'] },
     { to: '/admin', label: 'Cấu hình', icon: 'settings', roles: ['admin'] },
   ];
+  const passwordMode = currentAuthMode() === 'password';
+  // Admin has no business screens; only its own pages and the password form stay reachable.
+  const reachable = business || pathname.startsWith('/admin') || pathname === '/account/password';
 
   return (
     <div className="shell">
@@ -49,26 +54,54 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
         </div>
         <nav className="nav">
           {nav.filter((n) => !n.roles || n.roles.includes(actor.role)).map((n) => (
-            <Link key={n.to} to={n.to as '/'} activeOptions={{ exact: n.to === '/' }}>
+            <Link key={n.to} to={n.to as '/'} activeOptions={{ exact: n.to === '/' || n.to === '/admin' }}>
               <Icon name={n.icon} />{n.label}
               {n.badge ? <span className="count" aria-label={`${n.badge} chờ bạn duyệt`}>{n.badge}</span> : null}
             </Link>
           ))}
         </nav>
         <div className="sidebar-foot">
-          <UserSwitcher actor={actor} />
+          {passwordMode ? <AccountBox actor={actor} /> : <UserSwitcher actor={actor} />}
         </div>
       </aside>
       {open && <div className="scrim" onClick={() => setOpen(false)} aria-hidden="true" />}
       <div className="main">
-        <div className="demo-banner">Bản đánh giá với dữ liệu mẫu hư cấu. Đăng nhập thật (Lark/Cloudflare Access) chưa bật; chọn vai trò để xem quyền khác nhau.</div>
+        <div className="demo-banner">
+          {passwordMode
+            ? 'Bản đánh giá với dữ liệu mẫu hư cấu. Không nhập dữ liệu khách hàng thật.'
+            : 'Bản đánh giá với dữ liệu mẫu hư cấu. Đăng nhập thật chưa bật; chọn vai trò để xem quyền khác nhau.'}
+        </div>
         <header className="topbar">
           <button className="btn btn-ghost icon-btn menu-btn" onClick={() => setOpen(true)} aria-label="Mở menu"><Icon name="menu" /></button>
           {business ? <GlobalSearch /> : <span className="spacer" />}
           <span className="spacer hide-sm" />
           {business && actor.role !== 'admin' && <Link to="/leads/new" className="btn btn-primary"><Icon name="plus" /><span className="hide-sm">Tạo lead</span></Link>}
         </header>
-        <main className="content" id="main">{business || pathname === '/admin' ? children : <Navigate to="/admin" replace />}</main>
+        <main className="content" id="main">{reachable ? children : <Navigate to="/admin" replace />}</main>
+      </div>
+    </div>
+  );
+}
+
+function ActorSummary({ actor }: { actor: Actor }) {
+  return (
+    <div className="row">
+      <Avatar name={actor.displayName} size="lg" />
+      <div className="truncate">
+        <div className="truncate" style={{ fontWeight: 600 }}>{actor.displayName}</div>
+        <div className="small muted truncate">{roleLabel(actor.role)} · {SCOPE_LABEL[actor.role]}</div>
+      </div>
+    </div>
+  );
+}
+
+function AccountBox({ actor }: { actor: Actor }) {
+  return (
+    <div className="stack-sm">
+      <ActorSummary actor={actor} />
+      <div className="row-wrap">
+        <Link to="/account/password" className="btn btn-sm">Đổi mật khẩu</Link>
+        <LogoutButton className="btn btn-sm" />
       </div>
     </div>
   );
@@ -85,13 +118,7 @@ function UserSwitcher({ actor }: { actor: Actor }) {
   };
   return (
     <div className="stack-sm">
-      <div className="row">
-        <Avatar name={actor.displayName} size="lg" />
-        <div className="truncate">
-          <div className="truncate" style={{ fontWeight: 600 }}>{actor.displayName}</div>
-          <div className="small muted truncate">{roleLabel(actor.role)} · {SCOPE_LABEL[actor.role]}</div>
-        </div>
-      </div>
+      <ActorSummary actor={actor} />
       <button className="btn btn-sm" onClick={() => setOpen((v) => !v)} aria-expanded={open}><Icon name="swap" />Đổi vai trò demo</button>
       {open && (
         <div className="stack-sm" style={{ maxHeight: 260, overflow: 'auto' }}>

@@ -1,0 +1,12 @@
+﻿Họ tên,Email,Phòng ban,Nhóm,Vai trò
+Quản trị hệ thống,admin@demo.abm.example,,,Admin
+Nguyễn Minh Anh,bgd@demo.abm.example,,,BGĐ
+Lê Thu Hà,head@demo.abm.example,Phòng Kinh doanh,,Trưởng phòng
+Phạm Văn Hùng,hung@demo.abm.example,Phòng Kinh doanh,Kinh doanh 1,Leader
+Đỗ Ngọc Lan,lan@demo.abm.example,Phòng Kinh doanh,Kinh doanh 1,Sale
+Vũ Đức Long,long@demo.abm.example,Phòng Kinh doanh,Kinh doanh 1,Sale
+Hoàng Mai,mai@demo.abm.example,Phòng Kinh doanh,Kinh doanh 2,Leader
+Bùi Quang Huy,huy@demo.abm.example,Phòng Kinh doanh,Kinh doanh 2,Sale
+Trần Quản Trị,admin2@demo.abm.example,,,Admin
+Ngô Thanh Tâm,sale-moi@demo.abm.example,Phòng Kinh doanh,Kinh doanh 3,Sale
+Đinh Thị Hoa,head-cskh@demo.abm.example,Phòng Chăm sóc khách hàng,,Trưởng phòng

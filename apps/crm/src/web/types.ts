@@ -11,6 +11,19 @@ export interface Actor {
   displayName: string;
 }
 
+export interface Me extends Actor { mustChangePassword: boolean }
+
+export type LarkLinkStatus = 'unlinked' | 'linked' | 'unmatched' | 'error';
+export interface AdminUser {
+  id: string; name: string; email: string; role: RoleCode; status: 'active' | 'disabled'; version: number;
+  teamName: string | null; departmentName: string | null;
+  /** SQLite booleans arrive as 0/1. */
+  mustChangePassword: number; hasPassword: number; tempPasswordExpiresAt: string | null;
+  larkLinkStatus: LarkLinkStatus; larkCheckedAt: string | null;
+}
+export interface IssuedPassword { name: string; email: string; password: string; expiresAt: string }
+export interface LarkLinkResult { linked: number; unmatched: number; error: number; message?: string }
+
 export interface DemoUser { id: string; name: string; role: RoleCode; teamName: string | null }
 
 export type HealthState = 'ok' | 'warn' | 'breach';
@@ -136,6 +149,6 @@ export interface AccountDetail {
 export interface AdminOverview {
   departments: { id: string; name: string }[];
   teams: { id: string; name: string; departmentName: string }[];
-  users: { id: string; name: string; email: string; role: RoleCode; status: string; teamName: string | null; departmentName: string | null }[];
+  users: AdminUser[];
   counts: { leads: number; audit: number; outboxPending: number; approvalsPending: number };
 }

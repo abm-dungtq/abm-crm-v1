@@ -94,6 +94,8 @@ export type RoleCode = (typeof ROLES)[number]['code'];
 export const ERROR_CODES = [
   'FORBIDDEN', 'STALE_VERSION', 'APPROVAL_REQUIRED', 'KILL_SWITCH_ON', 'DUPLICATE_SUSPECTED',
   'VALIDATION_FAILED', 'NOT_FOUND', 'IDEMPOTENCY_CONFLICT', 'UNAUTHENTICATED', 'INTERNAL',
+  // Password login (ADR-006).
+  'PASSWORD_CHANGE_REQUIRED', 'TEMP_PASSWORD_EXPIRED', 'ACCOUNT_LOCKED',
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
@@ -235,5 +237,33 @@ export const COMMANDS = {
   decideApproval: { schema: decideApprovalInput, roles: ['sale', 'leader'], riskLevel: 'high', idempotent: true, expectedVersion: true, agentNeedsApproval: true },
 } as const satisfies Record<string, CommandDefinition>;
 export type CommandName = keyof typeof COMMANDS;
+
+// Password login (ADR-006). Internal tool, so the rules are deliberately moderate.
+export const PASSWORD_MIN_LENGTH = 8;
+const password = z.string().min(1, 'Bắt buộc').max(200);
+export const loginInput = z.object({ email: z.string().trim().min(1, 'Bắt buộc').max(160), password });
+export const changePasswordInput = z.object({
+  currentPassword: password,
+  newPassword: z.string().min(PASSWORD_MIN_LENGTH, `Tối thiểu ${PASSWORD_MIN_LENGTH} ký tự`).max(200),
+});
+
+// Admin user management. Admin manages accounts only; it never gains business-data access.
+export const rosterImportInput = z.object({
+  csv: z.string().max(512_000, 'File quá lớn (tối đa 500 KB)'),
+  issueTempPasswords: z.boolean().optional(),
+});
+const optionalName = z.string().trim().max(120).nullable().optional();
+export const updateUserInput = z.object({
+  version,
+  name: text(120).optional(),
+  email: z.string().trim().email('Email không hợp lệ').max(160).optional(),
+  role: z.enum(['sale', 'leader', 'head', 'director', 'admin']).optional(),
+  departmentName: optionalName,
+  teamName: optionalName,
+});
+export const userStatusInput = z.object({ version, status: z.enum(['active', 'disabled']) });
+export const versionInput = z.object({ version });
+// A retry list stays small: D1 caps bound parameters per query.
+export const larkLinkInput = z.object({ userIds: z.array(id).min(1).max(50).optional() });
 
 export * from './working-time';
