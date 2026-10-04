@@ -12,7 +12,7 @@ export function AdminPage() {
   return (
     <>
       <div className="page-head">
-        <div><h1>Cấu hình</h1><p className="sub">Admin quản trị cấu hình và xem toàn bộ dữ liệu công ty; không tạo hay sửa lead, không duyệt yêu cầu.</p></div>
+        <div><h1>Cấu hình</h1><p className="sub">Admin quản trị cấu hình, xem và cập nhật dữ liệu toàn công ty; không duyệt yêu cầu.</p></div>
       </div>
       {q.isLoading && <Loading />}
       {q.error && <ErrorState error={q.error} onRetry={() => q.refetch()} />}

@@ -302,19 +302,33 @@ async function createLead({ db, actor, input, tx }: Ctx<CreateLeadInput>) {
   return ok({ leadId });
 }
 
+/**
+ * Recipient of an assignment. A Leader assigns within its own team; Admin assigns within the lead's
+ * team, or for a queue lead to any team of the lead's department. Recipients are always Sale/Leader.
+ */
+async function loadAssignee(db: D1Database, actor: Actor, lead: LeadRow, userId: string) {
+  if (actor.role === 'leader') return loadTeamMember(db, userId, actor.teamId);
+  if (lead.team_id) return loadTeamMember(db, userId, lead.team_id);
+  return db.prepare(`SELECT id, display_name, team_id, department_id FROM app_user
+    WHERE id = ? AND department_id = ? AND team_id IS NOT NULL AND status = 'active' AND role IN ('sale', 'leader')`)
+    .bind(userId, lead.department_id).first<{ id: string; display_name: string; team_id: string; department_id: string }>();
+}
+
 async function assignLead({ db, actor, input, tx }: Ctx<AssignLeadInput>) {
   const lead = await loadLead(db, actor, input.leadId);
   if (!lead) return notFound();
   if (lead.version !== input.expectedVersion) return stale();
-  if (lead.status !== 'queue' && !(lead.status === 'active' && lead.team_id === actor.teamId)) {
+  const ownTeam = actor.role === 'admin' || lead.team_id === actor.teamId;
+  if (lead.status !== 'queue' && !(lead.status === 'active' && ownTeam)) {
     return fail('VALIDATION_FAILED', 'Chỉ giao lead trong hàng chờ hoặc lead đang mở của team');
   }
-  const member = await loadTeamMember(db, input.ownerUserId, actor.teamId);
+  const member = await loadAssignee(db, actor, lead, input.ownerUserId);
   if (!member) return fail('VALIDATION_FAILED', 'Người nhận phải là thành viên đang hoạt động của team', { fields: { ownerUserId: 'Không hợp lệ' } });
+  const by = actor.role === 'admin' ? 'Admin' : 'Leader';
 
   if (lead.status === 'active') {
     if (lead.owner_user_id === member.id) return fail('VALIDATION_FAILED', 'Lead đã thuộc người này');
-    await applyOwnerChange(db, tx, lead, input.expectedVersion, member, 'Leader phân lại');
+    await applyOwnerChange(db, tx, lead, input.expectedVersion, member, `${by} phân lại`);
     return ok({ leadId: lead.id });
   }
   const action = input.nextAction ?? defaultFirstContact(new Date(tx.now));
@@ -326,7 +340,7 @@ async function assignLead({ db, actor, input, tx }: Ctx<AssignLeadInput>) {
     id: taskId, lead_id: lead.id, title: action.title, due_at: new Date(action.dueAt).toISOString(),
     assignee_user_id: member.id, status: 'open', created_by_user_id: actor.id,
   });
-  tx.activity(lead.id, 'owner_changed', `Leader giao cho ${member.display_name}. Next Action: ${action.title}`);
+  tx.activity(lead.id, 'owner_changed', `${by} giao cho ${member.display_name}. Next Action: ${action.title}`);
   tx.audit('lead', lead.id, { status: 'queue', owner_user_id: null }, { status: 'active', owner_user_id: member.id, next_action: action });
   tx.event('lead.assigned', { leadId: lead.id, ownerUserId: member.id });
   return ok({ leadId: lead.id });

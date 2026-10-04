@@ -218,6 +218,16 @@ export async function teamMembers(db: D1Database, teamId: string | null) {
   return rows.results;
 }
 
+/** Assignable people of every team in a department, for Admin assigning a queue lead. */
+async function departmentMembers(db: D1Database, departmentId: string | null) {
+  if (!departmentId) return [];
+  const rows = await db.prepare(`SELECT id, display_name AS name, role FROM app_user
+    WHERE department_id = ? AND team_id IS NOT NULL AND status = 'active' AND role IN ('sale', 'leader')
+    ORDER BY role DESC, display_name`).bind(departmentId)
+    .all<{ id: string; name: string; role: string }>();
+  return rows.results;
+}
+
 const AUDIT_SELECT = `
   SELECT al.id, al.command, al.entity, al.entity_id, al.before_json, al.after_json, al.created_at, al.actor_kind,
     u.display_name AS actor_name, l.id AS lead_id, l.code AS lead_code
@@ -285,8 +295,9 @@ export async function leadDetail(db: D1Database, actor: Actor, leadId: string) {
   const row = await db.prepare(`${LEAD_SELECT} WHERE l.id = ? AND ${scope.sql}`).bind(leadId, ...scope.binds).first<LeadListRow>();
   if (!row) return null;
   const lead = toLeadItem(row, new Date());
-  const extra = await db.prepare('SELECT contact_id, lost_note, won_note, created_by_user_id FROM lead WHERE id = ?').bind(leadId)
-    .first<{ contact_id: string; lost_note: string | null; won_note: string | null; created_by_user_id: string | null }>();
+  const extra = await db.prepare('SELECT contact_id, department_id, lost_note, won_note, created_by_user_id FROM lead WHERE id = ?').bind(leadId)
+    .first<{ contact_id: string; department_id: string; lost_note: string | null; won_note: string | null; created_by_user_id: string | null }>();
+  const isAdmin = actor.role === 'admin';
   const [points, account, tasks, activities, approvals, audit, members] = await Promise.all([
     db.prepare('SELECT type, value FROM contact_point WHERE contact_id = ? ORDER BY type').bind(extra?.contact_id).all<{ type: string; value: string }>(),
     row.account_id ? db.prepare('SELECT id, name, tax_code AS taxCode, industry, city FROM account WHERE id = ?').bind(row.account_id).first() : null,
@@ -297,11 +308,11 @@ export async function leadDetail(db: D1Database, actor: Actor, leadId: string) {
       FROM activity ac LEFT JOIN app_user u ON u.id = ac.actor_user_id WHERE ac.lead_id = ? ORDER BY ac.occurred_at DESC, ac.created_at DESC`).bind(leadId).all(),
     listApprovals(db, actor, undefined, leadId),
     canReadAudit(actor) ? listAudit(db, actor, leadId) : Promise.resolve(null),
-    teamMembers(db, row.team_id ?? actor.teamId),
+    isAdmin && !row.team_id ? departmentMembers(db, extra?.department_id ?? null) : teamMembers(db, row.team_id ?? actor.teamId),
   ]);
   const isOwner = row.owner_user_id === actor.id;
   const isTeamLeader = actor.role === 'leader' && (row.team_id === actor.teamId || (row.status === 'queue'));
-  const writer = ['sale', 'leader', 'head', 'director'].includes(actor.role);
+  const writer = ['sale', 'leader', 'head', 'director', 'admin'].includes(actor.role);
   return {
     lead: { ...lead, lostNote: extra?.lost_note ?? null, wonNote: extra?.won_note ?? null },
     contactPoints: points.results,
@@ -312,7 +323,7 @@ export async function leadDetail(db: D1Database, actor: Actor, leadId: string) {
     audit,
     teamMembers: members,
     permissions: {
-      assign: isTeamLeader && (row.status === 'queue' || row.status === 'active'),
+      assign: (isTeamLeader || isAdmin) && (row.status === 'queue' || row.status === 'active'),
       release: isTeamLeader && row.status === 'active' && lead.health.firstContact?.state === 'release',
       logActivity: writer && row.status !== 'queue',
       changeStage: writer && row.status === 'active',

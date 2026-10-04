@@ -8,7 +8,7 @@ export interface SqlFragment {
 /**
  * Lead visibility per permission-matrix-v1: Sale own/assigned, Leader team plus the
  * department intake queue it assigns from, Head department, BGĐ organization.
- * Admin reads the whole organization to oversee work; business commands stay closed to Admin.
+ * Admin reads and writes organization-wide but never decides approvals.
  */
 export function leadScope(actor: Actor, alias = 'l'): SqlFragment {
   const a = alias;

@@ -65,17 +65,17 @@ test.each(roles)('read routes retain own/team/department/org scope for %s', asyn
   if (user === 'u-lan') expect(ids).not.toContain('lead-09');
   if (user === 'u-hung') expect(ids).not.toContain('lead-10');
   if (user === 'u-admin') {
-    // Admin oversees the whole organization read-only, the same lead set as BGĐ.
+    // Admin works organization-wide, the same lead set as BGĐ, and writes there too.
     const director = (await call('u-bgd', '/leads')).json.data.map((l: any) => l.id);
     expect([...ids].sort()).toEqual([...director].sort());
-    expect(detail.permissions).toMatchObject({ logActivity: false, changeStage: false, completeTask: false, assign: false });
+    expect((await call(user, '/leads/lead-10')).json.data.permissions).toMatchObject({ logActivity: true, changeStage: true, completeTask: true, assign: true, requestOwnerChange: false });
   }
 });
 
 test.each(roles)('command role restrictions run before input parsing for %s', async user => {
   const allowed: Record<string, string[]> = {
-    createLead: roles.slice(0, 4), assignLead: ['u-hung'], releaseLead: ['u-hung'],
-    logActivity: roles.slice(0, 4), completeTask: roles.slice(0, 4), changeStage: roles.slice(0, 4),
+    createLead: roles, assignLead: ['u-hung', 'u-admin'], releaseLead: ['u-hung'],
+    logActivity: roles, completeTask: roles, changeStage: roles,
     requestOwnerChange: ['u-lan'], decideApproval: ['u-lan', 'u-hung'],
   };
   for (const [name, users] of Object.entries(allowed)) {
@@ -103,7 +103,7 @@ const foreignCommands: Array<[string, Record<string, unknown>]> = [
   ['requestOwnerChange', { leadId: 'lead-10', expectedVersion: 1, toUserId: 'u-long', reason: 'test' }],
   ['decideApproval', { approvalId: 'apv-3', expectedVersion: 1, decision: 'approve' }],
 ];
-test.each(['u-lan', 'u-hung', 'u-admin'])('every targeted command denies foreign records without effects for %s', async user => {
+test.each(['u-lan', 'u-hung'])('every targeted command denies foreign records without effects for %s', async user => {
   const before = await Promise.all(['audit_log', 'outbox', 'idempotency_key'].map(count));
   for (const [name, body] of foreignCommands) {
     const res = await cmd(user, name, body);
@@ -111,7 +111,14 @@ test.each(['u-lan', 'u-hung', 'u-admin'])('every targeted command denies foreign
     expect(['FORBIDDEN', 'NOT_FOUND']).toContain(res.json.error.code);
   }
   expect(await Promise.all(['audit_log', 'outbox', 'idempotency_key'].map(count))).toEqual(before);
-  expect((await cmd('u-admin', 'createLead', { contactName: 'Test', phone: '0911222333', source: 'self', needSummary: 'test' })).status).toBe(403);
+});
+
+test('admin creates leads into the queue and never decides approvals', async () => {
+  const created = await cmd('u-admin', 'createLead', { contactName: 'Test', phone: '0911222333', source: 'self', needSummary: 'test' });
+  expect(created.status).toBe(200);
+  const row = await env.DB.prepare('SELECT owner_user_id, status FROM lead WHERE id = ?').bind(created.json.data.leadId).first<Record<string, unknown>>();
+  expect(row).toEqual({ owner_user_id: null, status: 'queue' });
+  expect((await cmd('u-admin', 'decideApproval', { approvalId: 'apv-3', expectedVersion: 1, decision: 'approve' })).status).toBe(403);
 });
 
 test('invalid command input and long idempotency keys write nothing', async () => {

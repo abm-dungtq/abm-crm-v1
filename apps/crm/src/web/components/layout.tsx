@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { Link, Navigate, useRouterState } from '@tanstack/react-router';
+import { Link, useRouterState } from '@tanstack/react-router';
 import { useQueryClient } from '@tanstack/react-query';
 import { ROLES, type RoleCode } from '@abm/contracts';
 import { currentAuthMode, setDemoUser, useApi } from '../api';
@@ -11,7 +11,7 @@ import { Avatar, ErrorState, Loading, StageBadge } from './ui';
 export const roleLabel = (role: string) => ROLES.find((r) => r.code === role)?.label ?? role;
 
 export const SCOPE_LABEL: Record<RoleCode, string> = {
-  sale: 'Lead của tôi', leader: 'Team + hàng chờ phòng', head: 'Toàn phòng ban', director: 'Toàn công ty', admin: 'Xem toàn công ty + cấu hình',
+  sale: 'Lead của tôi', leader: 'Team + hàng chờ phòng', head: 'Toàn phòng ban', director: 'Toàn công ty', admin: 'Toàn công ty + cấu hình',
 };
 
 interface NavItem { to: string; label: string; icon: IconName; roles?: RoleCode[]; badge?: number }
@@ -26,8 +26,6 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [open]);
-  // Admin sees every business screen read-only (organization scope) but creates or changes nothing there.
-  const businessWriter = actor.role !== 'admin';
   const approvals = useApi<ApprovalItem[]>('/approvals?status=pending');
   const pending = approvals.data?.filter((a) => a.canDecide).length ?? 0;
 
@@ -43,8 +41,6 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
     { to: '/admin', label: 'Cấu hình', icon: 'settings', roles: ['admin'] },
   ];
   const passwordMode = currentAuthMode() === 'password';
-  // Creating a lead is a business command, closed to Admin.
-  const reachable = businessWriter || pathname !== '/leads/new';
 
   return (
     <div className="shell">
@@ -76,9 +72,9 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
           <button className="btn btn-ghost icon-btn menu-btn" onClick={() => setOpen(true)} aria-label="Mở menu"><Icon name="menu" /></button>
           <GlobalSearch />
           <span className="spacer hide-sm" />
-          {businessWriter && <Link to="/leads/new" className="btn btn-primary"><Icon name="plus" /><span className="hide-sm">Tạo lead</span></Link>}
+          <Link to="/leads/new" className="btn btn-primary"><Icon name="plus" /><span className="hide-sm">Tạo lead</span></Link>
         </header>
-        <main className="content" id="main">{reachable ? children : <Navigate to="/" replace />}</main>
+        <main className="content" id="main">{children}</main>
       </div>
     </div>
   );
@@ -184,7 +180,7 @@ export function RolePicker() {
     leader: 'Thấy team và hàng chờ phòng; giao lead, nhả lead, duyệt chuyển owner.',
     head: 'Xem toàn phòng ban, dashboard theo Sale.',
     director: 'Xem toàn công ty.',
-    admin: 'Xem toàn công ty (chỉ xem), quản lý người dùng và cấu hình.',
+    admin: 'Xem và cập nhật dữ liệu toàn công ty (không duyệt yêu cầu), quản lý người dùng và cấu hình.',
   };
   return (
     <div className="picker">

@@ -39,7 +39,7 @@ const lead = (id: string) => db.prepare('SELECT * FROM lead WHERE id = ?').bind(
 const count = async (table: string) => (await db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first<{ n: number }>())!.n;
 
 describe('scope', () => {
-  test('sale sees only own leads; leader sees team plus department queue; admin sees the organization read-only', async () => {
+  test('sale sees only own leads; leader sees team plus department queue; admin works organization-wide', async () => {
     const sale = await call('u-lan', 'GET', '/leads');
     expect(sale.json.data.length).toBeGreaterThan(0);
     expect(sale.json.data.every((l: any) => l.owner?.id === 'u-lan')).toBe(true);
@@ -53,7 +53,7 @@ describe('scope', () => {
     expect(admin.json.data.map((l: any) => l.id).sort()).toEqual(director.json.data.map((l: any) => l.id).sort());
     expect((await call('u-admin', 'GET', '/audit')).status).toBe(200);
     expect((await call('u-admin', 'GET', '/leads/lead-10')).json.data.permissions)
-      .toMatchObject({ assign: false, logActivity: false, changeStage: false, completeTask: false, requestOwnerChange: false });
+      .toMatchObject({ assign: true, logActivity: true, changeStage: true, completeTask: true, requestOwnerChange: false });
     expect((await call('u-lan', 'GET', '/leads/lead-10')).status).toBe(404);
   });
 
@@ -195,6 +195,34 @@ describe('lead intake', () => {
     const r = await command('u-mai', 'releaseLead', { leadId: 'lead-03', expectedVersion: 1, reason: 'Quá 24 giờ chưa liên hệ' });
     expect(r.json.ok).toBe(true);
     expect(await lead('lead-03')).toMatchObject({ status: 'queue', owner_user_id: null, next_action_task_id: null });
+  });
+});
+
+describe('admin business write', () => {
+  test('admin logs activity and closes Won on any team', async () => {
+    const activity = await command('u-admin', 'logActivity', { leadId: 'lead-10', expectedVersion: 1, type: 'note', summary: 'Admin ghi chú' });
+    expect(activity.json.ok).toBe(true);
+    const won = await command('u-admin', 'changeStage', { leadId: 'lead-15', expectedVersion: 1, toStage: 'won', wonValue: 50_000_000, wonNote: 'Hợp đồng đã ký' });
+    expect(won.json.ok).toBe(true);
+    expect(await lead('lead-15')).toMatchObject({ status: 'won', owner_user_id: 'u-huy' });
+    const audit = await db.prepare(`SELECT actor_user_id FROM audit_log WHERE entity_id = 'lead-15' ORDER BY created_at DESC LIMIT 1`).first();
+    expect(audit).toEqual({ actor_user_id: 'u-admin' });
+  });
+
+  test('admin assigns a queue lead to any team of its department, never to itself', async () => {
+    const self = await command('u-admin', 'assignLead', { leadId: 'lead-20', expectedVersion: 1, ownerUserId: 'u-admin' });
+    expect(self.json.error?.code).toBe('VALIDATION_FAILED');
+    const r = await command('u-admin', 'assignLead', { leadId: 'lead-20', expectedVersion: 1, ownerUserId: 'u-huy' });
+    expect(r.json.ok).toBe(true);
+    expect(await lead('lead-20')).toMatchObject({ status: 'active', owner_user_id: 'u-huy', team_id: 'team-kd2' });
+    const detail = await call('u-admin', 'GET', '/leads/lead-21');
+    expect(detail.json.data.teamMembers.map((m: any) => m.id).sort()).toEqual(['u-hung', 'u-huy', 'u-lan', 'u-long', 'u-mai']);
+  });
+
+  test('a leader still cannot assign a lead of another team', async () => {
+    const r = await command('u-hung', 'assignLead', { leadId: 'lead-03', expectedVersion: 1, ownerUserId: 'u-lan' });
+    expect(r.json.ok).toBe(false);
+    expect(await lead('lead-03')).toMatchObject({ owner_user_id: 'u-huy' });
   });
 });
 

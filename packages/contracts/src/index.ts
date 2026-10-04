@@ -217,7 +217,7 @@ export type DecideApprovalInput = z.infer<typeof decideApprovalInput>;
 type RiskLevel = 'low' | 'medium' | 'high';
 interface CommandDefinition {
   schema: z.ZodType;
-  /** Roles allowed by permission-matrix-v1; record scope is still checked per target. Admin has no business write. */
+  /** Roles allowed by permission-matrix-v1; record scope is still checked per target. Admin writes organization-wide but never decides approvals. */
   roles: readonly RoleCode[];
   riskLevel: RiskLevel;
   idempotent: true;
@@ -227,12 +227,12 @@ interface CommandDefinition {
 }
 
 export const COMMANDS = {
-  createLead: { schema: createLeadInput, roles: ['sale', 'leader', 'head', 'director'], riskLevel: 'low', idempotent: true, expectedVersion: false, agentNeedsApproval: false },
-  assignLead: { schema: assignLeadInput, roles: ['leader'], riskLevel: 'medium', idempotent: true, expectedVersion: true, agentNeedsApproval: true },
+  createLead: { schema: createLeadInput, roles: ['sale', 'leader', 'head', 'director', 'admin'], riskLevel: 'low', idempotent: true, expectedVersion: false, agentNeedsApproval: false },
+  assignLead: { schema: assignLeadInput, roles: ['leader', 'admin'], riskLevel: 'medium', idempotent: true, expectedVersion: true, agentNeedsApproval: true },
   releaseLead: { schema: releaseLeadInput, roles: ['leader'], riskLevel: 'medium', idempotent: true, expectedVersion: true, agentNeedsApproval: true },
-  logActivity: { schema: logActivityInput, roles: ['sale', 'leader', 'head', 'director'], riskLevel: 'low', idempotent: true, expectedVersion: true, agentNeedsApproval: false },
-  completeTask: { schema: completeTaskInput, roles: ['sale', 'leader', 'head', 'director'], riskLevel: 'low', idempotent: true, expectedVersion: true, agentNeedsApproval: false },
-  changeStage: { schema: changeStageInput, roles: ['sale', 'leader', 'head', 'director'], riskLevel: 'high', idempotent: true, expectedVersion: true, agentNeedsApproval: true },
+  logActivity: { schema: logActivityInput, roles: ['sale', 'leader', 'head', 'director', 'admin'], riskLevel: 'low', idempotent: true, expectedVersion: true, agentNeedsApproval: false },
+  completeTask: { schema: completeTaskInput, roles: ['sale', 'leader', 'head', 'director', 'admin'], riskLevel: 'low', idempotent: true, expectedVersion: true, agentNeedsApproval: false },
+  changeStage: { schema: changeStageInput, roles: ['sale', 'leader', 'head', 'director', 'admin'], riskLevel: 'high', idempotent: true, expectedVersion: true, agentNeedsApproval: true },
   requestOwnerChange: { schema: requestOwnerChangeInput, roles: ['sale'], riskLevel: 'medium', idempotent: true, expectedVersion: true, agentNeedsApproval: true },
   decideApproval: { schema: decideApprovalInput, roles: ['sale', 'leader'], riskLevel: 'high', idempotent: true, expectedVersion: true, agentNeedsApproval: true },
 } as const satisfies Record<string, CommandDefinition>;
@@ -247,7 +247,7 @@ export const changePasswordInput = z.object({
   newPassword: z.string().min(PASSWORD_MIN_LENGTH, `Tối thiểu ${PASSWORD_MIN_LENGTH} ký tự`).max(200),
 });
 
-// Admin user management. Admin manages accounts only; it never gains business-data access.
+// Admin user management (accounts, roster, Lark link).
 export const rosterImportInput = z.object({
   csv: z.string().max(512_000, 'File quá lớn (tối đa 500 KB)'),
   issueTempPasswords: z.boolean().optional(),

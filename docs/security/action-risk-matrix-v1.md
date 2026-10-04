@@ -17,6 +17,8 @@ Nguồn: [business-decisions-v1 QĐ3/4/5/13/14](../decisions/business-decisions-
 | export_data | approval | Không | BGĐ duyệt cuối; Department Head review scope | Override phase 4.7 theo QĐ5 user; không gửi export ra nhóm |
 | toggle_kill_switch | approval + Admin-only | Không | Admin thực hiện bằng UI xác thực | Capability riêng, agent không tự toggle; bật/tắt đều audit |
 
+Ngoại lệ Admin (user chốt 2026-10-04): khi Admin gọi qua agent, các lệnh `update_stage`, `mark_won`, `mark_lost` và giao lead chạy thẳng, không cần duyệt. Audit ghi `actor_kind='agent'` với Admin là người thực hiện. Kill switch vẫn chặn mọi lệnh ghi qua agent, kể cả của Admin.
+
 Mọi read vẫn kiểm actor/capability/scope/channel. Low không là quyền ghi mọi entity. Mọi write idempotent, sửa có expectedVersion; kiểm kill switch trước agent write kể cả approval/retry. Approval không nâng scope hoặc thay validation; core kiểm target, approver active, payload hash, expiry/version và consume cùng mutation. Chat “ok”, raw model input và người có quyền xem không phải phê duyệt. Duyệt qua callback Lark có chữ ký đã xác minh hoặc web UI.
 
 Human command cũng phải kiểm capability/business rule; risk approval của agent không đồng nghĩa thêm người duyệt mọi thao tác người dùng thông thường. Department Head/BGĐ không tự thay Leader ở Won/Lost/owner khi chưa được cấp capability tương ứng. Các command tài chính/contract/entitlement/merge sẽ bổ sung ở bậc tương ứng sau quyết định; agent không được gọi write chưa có contract. Xem [ADR-005](../adr/adr-005-command-contracts.md) và [security baseline](security-baseline.md).

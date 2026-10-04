@@ -46,7 +46,7 @@ export function LeadsPage() {
           <h1>Lead</h1>
           <p className="sub">Lead đang mở luôn có Owner + Next Action + hạn (QĐ13).</p>
         </div>
-        {actor.role !== 'admin' && <Link to="/leads/new" className="btn btn-primary hide-sm">Tạo lead</Link>}
+        <Link to="/leads/new" className="btn btn-primary hide-sm">Tạo lead</Link>
       </div>
       <div className="tabs" role="tablist" aria-label="Trạng thái lead">
         {visibleTabs.map((t) => (
