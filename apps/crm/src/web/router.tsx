@@ -15,6 +15,7 @@ import { DashboardPage } from './pages/dashboard';
 import { LeadDetailPage } from './pages/lead-detail';
 import { LeadNewPage } from './pages/lead-new';
 import { LeadsPage } from './pages/leads';
+import { OverviewPage } from './pages/overview';
 import { PipelinePage } from './pages/pipeline';
 import { TasksPage } from './pages/tasks';
 
@@ -62,6 +63,7 @@ const tabs = ['active', 'queue', 'won', 'lost', 'all'] as const;
 
 const routes = [
   createRoute({ getParentRoute: () => rootRoute, path: '/', component: DashboardPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/overview', component: OverviewPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/pipeline', component: PipelinePage }),
   createRoute({
     getParentRoute: () => rootRoute,

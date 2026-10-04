@@ -13,7 +13,7 @@ export interface LeadHealth {
   nextActionOverdue: boolean;
 }
 
-interface LeadListRow {
+export interface LeadListRow {
   id: string; code: string; stage: StageCode; status: string; source: string; need_summary: string;
   expected_value: number | null; first_contact_at: string | null; assigned_at: string | null;
   stage_entered_at: string; last_activity_at: string | null; created_at: string; updated_at: string;
@@ -42,7 +42,7 @@ export function leadHealth(row: Pick<LeadListRow, 'stage' | 'status' | 'first_co
   return health;
 }
 
-const LEAD_SELECT = `
+export const LEAD_SELECT = `
   SELECT l.id, l.code, l.stage, l.status, l.source, l.need_summary, l.expected_value, l.first_contact_at,
     l.assigned_at, l.stage_entered_at, l.last_activity_at, l.created_at, l.updated_at, l.closed_at, l.lost_reason,
     l.version, l.owner_user_id, u.display_name AS owner_name, l.team_id, t.name AS team_name,
@@ -55,7 +55,7 @@ const LEAD_SELECT = `
   LEFT JOIN team t ON t.id = l.team_id
   LEFT JOIN task na ON na.id = l.next_action_task_id`;
 
-function toLeadItem(row: LeadListRow, now: Date) {
+export function toLeadItem(row: LeadListRow, now: Date) {
   return {
     id: row.id, code: row.code, stage: row.stage, status: row.status, source: row.source,
     needSummary: row.need_summary, expectedValue: row.expected_value, version: row.version,
@@ -70,6 +70,11 @@ function toLeadItem(row: LeadListRow, now: Date) {
   };
 }
 export type LeadItem = ReturnType<typeof toLeadItem>;
+
+/** A lead is at risk when its Next Action is overdue, first contact is late, or the stage SLA is breached. */
+export const needsAttention = (l: Pick<LeadItem, 'health'>) => l.health.nextActionOverdue
+  || Boolean(l.health.firstContact && l.health.firstContact.state !== 'ok' && l.health.firstContact.state !== 'warn')
+  || l.health.stageSla?.state === 'breach';
 
 export interface LeadFilter {
   status?: string;
@@ -126,7 +131,7 @@ function taskScope(actor: Actor): SqlFragment {
   return leadScope(actor);
 }
 
-const vnDate = (d: Date) => new Date(d.getTime() + 7 * 3600_000).toISOString().slice(0, 10);
+export const vnDate = (d: Date) => new Date(d.getTime() + 7 * 3600_000).toISOString().slice(0, 10);
 
 export async function listTasks(db: D1Database, actor: Actor, status: 'open' | 'completed' = 'open') {
   const scope = taskScope(actor);
@@ -168,9 +173,6 @@ export async function dashboard(db: D1Database, actor: Actor) {
   const won = leads.filter((l) => l.status === 'won' && inMonth(l.closedAt));
   const lost = leads.filter((l) => l.status === 'lost' && inMonth(l.closedAt));
   const sum = (items: LeadItem[]) => items.reduce((s, l) => s + (l.expectedValue ?? 0), 0);
-  const needsAttention = (l: LeadItem) => l.health.nextActionOverdue
-    || (l.health.firstContact && l.health.firstContact.state !== 'ok' && l.health.firstContact.state !== 'warn')
-    || l.health.stageSla?.state === 'breach';
 
   const owners = new Map<string, { id: string; name: string; active: number; overdue: number; stale: number; won: number; lost: number; value: number }>();
   for (const l of leads) {
@@ -228,7 +230,7 @@ async function departmentMembers(db: D1Database, departmentId: string | null) {
   return rows.results;
 }
 
-const AUDIT_SELECT = `
+export const AUDIT_SELECT = `
   SELECT al.id, al.command, al.entity, al.entity_id, al.before_json, al.after_json, al.created_at, al.actor_kind,
     u.display_name AS actor_name, l.id AS lead_id, l.code AS lead_code
   FROM audit_log al

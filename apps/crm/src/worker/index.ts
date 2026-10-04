@@ -4,6 +4,7 @@ import { isDemoMode, requireActor } from './actor';
 import { adminRoutes } from './admin-routes';
 import { notifyCommitted } from './approval-notify';
 import { mcpRoutes } from './mcp-routes';
+import { canSeeOverview, overviewData } from './overview';
 import { publicAuth, sessionAuth } from './auth-routes';
 import { originGuard } from './session';
 import { runCommand } from './commands';
@@ -83,6 +84,11 @@ app.get('/admin/overview', async (c) => {
   const actor = c.get('actor');
   if (actor.role !== 'admin') return c.json(forbidden, 403);
   return c.json(data(await adminOverview(c.env.DB, actor)));
+});
+app.get('/overview', async (c) => {
+  const actor = c.get('actor');
+  if (!canSeeOverview(actor)) return c.json(forbidden, 403);
+  return c.json(data(await overviewData(c.env.DB, actor, { period: c.req.query('period'), departmentId: c.req.query('department') || undefined })));
 });
 
 app.post('/commands/:name', async (c) => {

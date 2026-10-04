@@ -153,3 +153,27 @@ export interface AdminOverview {
   users: AdminUser[];
   counts: { leads: number; audit: number; outboxPending: number; approvalsPending: number; agentKillSwitch: number };
 }
+
+export type OverviewPeriod = 'month' | 'quarter' | 'year';
+export interface OverviewCard {
+  id: string; code: string; title: string; ownerName: string | null; value: number | null;
+  risk: boolean; nextActionDueAt: string | null; closedAt: string | null;
+}
+export interface OverviewColumn { key: 'queue' | StageCode; count: number; value: number; atRisk: number; leads: OverviewCard[] }
+export interface Overview {
+  period: { key: OverviewPeriod; start: string };
+  departments: { id: string; name: string }[];
+  departmentId: string | null;
+  truncated: { shown: number; total: number } | null;
+  kpi: {
+    openLeads: number; pipelineValue: number; queueLeads: number;
+    wonCount: number; wonValue: number; lostCount: number; lostValue: number; winRate: number | null;
+    overdueTasks: number; slaBreaches: number; pendingApprovals: number; agentActionsToday: number;
+  };
+  columns: OverviewColumn[];
+  approvals: {
+    byKind: { kind: string; count: number }[];
+    oldest: { id: string; kind: string; toStage: string | null; leadId: string; leadCode: string; requester: string | null; requestedByKind: 'human' | 'agent'; createdAt: string }[];
+  };
+  bot: { agentWritesOpen: boolean; activeTokens: number; agentWrites7d: number; outbox: { status: string; count: number }[] };
+}

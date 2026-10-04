@@ -32,6 +32,7 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
   const nav: NavItem[] = [
     { to: '/', label: 'Tổng quan', icon: 'home' },
     { to: '/pipeline', label: 'Pipeline', icon: 'board' },
+    { to: '/overview', label: 'Toàn cảnh', icon: 'trophy', roles: ['admin', 'director'] },
     { to: '/leads', label: 'Lead', icon: 'leads' },
     { to: '/customers', label: 'Khách hàng 360', icon: 'building' },
     { to: '/tasks', label: actor.role === 'admin' ? 'Công việc' : 'Việc của tôi', icon: 'check' },
