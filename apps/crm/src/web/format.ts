@@ -1,14 +1,15 @@
 const TZ = 'Asia/Ho_Chi_Minh';
 
-const dateTime = new Intl.DateTimeFormat('vi-VN', { timeZone: TZ, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+const dateTime = new Intl.DateTimeFormat('vi-VN', { timeZone: TZ, day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const dateOnly = new Intl.DateTimeFormat('vi-VN', { timeZone: TZ, day: '2-digit', month: '2-digit', year: 'numeric' });
 const dayKey = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
 
-/** dd/MM HH:mm in Vietnam time. */
-export function fmtDateTime(iso: string | null | undefined) {
+/** dd/MM HH:mm in Vietnam time; the year is added when it is not the current year, or always with `withYear`. */
+export function fmtDateTime(iso: string | null | undefined, withYear = false) {
   if (!iso) return '—';
   const p = Object.fromEntries(dateTime.formatToParts(new Date(iso)).map((x) => [x.type, x.value]));
-  return `${p.day}/${p.month} ${p.hour}:${p.minute}`;
+  const showYear = withYear || p.year !== dayKey.format(new Date()).slice(0, 4);
+  return `${p.day}/${p.month}${showYear ? `/${p.year}` : ''} ${p.hour}:${p.minute}`;
 }
 export const fmtDate = (iso: string | null | undefined) => (iso ? dateOnly.format(new Date(iso)) : '—');
 

@@ -6,7 +6,8 @@ import { ApiFailure, useCommand } from '../api';
 import { NextActionFields, emptyNextAction, nextActionPayload } from '../components/lead-actions';
 import { Alert, Field, FormError, fieldErrors, useToast } from '../components/ui';
 
-interface DuplicateMatch { field: string; code: string; stage: string; owner: string }
+/** Matches outside the viewer's scope come back without code, stage or owner. */
+interface DuplicateMatch { field: string; code: string | null; stage: string | null; owner: string | null }
 const FIELD_LABEL: Record<string, string> = { phone: 'Số điện thoại', email: 'Email', tax_code: 'Mã số thuế', company: 'Tên công ty' };
 
 export function LeadNewPage() {
@@ -62,8 +63,8 @@ export function LeadNewPage() {
             <Field label="Email" error={errors.email} htmlFor="f-email">
               <input id="f-email" type="email" value={form.email} onChange={set('email')} aria-invalid={Boolean(errors.email)} autoComplete="off" />
             </Field>
-            <Field label="Công ty" htmlFor="f-company">
-              <input id="f-company" type="text" value={form.companyName} onChange={set('companyName')} autoComplete="off" />
+            <Field label="Công ty" error={errors.companyName} hint="Bắt buộc khi có mã số thuế." htmlFor="f-company">
+              <input id="f-company" type="text" value={form.companyName} onChange={set('companyName')} aria-invalid={Boolean(errors.companyName)} autoComplete="off" />
             </Field>
             <Field label="Mã số thuế" htmlFor="f-tax" hint="Trùng MST sẽ gắn vào khách hàng đã có.">
               <input id="f-tax" type="text" inputMode="numeric" value={form.taxCode} onChange={set('taxCode')} autoComplete="off" />
@@ -78,7 +79,9 @@ export function LeadNewPage() {
             <div className="alert" data-tone="warn" role="alert" style={{ flexDirection: 'column' }}>
               <strong>Có thể trùng với lead đã có</strong>
               <ul style={{ margin: '4px 0', paddingLeft: 18 }}>
-                {duplicates.map((d, i) => <li key={i}>{FIELD_LABEL[d.field] ?? d.field} trùng <span className="mono">{d.code}</span> · {d.stage} · {d.owner}</li>)}
+                {duplicates.map((d, i) => <li key={i}>{FIELD_LABEL[d.field] ?? d.field} trùng {d.code
+                  ? <><span className="mono">{d.code}</span> · {d.stage} · {d.owner}</>
+                  : 'một lead đã có trong hệ thống, ngoài phạm vi của bạn (hỏi Leader)'}</li>)}
               </ul>
               <span>Nếu cùng khách, báo owner hiện tại thay vì tạo mới. Nếu chắc chắn là khách khác, xác nhận để tạo.</span>
               <div className="row-wrap" style={{ marginTop: 6 }}>

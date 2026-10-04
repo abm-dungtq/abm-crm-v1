@@ -4,7 +4,7 @@ import {
   type ChangeStageInput, type CompleteTaskInput, type DecideApprovalInput, type LogActivityInput, type LostReasonCode, type StageCode,
 } from '@abm/contracts';
 import { useCommand } from '../api';
-import { fromLocalInput, toLocalInput } from '../format';
+import { fmtMoney, fromLocalInput, toLocalInput } from '../format';
 import type { ApprovalItem, Member } from '../types';
 import { Alert, Field, FormError, Modal, fieldErrors, useToast } from './ui';
 
@@ -96,19 +96,27 @@ export function ChangeStageDialog({ open, onClose, lead, initial }: {
   const [to, setTo] = useState<StageCode>(initial ?? options[0] ?? 'lost');
   const [reason, setReason] = useState<LostReasonCode | ''>('');
   const [note, setNote] = useState('');
+  const [wonValue, setWonValue] = useState('');
+  const [wonNote, setWonNote] = useState('');
   const mutation = useCommand<ChangeStageInput>('changeStage');
   const toast = useToast();
   const errors = fieldErrors(mutation.error);
-  useEffect(() => { if (open) { setTo(initial ?? options[0] ?? 'lost'); setReason(''); setNote(''); mutation.reset(); } }, [open]);
+  useEffect(() => { if (open) { setTo(initial ?? options[0] ?? 'lost'); setReason(''); setNote(''); setWonValue(''); setWonNote(''); mutation.reset(); } }, [open]);
+  // Dots and spaces are thousands separators; a comma means a decimal, which đồng never has.
+  const wonAmount = wonValue.includes(',') ? 0 : Number(wonValue.replace(/[.\s]/g, ''));
+  const wonIncomplete = to === 'won' && (!wonAmount || !wonNote.trim());
   const needsContact = lead.stage === 'new' && to === 'contacted' && !lead.firstContactAt;
   const submit = () => mutation.mutate(
-    { leadId: lead.id, expectedVersion: lead.version, toStage: to, lostReason: reason || undefined, lostNote: note || undefined },
+    {
+      leadId: lead.id, expectedVersion: lead.version, toStage: to, lostReason: reason || undefined, lostNote: note || undefined,
+      wonValue: to === 'won' ? wonAmount : undefined, wonNote: to === 'won' ? wonNote : undefined,
+    },
     { onSuccess: () => { toast(`${lead.code}: ${stageLabel(lead.stage)} → ${stageLabel(to)}`); onClose(); } },
   );
   return (
     <Modal open={open} onClose={onClose} title={`Đổi stage ${lead.code}`} footer={<>
       <button className="btn" onClick={onClose}>Hủy</button>
-      <button className={`btn ${to === 'lost' ? 'btn-danger' : 'btn-primary'}`} disabled={mutation.isPending || needsContact} onClick={submit}>
+      <button className={`btn ${to === 'lost' ? 'btn-danger' : 'btn-primary'}`} disabled={mutation.isPending || needsContact || wonIncomplete} onClick={submit}>
         {mutation.isPending ? 'Đang lưu…' : to === 'lost' ? 'Đóng Lost' : to === 'won' ? 'Xác nhận Won' : `Chuyển sang ${stageLabel(to)}`}
       </button>
     </>}>
@@ -130,8 +138,19 @@ export function ChangeStageDialog({ open, onClose, lead, initial }: {
           </Field>
         </>
       )}
-      {to === 'won' && <Alert tone="info">Won sẽ đóng lead, hủy các việc còn mở. Bàn giao triển khai thuộc MVP2.</Alert>}
-      <FormError error={mutation.error && !errors.lostReason && !errors.lostNote ? mutation.error : null} />
+      {to === 'won' && (
+        <>
+          <Field label="Giá trị chốt (đồng)" required error={errors.wonValue} htmlFor="won-value" hint={wonAmount ? fmtMoney(wonAmount, false) : 'Số nguyên đồng, lớn hơn 0.'}>
+            <input id="won-value" type="text" inputMode="numeric" value={wonValue} placeholder="VD: 350000000" aria-invalid={Boolean(errors.wonValue)}
+              onChange={(e) => setWonValue(e.target.value.replace(/[^\d.,\s]/g, ''))} />
+          </Field>
+          <Field label="Bằng chứng chốt" required error={errors.wonNote} htmlFor="won-note" hint="VD: số hợp đồng, PO, email xác nhận.">
+            <textarea id="won-note" value={wonNote} onChange={(e) => setWonNote(e.target.value)} aria-invalid={Boolean(errors.wonNote)} />
+          </Field>
+          <Alert tone="info">Won sẽ đóng lead, hủy các việc còn mở. Bàn giao triển khai thuộc MVP2.</Alert>
+        </>
+      )}
+      <FormError error={mutation.error && !errors.lostReason && !errors.lostNote && !errors.wonValue && !errors.wonNote ? mutation.error : null} />
     </Modal>
   );
 }

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { Link, useRouterState } from '@tanstack/react-router';
+import { Link, Navigate, useRouterState } from '@tanstack/react-router';
 import { useQueryClient } from '@tanstack/react-query';
 import { ROLES, type RoleCode } from '@abm/contracts';
 import { setDemoUser, useApi } from '../api';
@@ -19,6 +19,12 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
   const [open, setOpen] = useState(false);
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   useEffect(() => setOpen(false), [pathname]);
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open]);
   const business = actor.role !== 'admin';
   const approvals = useApi<ApprovalItem[]>(business ? '/approvals?status=pending' : null);
   const pending = approvals.data?.filter((a) => a.canDecide).length ?? 0;
@@ -30,7 +36,7 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
     { to: '/customers', label: 'Khách hàng 360', icon: 'building', roles: ['sale', 'leader', 'head', 'director'] },
     { to: '/tasks', label: 'Việc của tôi', icon: 'check', roles: ['sale', 'leader', 'head', 'director'] },
     { to: '/approvals', label: 'Hàng chờ duyệt', icon: 'approve', roles: ['sale', 'leader', 'head', 'director'], badge: pending },
-    { to: '/audit', label: 'Nhật ký audit', icon: 'audit', roles: ['leader', 'head', 'director', 'admin'] },
+    { to: '/audit', label: 'Nhật ký audit', icon: 'audit', roles: ['leader', 'head', 'director'] },
     { to: '/admin', label: 'Cấu hình', icon: 'settings', roles: ['admin'] },
   ];
 
@@ -62,7 +68,7 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
           <span className="spacer hide-sm" />
           {business && actor.role !== 'admin' && <Link to="/leads/new" className="btn btn-primary"><Icon name="plus" /><span className="hide-sm">Tạo lead</span></Link>}
         </header>
-        <main className="content" id="main">{children}</main>
+        <main className="content" id="main">{business || pathname === '/admin' ? children : <Navigate to="/admin" replace />}</main>
       </div>
     </div>
   );

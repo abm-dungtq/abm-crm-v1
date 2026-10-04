@@ -107,7 +107,7 @@ export interface LeadTask { id: string; title: string; dueAt: string; status: st
 export interface Member { id: string; name: string; role: string }
 
 export interface LeadDetail {
-  lead: LeadItem & { lostNote: string | null };
+  lead: LeadItem & { lostNote: string | null; wonNote: string | null };
   contactPoints: { type: string; value: string }[];
   account: { id: string; name: string; taxCode: string | null; industry: string | null; city: string | null } | null;
   tasks: LeadTask[];

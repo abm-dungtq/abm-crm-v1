@@ -183,7 +183,9 @@ describe('lead intake', () => {
   });
 
   test('leader releases a lead not contacted after 24 working hours', async () => {
-    const early = await command('u-hung', 'releaseLead', { leadId: 'lead-02', expectedVersion: 1, reason: 'Chưa gọi' });
+    // The seed stores absolute timestamps; pin "just assigned" to now so the early case never ages out.
+    await db.prepare('UPDATE lead SET assigned_at = ? WHERE id = ?').bind(new Date().toISOString(), 'lead-02').run();
+    const early =await command('u-hung', 'releaseLead', { leadId: 'lead-02', expectedVersion: 1, reason: 'Chưa gọi' });
     expect(early.json.error?.code).toBe('VALIDATION_FAILED');
     const r = await command('u-mai', 'releaseLead', { leadId: 'lead-03', expectedVersion: 1, reason: 'Quá 24 giờ chưa liên hệ' });
     expect(r.json.ok).toBe(true);

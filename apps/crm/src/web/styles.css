@@ -223,7 +223,7 @@ a.kpi:hover { border-color: var(--border-strong); text-decoration: none; }
 .table-wrap { overflow-x: auto; }
 table.table { width: 100%; border-collapse: collapse; }
 .table th {
-  text-align: left; font-size: 12px; font-weight: 600; color: var(--muted); padding: 8px 12px; background: var(--surface-2);
+  text-align: left; font-size: 12px; font-weight: 600; color: var(--text-2); padding: 8px 12px; background: var(--surface-2);
   border-bottom: 1px solid var(--border); white-space: nowrap;
 }
 .table td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
@@ -357,9 +357,9 @@ dialog.modal::backdrop { background: rgba(10, 14, 20, 0.45); }
   .shell { grid-template-columns: minmax(0, 1fr); }
   .sidebar {
     position: fixed; inset: 0 auto 0 0; width: min(280px, 84vw); z-index: 50; transform: translateX(-100%);
-    transition: transform 0.2s ease; box-shadow: var(--shadow-lg);
+    transition: transform 0.2s ease, visibility 0s linear 0.2s; box-shadow: var(--shadow-lg); visibility: hidden;
   }
-  .sidebar[data-open='true'] { transform: none; }
+  .sidebar[data-open='true'] { transform: none; visibility: visible; transition: transform 0.2s ease; }
   .scrim { position: fixed; inset: 0; background: rgba(10, 14, 20, 0.4); z-index: 40; }
   .topbar .menu-btn { display: inline-flex; }
   .topbar { padding: 8px 16px; }
@@ -367,7 +367,7 @@ dialog.modal::backdrop { background: rgba(10, 14, 20, 0.45); }
   .demo-banner { padding: 6px 16px; }
   .cols-2, .grid-2 { grid-template-columns: minmax(0, 1fr); }
   .hide-sm { display: none !important; }
-  .board { grid-auto-columns: minmax(78vw, 1fr); scroll-snap-type: x mandatory; }
+  .board { grid-auto-columns: calc(100vw - 72px); scroll-snap-type: x mandatory; }
   .column { scroll-snap-align: start; max-height: none; }
   .table.responsive thead { display: none; }
   .table.responsive tr { display: block; border-bottom: 1px solid var(--border); padding: 8px 4px; }

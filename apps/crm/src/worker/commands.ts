@@ -1,6 +1,6 @@
 import {
-  COMMANDS, FIRST_CONTACT_SLA_HOURS, RELEASE_AFTER_HOURS, ACTIVITY_TYPES, addWorkingHours, allowedTransitions,
-  lostReasonLabel, stageLabel, workingMinutesBetween,
+  ACTIVITY_BACKDATE_DAYS, COMMANDS, FIRST_CONTACT_SLA_HOURS, RELEASE_AFTER_HOURS, ACTIVITY_TYPES, addWorkingHours, allowedTransitions,
+  foldText, lostReasonLabel, normalizeEmail, normalizePhone, stageLabel, workingMinutesBetween,
   type ApiError, type ApiResult, type AssignLeadInput, type ChangeStageInput, type CommandName,
   type CompleteTaskInput, type CreateLeadInput, type DecideApprovalInput, type LogActivityInput,
   type NextActionInput, type ReleaseLeadInput, type RequestOwnerChangeInput, type StageCode,
@@ -8,7 +8,7 @@ import {
 import type { z } from 'zod';
 import type { Actor } from './env';
 import { GuardedTx, isGuardFailure } from './guarded-tx';
-import { canSeeLead } from './scope';
+import { canSeeLead, leaderOnly, leadScope, mayDecideApproval } from './scope';
 
 export interface LeadRow {
   id: string;
@@ -24,6 +24,7 @@ export interface LeadRow {
   next_action_task_id: string | null;
   first_contact_at: string | null;
   assigned_at: string | null;
+  created_at: string;
   version: number;
 }
 
@@ -89,7 +90,7 @@ export async function runCommand(db: D1Database, actor: Actor, name: CommandName
   }
   const hash = await sha256(JSON.stringify(parsed.data));
   const previous = await replay(db, actor, idempotencyKey, name, hash);
-  if (previous) return previous;
+  if (previous) return replayInScope(db, actor, name, parsed.data, previous);
 
   const tx = new GuardedTx(db, actor, name);
   const handler = handlers[name] as Handler<unknown>;
@@ -101,19 +102,29 @@ export async function runCommand(db: D1Database, actor: Actor, name: CommandName
     return result;
   } catch (error) {
     const concurrent = await replay(db, actor, idempotencyKey, name, hash);
-    if (concurrent) return concurrent;
+    if (concurrent) return replayInScope(db, actor, name, parsed.data, concurrent);
     if (isGuardFailure(error)) return fail('STALE_VERSION', 'Dữ liệu vừa được người khác cập nhật. Tải lại rồi thử lại.');
     throw error;
   }
 }
 
-// ---------- helpers ----------
+/**
+ * A stored result is only returned while the actor can still see the lead it touched, so a
+ * replay never discloses a target the actor has since lost access to. A createLead replay is
+ * exempt: it only returns the id the creator already received, and refusing it would push a
+ * retrying client into creating a duplicate.
+ */
+async function replayInScope(db: D1Database, actor: Actor, name: CommandName, input: unknown, stored: ApiResult<unknown>): Promise<ApiResult<unknown>> {
+  if (name === 'createLead') return stored;
+  const fields = input as { leadId?: string; taskId?: string; approvalId?: string };
+  const leadId = fields.leadId
+    ?? (fields.taskId ? (await db.prepare('SELECT lead_id FROM task WHERE id = ?').bind(fields.taskId).first<{ lead_id: string }>())?.lead_id : undefined)
+    ?? (fields.approvalId ? (await db.prepare('SELECT lead_id FROM approval WHERE id = ?').bind(fields.approvalId).first<{ lead_id: string }>())?.lead_id : undefined);
+  if (leadId && !(await canSeeLead(db, actor, leadId))) return notFound();
+  return stored;
+}
 
-export const normalizePhone = (value: string) => {
-  const digits = value.replace(/\D/g, '');
-  return digits.startsWith('84') ? `0${digits.slice(2)}` : digits;
-};
-export const normalizeEmail = (value: string) => value.trim().toLowerCase();
+// ---------- helpers ----------
 
 async function loadLead(db: D1Database, actor: Actor, leadId: string) {
   if (!(await canSeeLead(db, actor, leadId))) return null;
@@ -152,7 +163,9 @@ async function applyOwnerChange(db: D1Database, tx: GuardedTx, lead: LeadRow, ex
 }
 
 /** Validates and stages a stage transition (QĐ1/QĐ6 state machine, MVP1: forward one step only). */
-async function applyStageChange(db: D1Database, tx: GuardedTx, lead: LeadRow, expectedVersion: number, input: Pick<ChangeStageInput, 'toStage' | 'lostReason' | 'lostNote'>, via?: string): Promise<ApiResult<unknown> | null> {
+type StageChange = Pick<ChangeStageInput, 'toStage' | 'lostReason' | 'lostNote' | 'wonValue' | 'wonNote'>;
+
+async function applyStageChange(db: D1Database, tx: GuardedTx, lead: LeadRow, expectedVersion: number, input: StageChange, via?: string): Promise<ApiResult<unknown> | null> {
   if (lead.status !== 'active') return fail('VALIDATION_FAILED', 'Chỉ lead đang mở mới đổi được stage');
   if (!allowedTransitions(lead.stage).includes(input.toStage)) {
     return fail('VALIDATION_FAILED', `Không chuyển được từ "${stageLabel(lead.stage)}" sang "${stageLabel(input.toStage)}". MVP1 chỉ tiến một bước, Won chỉ từ Chờ chốt.`, { fields: { toStage: 'Chuyển stage không hợp lệ' } });
@@ -160,7 +173,11 @@ async function applyStageChange(db: D1Database, tx: GuardedTx, lead: LeadRow, ex
   if (lead.stage === 'new' && input.toStage !== 'lost' && !lead.first_contact_at) {
     return fail('VALIDATION_FAILED', 'Cần ghi nhận liên hệ lần đầu (cuộc gọi, tin nhắn, email, gặp mặt) trước khi sang Đã liên hệ.', { fields: { toStage: 'Chưa có liên hệ lần đầu' } });
   }
-  const terminal = input.toStage === 'won' || input.toStage === 'lost';
+  const won = input.toStage === 'won';
+  if (won && (!input.wonValue || !input.wonNote)) {
+    return fail('VALIDATION_FAILED', 'Won cần giá trị chốt và ghi chú bằng chứng', { fields: { wonValue: 'Bắt buộc', wonNote: 'Bắt buộc' } });
+  }
+  const terminal = won || input.toStage === 'lost';
   const set: Record<string, unknown> = { stage: input.toStage, stage_entered_at: tx.now };
   if (terminal) {
     Object.assign(set, {
@@ -169,13 +186,15 @@ async function applyStageChange(db: D1Database, tx: GuardedTx, lead: LeadRow, ex
       lost_note: input.toStage === 'lost' ? input.lostNote ?? null : null,
     });
   }
+  if (won) Object.assign(set, { expected_value: input.wonValue, won_note: input.wonNote });
   tx.update('lead', lead.id, expectedVersion, set);
   if (terminal) {
     const open = await db.prepare(`SELECT id, version FROM task WHERE lead_id = ? AND status = 'open'`).bind(lead.id).all<{ id: string; version: number }>();
     for (const task of open.results) tx.update('task', task.id, task.version, { status: 'cancelled' });
   }
-  const lostText = input.toStage === 'lost' ? ` — ${lostReasonLabel(input.lostReason)}${input.lostNote ? `: ${input.lostNote}` : ''}` : '';
-  tx.activity(lead.id, 'stage_changed', `${stageLabel(lead.stage)} → ${stageLabel(input.toStage)}${lostText}${via ? ` (${via})` : ''}`);
+  const closeText = input.toStage === 'lost' ? ` — ${lostReasonLabel(input.lostReason)}${input.lostNote ? `: ${input.lostNote}` : ''}`
+    : won ? ` — ${input.wonValue!.toLocaleString('vi-VN')} đ: ${input.wonNote}` : '';
+  tx.activity(lead.id, 'stage_changed', `${stageLabel(lead.stage)} → ${stageLabel(input.toStage)}${closeText}${via ? ` (${via})` : ''}`);
   tx.audit('lead', lead.id, { stage: lead.stage, status: lead.status }, { ...set });
   tx.event('lead.stageChanged', { leadId: lead.id, from: lead.stage, to: input.toStage });
   return null;
@@ -189,25 +208,38 @@ async function createLead({ db, actor, input, tx }: Ctx<CreateLeadInput>) {
   const taxCode = input.taxCode?.trim() || null;
   const companyName = input.companyName?.trim() || null;
 
+  // Company names are compared folded (case, diacritics, spacing) in JS because SQLite lower() is ASCII-only.
+  const companyKey = companyName ? foldText(companyName) : null;
+  const sameName = companyKey
+    ? (await db.prepare('SELECT id, name FROM account WHERE organization_id = ?').bind(actor.organizationId).all<{ id: string; name: string }>())
+      .results.filter((a) => foldText(a.name) === companyKey).map((a) => a.id)
+    : [];
   const matches = (await db.prepare(`
-    SELECT 'phone' AS field, l.code, l.stage, u.display_name AS owner FROM contact_point cp
+    SELECT 'phone' AS field, l.id, l.code, l.stage, u.display_name AS owner FROM contact_point cp
       JOIN lead l ON l.contact_id = cp.contact_id LEFT JOIN app_user u ON u.id = l.owner_user_id
       WHERE cp.type = 'phone' AND cp.normalized_value = ?1 AND l.organization_id = ?5
-    UNION SELECT 'email', l.code, l.stage, u.display_name FROM contact_point cp
+    UNION SELECT 'email', l.id, l.code, l.stage, u.display_name FROM contact_point cp
       JOIN lead l ON l.contact_id = cp.contact_id LEFT JOIN app_user u ON u.id = l.owner_user_id
       WHERE cp.type = 'email' AND cp.normalized_value = ?2 AND l.organization_id = ?5
-    UNION SELECT 'tax_code', l.code, l.stage, u.display_name FROM account a
+    UNION SELECT 'tax_code', l.id, l.code, l.stage, u.display_name FROM account a
       JOIN lead l ON l.account_id = a.id LEFT JOIN app_user u ON u.id = l.owner_user_id
       WHERE a.tax_code = ?3 AND l.organization_id = ?5
-    UNION SELECT 'company', l.code, l.stage, u.display_name FROM account a
-      JOIN lead l ON l.account_id = a.id LEFT JOIN app_user u ON u.id = l.owner_user_id
-      WHERE lower(a.name) = lower(?4) AND l.organization_id = ?5
-    LIMIT 10`).bind(phone, email, taxCode, companyName, actor.organizationId)
-    .all<{ field: string; code: string; stage: string; owner: string | null }>()).results;
+    UNION SELECT 'company', l.id, l.code, l.stage, u.display_name FROM lead l LEFT JOIN app_user u ON u.id = l.owner_user_id
+      WHERE l.account_id IN (SELECT value FROM json_each(?4)) AND l.organization_id = ?5
+    LIMIT 10`).bind(phone, email, taxCode, JSON.stringify(sameName), actor.organizationId)
+    .all<{ field: string; id: string; code: string; stage: string; owner: string | null }>()).results;
 
+  // Only leads inside the actor's scope are described (here and in the audit); others are acknowledged without detail.
+  const scope = leadScope(actor);
+  const visible = matches.length
+    ? new Set((await db.prepare(`SELECT l.id FROM lead l WHERE l.id IN (SELECT value FROM json_each(?)) AND ${scope.sql}`)
+      .bind(JSON.stringify(matches.map((m) => m.id)), ...scope.binds).all<{ id: string }>()).results.map((r) => r.id))
+    : new Set<string>();
   if (matches.length && !input.confirmNotDuplicate) {
     return fail('DUPLICATE_SUSPECTED', 'Có thể trùng với lead đã có. Kiểm tra trước khi tạo.', {
-      details: matches.map((m) => ({ field: m.field, code: m.code, stage: stageLabel(m.stage), owner: m.owner ?? 'Hàng chờ' })),
+      details: matches.map((m) => visible.has(m.id)
+        ? { field: m.field, code: m.code, stage: stageLabel(m.stage), owner: m.owner ?? 'Hàng chờ' }
+        : { field: m.field, code: null, stage: null, owner: null, note: 'Đã có trong hệ thống, ngoài phạm vi của bạn' }),
     });
   }
 
@@ -264,7 +296,7 @@ async function createLead({ db, actor, input, tx }: Ctx<CreateLeadInput>) {
   }
   tx.audit('lead', leadId, null, {
     source: input.source, status: isSale ? 'active' : 'queue',
-    duplicateOverride: matches.length ? matches.map((m) => `${m.field}:${m.code}`) : undefined,
+    duplicateOverride: matches.length ? matches.map((m) => `${m.field}:${visible.has(m.id) ? m.code : 'ngoài phạm vi'}`) : undefined,
   });
   tx.event('lead.created', { leadId, source: input.source });
   return ok({ leadId });
@@ -329,6 +361,12 @@ async function logActivity({ db, actor, input, tx }: Ctx<LogActivityInput>) {
   if (lead.status === 'queue') return fail('VALIDATION_FAILED', 'Lead chưa có owner. Leader cần giao trước.');
   const occurredAt = input.occurredAt ? new Date(input.occurredAt).toISOString() : tx.now;
   if (occurredAt > tx.now) return fail('VALIDATION_FAILED', 'Thời điểm hoạt động không được ở tương lai', { fields: { occurredAt: 'Ở tương lai' } });
+  // Backdating is bounded so a late first contact cannot be recorded as on time.
+  const backdateLimit = new Date(Date.parse(tx.now) - ACTIVITY_BACKDATE_DAYS * 86_400_000).toISOString();
+  const earliest = [lead.assigned_at ?? lead.created_at, backdateLimit].sort().at(-1)!;
+  if (occurredAt < earliest) {
+    return fail('VALIDATION_FAILED', `Thời điểm hoạt động không được trước lúc lead được giao/tạo và không quá ${ACTIVITY_BACKDATE_DAYS} ngày trước`, { fields: { occurredAt: 'Quá sớm' } });
+  }
   const isContact = ACTIVITY_TYPES.find((a) => a.code === input.type)?.contact ?? false;
   const set: Record<string, unknown> = { last_activity_at: occurredAt };
   if (isContact && !lead.first_contact_at) set.first_contact_at = occurredAt;
@@ -359,7 +397,10 @@ async function completeTask({ db, actor, input, tx }: Ctx<CompleteTaskInput>) {
     });
   }
   // Guard the lead even when only the task changes, so the Next Action pointer cannot race.
-  tx.update('lead', lead.id, lead.version, nextTaskId ? { next_action_task_id: nextTaskId, last_activity_at: tx.now } : { last_activity_at: tx.now });
+  // The pointer only moves when the current Next Action is completed; a follow-up from another
+  // task stays an extra open task so the existing Next Action is never orphaned.
+  const movePointer = nextTaskId && (isNextAction || !lead.next_action_task_id);
+  tx.update('lead', lead.id, lead.version, movePointer ? { next_action_task_id: nextTaskId, last_activity_at: tx.now } : { last_activity_at: tx.now });
   tx.activity(lead.id, 'task_completed', `${task.title}${input.outcome ? ` — ${input.outcome}` : ''}${input.nextAction ? `. Tiếp theo: ${input.nextAction.title}` : ''}`);
   tx.audit('task', task.id, { status: 'open' }, { status: 'completed', outcome: input.outcome, next_action_task_id: nextTaskId });
   tx.event('task.completed', { taskId: task.id, leadId: lead.id, nextTaskId });
@@ -390,6 +431,8 @@ async function requestOwnerChange({ db, actor, input, tx }: Ctx<RequestOwnerChan
     payload_json: JSON.stringify({ fromUserId: lead.owner_user_id, toUserId: member.id }),
     reason: input.reason, status: 'pending', requested_by_user_id: actor.id, requested_by_kind: 'human',
   });
+  // The pre-read above cannot lock; this keeps two concurrent requests from both landing.
+  tx.assert(`SELECT COUNT(*) = 1 FROM approval WHERE lead_id = ? AND kind = 'owner_change' AND status = 'pending'`, [lead.id]);
   tx.audit('approval', approvalId, null, { kind: 'owner_change', leadId: lead.id, toUserId: member.id, reason: input.reason });
   tx.event('approval.requested', { approvalId, leadId: lead.id, kind: 'owner_change' });
   return ok({ approvalId });
@@ -402,9 +445,13 @@ async function decideApproval({ db, actor, input, tx }: Ctx<DecideApprovalInput>
   if (!lead) return fail('NOT_FOUND', 'Không tìm thấy yêu cầu duyệt trong phạm vi của bạn');
   if (approval.version !== input.expectedVersion || approval.status !== 'pending') return stale();
 
-  const isTeamLeader = actor.role === 'leader' && lead.team_id === actor.teamId;
-  const mayDecide = approval.kind === 'owner_change' ? isTeamLeader : isTeamLeader || lead.owner_user_id === actor.id;
-  if (!mayDecide) return fail('FORBIDDEN', approval.kind === 'owner_change' ? 'Chỉ Leader của team duyệt chuyển owner (QĐ14)' : 'Chỉ owner hoặc Leader của team duyệt đề xuất này');
+  const payload = JSON.parse(approval.payload_json) as {
+    toUserId?: string; toStage?: StageCode; lostReason?: ChangeStageInput['lostReason']; lostNote?: string;
+    wonValue?: number; wonNote?: string; agentName?: string;
+  };
+  if (!mayDecideApproval(actor, approval.kind, payload.toStage, lead)) {
+    return fail('FORBIDDEN', leaderOnly(approval.kind, payload.toStage) ? 'Chỉ Leader của team duyệt chuyển owner hoặc Won/Lost (QĐ14, action-risk matrix)' : 'Chỉ owner hoặc Leader của team duyệt đề xuất này');
+  }
 
   const decision = { decided_by_user_id: actor.id, decided_at: tx.now, decision_note: input.note ?? null };
   if (input.decision === 'reject') {
@@ -420,7 +467,6 @@ async function decideApproval({ db, actor, input, tx }: Ctx<DecideApprovalInput>
     tx.event('approval.decided', { approvalId: approval.id, status: 'stale' });
     return ok({ status: 'stale' });
   }
-  const payload = JSON.parse(approval.payload_json) as { toUserId?: string; toStage?: StageCode; lostReason?: ChangeStageInput['lostReason']; lostNote?: string; agentName?: string };
   tx.update('approval', approval.id, approval.version, { status: 'approved', ...decision });
   if (approval.kind === 'owner_change') {
     const member = payload.toUserId ? await loadTeamMember(db, payload.toUserId, lead.team_id) : null;
@@ -428,7 +474,9 @@ async function decideApproval({ db, actor, input, tx }: Ctx<DecideApprovalInput>
     await applyOwnerChange(db, tx, lead, approval.target_version, member, 'Leader duyệt yêu cầu chuyển owner');
   } else {
     if (!payload.toStage) return fail('VALIDATION_FAILED', 'Đề xuất thiếu stage đích');
-    const invalid = await applyStageChange(db, tx, lead, approval.target_version, { toStage: payload.toStage, lostReason: payload.lostReason, lostNote: payload.lostNote }, `đề xuất của ${payload.agentName ?? 'agent'}, ${actor.displayName} duyệt`);
+    const invalid = await applyStageChange(db, tx, lead, approval.target_version, {
+      toStage: payload.toStage, lostReason: payload.lostReason, lostNote: payload.lostNote, wonValue: payload.wonValue, wonNote: payload.wonNote,
+    }, `đề xuất của ${payload.agentName ?? 'agent'}, ${actor.displayName} duyệt`);
     if (invalid) return invalid;
   }
   tx.audit('approval', approval.id, { status: 'pending' }, { status: 'approved', note: input.note });

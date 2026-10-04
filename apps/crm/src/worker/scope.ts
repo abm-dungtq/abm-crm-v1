@@ -29,6 +29,16 @@ export function leadScope(actor: Actor, alias = 'l'): SqlFragment {
   }
 }
 
+/** Owner changes and agent Won/Lost proposals are decided by the team Leader only (QĐ14, action-risk matrix). */
+export const leaderOnly = (kind: string, toStage?: string | null) =>
+  kind === 'owner_change' || toStage === 'won' || toStage === 'lost';
+
+export function mayDecideApproval(actor: Actor, kind: string, toStage: string | null | undefined, lead: { team_id: string | null; owner_user_id: string | null }) {
+  const isTeamLeader = actor.role === 'leader' && actor.teamId != null && lead.team_id === actor.teamId;
+  if (leaderOnly(kind, toStage)) return isTeamLeader;
+  return isTeamLeader || (actor.role === 'sale' && lead.owner_user_id === actor.id);
+}
+
 export async function canSeeLead(db: D1Database, actor: Actor, leadId: string): Promise<boolean> {
   const scope = leadScope(actor);
   const row = await db.prepare(`SELECT 1 AS ok FROM lead l WHERE l.id = ? AND ${scope.sql}`)

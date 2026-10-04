@@ -28,6 +28,7 @@ const command = (user: string, name: string, body: unknown) => call(user, 'POST'
 const lead = (id: string) => db.prepare('SELECT * FROM lead WHERE id = ?').bind(id).first<Record<string, any>>();
 const task = (id: string) => db.prepare('SELECT * FROM task WHERE id = ?').bind(id).first<Record<string, any>>();
 const approval = (id: string) => db.prepare('SELECT * FROM approval WHERE id = ?').bind(id).first<Record<string, any>>();
+const WON = { wonValue: 350_000_000, wonNote: 'HĐ số 12/2026 đã ký' };
 const inTwoDays = () => new Date(Date.now() + 2 * 86_400_000).toISOString();
 
 /** QĐ13: every active lead points at exactly one open task owned by its owner; closed and queued leads have none. */
@@ -49,7 +50,7 @@ describe('stage state machine', () => {
       const [from, to] = [order[i], order[i + 1]];
       const invalid = [order[i + 2], order[i - 1] ?? 'new', 'won'].filter(Boolean);
       for (const toStage of invalid) {
-        const r = await command('u-lan', 'changeStage', { leadId: 'lead-04', expectedVersion: version, toStage });
+        const r = await command('u-lan', 'changeStage', { leadId: 'lead-04', expectedVersion: version, toStage, ...WON });
         expect(r.status, `${from} → ${toStage}`).toBe(422);
         expect(r.json.error?.fields).toHaveProperty('toStage');
       }
@@ -58,10 +59,10 @@ describe('stage state machine', () => {
       expect(moved.json.ok, `${from} → ${to}`).toBe(true);
       version += 1;
     }
-    const won = await command('u-lan', 'changeStage', { leadId: 'lead-04', expectedVersion: version, toStage: 'won' });
+    const won = await command('u-lan', 'changeStage', { leadId: 'lead-04', expectedVersion: version, toStage: 'won', ...WON });
     expect(won.json.ok).toBe(true);
     const row = await lead('lead-04');
-    expect(row).toMatchObject({ stage: 'won', status: 'won', next_action_task_id: null, lost_reason: null, version: version + 1 });
+    expect(row).toMatchObject({ stage: 'won', status: 'won', next_action_task_id: null, lost_reason: null, version: version + 1, expected_value: WON.wonValue, won_note: WON.wonNote });
     expect(row!.closed_at).not.toBeNull();
     expect((await task('task-4'))!.status).toBe('cancelled');
     await expectForcedNextAction();
@@ -329,9 +330,11 @@ describe('duplicate check on intake', () => {
     expect(await suspected({ email: '  LienHe4@KhachHang-Demo.EXAMPLE ' })).toContainEqual(expect.objectContaining({ field: 'email', code: 'L-0004' }));
   });
 
-  test('tax code and company name match exactly after trimming; name matching ignores ASCII case', async () => {
-    expect(await suspected({ phone: '0977000001', taxCode: ' 0310000004 ' })).toContainEqual(expect.objectContaining({ field: 'tax_code', code: 'L-0004' }));
-    expect(await suspected({ phone: '0977000002', companyName: 'công ty tnhh dược phẩm lộc thọ demo' })).toContainEqual(expect.objectContaining({ field: 'company', code: 'L-0004' }));
+  test('tax code matches after trimming; company name matches ignoring case, diacritics and spacing', async () => {
+    expect(await suspected({ phone: '0977000001', taxCode: ' 0310000004 ', companyName: 'Tên khác' })).toContainEqual(expect.objectContaining({ field: 'tax_code', code: 'L-0004' }));
+    for (const companyName of ['công ty tnhh dược phẩm lộc thọ demo', 'CÔNG TY TNHH DƯỢC PHẨM LỘC THỌ DEMO', '  Công ty  TNHH Dược phẩm Lộc Thọ Demo ', 'cong ty tnhh duoc pham loc tho demo']) {
+      expect(await suspected({ phone: '0977000002', companyName }), companyName).toContainEqual(expect.objectContaining({ field: 'company', code: 'L-0004' }));
+    }
   });
 
   test('a confirmed duplicate reuses the account found by tax code and records the override', async () => {

@@ -105,6 +105,23 @@ export interface ApiError {
 }
 export type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 
+/** VN phone key for duplicate checks: digits only, `+84`/`0084`/`84` country prefix becomes a leading 0. */
+export function normalizePhone(value: string) {
+  const digits = value.replace(/\D/g, '').replace(/^00/, '');
+  return digits.startsWith('84') ? `0${digits.slice(2)}` : digits;
+}
+export const normalizeEmail = (value: string) => value.trim().toLowerCase();
+
+/** Case- and diacritic-insensitive key for Vietnamese text (SQLite lower() only folds ASCII). */
+export const foldText = (value: string) => value.normalize('NFD').replace(/\p{M}/gu, '')
+  .replace(/đ/g, 'd').replace(/Đ/g, 'D').toLowerCase().replace(/\s+/g, ' ').trim();
+
+export const SEARCH_MAX_LENGTH = 100;
+/** Won value is whole đồng; the cap keeps it far inside SQLite INTEGER and JS safe integers. */
+export const MAX_DEAL_VALUE = 1_000_000_000_000_000;
+/** How far back an activity may be recorded. */
+export const ACTIVITY_BACKDATE_DAYS = 7;
+
 const id = z.string().min(1).max(64);
 const version = z.number().int().positive();
 const isoDate = z.string().refine((v) => Number.isFinite(Date.parse(v)), 'Thời điểm không hợp lệ');
@@ -118,7 +135,8 @@ export type NextActionInput = z.infer<typeof nextActionInput>;
 
 export const createLeadInput = z.object({
   contactName: text(120),
-  phone: z.string().trim().max(20).optional(),
+  phone: z.string().trim().max(20)
+    .refine((v) => v === '' || v.replace(/\D/g, '').length >= 9, 'Số điện thoại cần ít nhất 9 chữ số').optional(),
   email: z.string().trim().email('Email không hợp lệ').max(160).optional(),
   companyName: z.string().trim().max(200).optional(),
   taxCode: z.string().trim().max(20).optional(),
@@ -126,7 +144,8 @@ export const createLeadInput = z.object({
   needSummary: text(1000),
   confirmNotDuplicate: z.boolean().optional(),
   nextAction: nextActionInput.optional(),
-}).refine((v) => Boolean(v.phone || v.email), { message: 'Cần số điện thoại hoặc email', path: ['phone'] });
+}).refine((v) => Boolean(v.phone || v.email), { message: 'Cần số điện thoại hoặc email', path: ['phone'] })
+  .refine((v) => !v.taxCode || Boolean(v.companyName), { message: 'MST cần đi kèm tên công ty', path: ['companyName'] });
 export type CreateLeadInput = z.infer<typeof createLeadInput>;
 
 export const assignLeadInput = z.object({
@@ -167,9 +186,13 @@ export const changeStageInput = z.object({
   toStage: z.enum(STAGE_CODES),
   lostReason: z.enum(LOST_REASON_CODES).optional(),
   lostNote: z.string().trim().max(1000).optional(),
+  wonValue: z.number().int('Giá trị là số nguyên đồng').positive('Giá trị phải lớn hơn 0').max(MAX_DEAL_VALUE).optional(),
+  wonNote: z.string().trim().max(1000).optional(),
 }).superRefine((v, ctx) => {
   if (v.toStage === 'lost' && !v.lostReason) ctx.addIssue({ code: 'custom', path: ['lostReason'], message: 'Chọn lý do Lost' });
   if (v.toStage === 'lost' && v.lostReason === 'other' && !v.lostNote) ctx.addIssue({ code: 'custom', path: ['lostNote'], message: 'Lý do "Khác" cần ghi chú' });
+  if (v.toStage === 'won' && !v.wonValue) ctx.addIssue({ code: 'custom', path: ['wonValue'], message: 'Nhập giá trị chốt' });
+  if (v.toStage === 'won' && !v.wonNote) ctx.addIssue({ code: 'custom', path: ['wonNote'], message: 'Ghi chú bằng chứng chốt (hợp đồng, PO…)' });
 });
 export type ChangeStageInput = z.infer<typeof changeStageInput>;
 

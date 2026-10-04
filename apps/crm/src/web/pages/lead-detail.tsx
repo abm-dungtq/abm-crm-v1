@@ -74,7 +74,7 @@ function LeadView({ detail }: { detail: LeadDetail }) {
       )}
       {lead.status === 'won' && (
         <div className="alert" data-tone="ok" style={{ marginBottom: 16 }}>
-          <Icon name="trophy" /><span>Won · {fmtMoney(lead.expectedValue, false)} · {fmtDateTime(lead.closedAt)}</span>
+          <Icon name="trophy" /><span>Won · {fmtMoney(lead.expectedValue, false)}{lead.wonNote ? ` · ${lead.wonNote}` : ''} · {fmtDateTime(lead.closedAt)}</span>
         </div>
       )}
 
@@ -272,7 +272,7 @@ function AuditCard({ items }: { items: AuditItem[] }) {
       <ul className="list">
         {items.slice(0, 12).map((a) => (
           <li key={a.id} className="stack-sm" style={{ gap: 2 }}>
-            <div className="row-wrap"><strong style={{ fontWeight: 600 }}>{commandLabel(a.command)}</strong><span className="small muted">{a.actorName ?? a.actorKind} · {fmtDateTime(a.createdAt)}</span></div>
+            <div className="row-wrap"><strong style={{ fontWeight: 600 }}>{commandLabel(a.command)}</strong><span className="small muted">{a.actorName ?? a.actorKind} · {fmtDateTime(a.createdAt, true)}</span></div>
             <AuditDiff before={a.before} after={a.after} />
           </li>
         ))}

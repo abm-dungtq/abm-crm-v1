@@ -50,6 +50,14 @@ export class GuardedTx {
     this.statements.push(statement);
   }
 
+  /**
+   * Fails the whole batch unless `condition` (a SQL boolean expression) holds at that point of the
+   * batch. Used for invariants a pre-read cannot lock, such as "one pending request per lead".
+   */
+  assert(condition: string, binds: unknown[]) {
+    this.statements.push(this.db.prepare(`INSERT INTO _guard (ok) VALUES (COALESCE((${condition}), 0))`).bind(...binds));
+  }
+
   /** Append-only insert that commits only together with the anchor row. */
   insertDependent(table: 'activity' | 'audit_log' | 'outbox' | 'idempotency_key', row: Record<string, unknown>) {
     const anchor = this.anchor;

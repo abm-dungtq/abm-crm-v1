@@ -1,9 +1,9 @@
 import {
-  ACTIVE_STAGES, FIRST_CONTACT_SLA_HOURS, RELEASE_AFTER_HOURS, STAGES, allowedTransitions,
+  ACTIVE_STAGES, FIRST_CONTACT_SLA_HOURS, RELEASE_AFTER_HOURS, STAGES, allowedTransitions, foldText, normalizePhone,
   workingDaysBetween, workingMinutesBetween, type StageCode,
 } from '@abm/contracts';
 import type { Actor } from './env';
-import { leadScope, type SqlFragment } from './scope';
+import { leadScope, mayDecideApproval, type SqlFragment } from './scope';
 
 export type HealthState = 'ok' | 'warn' | 'breach';
 
@@ -88,16 +88,37 @@ export async function listLeads(db: D1Database, actor: Actor, filter: LeadFilter
   if (filter.stage) { where.push('l.stage = ?'); binds.push(filter.stage); }
   if (filter.ownerId) { where.push('l.owner_user_id = ?'); binds.push(filter.ownerId); }
   if (filter.accountId) { where.push('l.account_id = ?'); binds.push(filter.accountId); }
-  if (filter.q) {
-    const like = `%${filter.q.trim().toLowerCase()}%`;
-    where.push(`(lower(l.code) LIKE ? OR lower(c.display_name) LIKE ? OR lower(coalesce(a.name, '')) LIKE ?
-      OR lower(l.need_summary) LIKE ? OR EXISTS (SELECT 1 FROM contact_point cp WHERE cp.contact_id = l.contact_id AND cp.normalized_value LIKE ?))`);
-    binds.push(like, like, like, like, `%${filter.q.replace(/\D/g, '') || filter.q.trim().toLowerCase()}%`);
-  }
-  const rows = await db.prepare(`${LEAD_SELECT} WHERE ${where.join(' AND ')} ORDER BY l.updated_at DESC LIMIT 500`)
-    .bind(...binds).all<LeadListRow>();
+  const matcher = filter.q ? searchMatcher(filter.q) : null;
+  // Text search folds Vietnamese case/diacritics in JS (SQLite lower() is ASCII-only), so it
+  // filters the scoped rows before the page limit instead of inside SQL.
+  const select = matcher
+    ? LEAD_SELECT.replace('FROM lead l', `, (SELECT group_concat(cp.normalized_value, ' ') FROM contact_point cp WHERE cp.contact_id = l.contact_id) AS points
+  FROM lead l`)
+    : LEAD_SELECT;
+  const rows = await db.prepare(`${select} WHERE ${where.join(' AND ')} ORDER BY l.updated_at DESC${matcher ? '' : ' LIMIT 500'}`)
+    .bind(...binds).all<LeadListRow & { points?: string | null }>();
   const now = new Date();
-  return rows.results.map((r) => toLeadItem(r, now));
+  const found = matcher
+    ? rows.results.filter((r) => matcher([r.code, r.contact_name, r.account_name, r.need_summary, r.points])).slice(0, 500)
+    : rows.results;
+  return found.map((r) => toLeadItem(r, now));
+}
+
+/**
+ * Text matches folded fields; a query that looks like a phone number (only digits and phone
+ * punctuation) also matches normalized phone numbers, so plain words never match on digits.
+ */
+function searchMatcher(q: string) {
+  const text = foldText(q);
+  const digits = q.replace(/\D/g, '');
+  // Only a full number or an explicit +84 is rewritten to 0…; a fragment like "8451" stays as typed.
+  const phone = /^[\d\s+().-]+$/.test(q.trim()) && digits.length >= 3
+    ? (q.includes('+') || digits.length >= 9 ? normalizePhone(q) : digits) : null;
+  return (fields: (string | null | undefined)[]) => fields.some((f) => {
+    if (!f) return false;
+    if (foldText(f).includes(text)) return true;
+    return phone !== null && f.split(' ').some((p) => /^\d+$/.test(p) && p.includes(phone));
+  });
 }
 
 function taskScope(actor: Actor): SqlFragment {
@@ -197,10 +218,6 @@ export async function teamMembers(db: D1Database, teamId: string | null) {
   return rows.results;
 }
 
-function auditScope(actor: Actor): SqlFragment {
-  return actor.role === 'admin' ? { sql: 'l.organization_id = ?', binds: [actor.organizationId] } : leadScope(actor);
-}
-
 const AUDIT_SELECT = `
   SELECT al.id, al.command, al.entity, al.entity_id, al.before_json, al.after_json, al.created_at, al.actor_kind,
     u.display_name AS actor_name, l.id AS lead_id, l.code AS lead_code
@@ -218,10 +235,11 @@ const toAudit = (r: Record<string, unknown>) => ({
   lead: { id: r.lead_id as string, code: r.lead_code as string },
 });
 
-export const canReadAudit = (actor: Actor) => actor.role !== 'sale';
+/** Business audit per permission-matrix-v1: Leader team, Trưởng phòng department, BGĐ organization; Sale and Admin none. */
+export const canReadAudit = (actor: Actor) => actor.role === 'leader' || actor.role === 'head' || actor.role === 'director';
 
 export async function listAudit(db: D1Database, actor: Actor, leadId?: string) {
-  const scope = auditScope(actor);
+  const scope = leadScope(actor);
   const rows = await db.prepare(`${AUDIT_SELECT} WHERE ${scope.sql}${leadId ? ' AND l.id = ?' : ''}
     ORDER BY al.created_at DESC LIMIT 300`).bind(...scope.binds, ...(leadId ? [leadId] : [])).all();
   return rows.results.map(toAudit);
@@ -241,9 +259,8 @@ export async function listApprovals(db: D1Database, actor: Actor, status?: strin
     .all<{ id: string; display_name: string }>()).results.map((u) => [u.id, u.display_name]));
   return rows.results.map((r) => {
     const payload = JSON.parse(r.payload_json as string) as Record<string, string>;
-    const isTeamLeader = actor.role === 'leader' && r.team_id === actor.teamId;
-    const canDecide = r.status === 'pending'
-      && (r.kind === 'owner_change' ? isTeamLeader : isTeamLeader || (actor.role === 'sale' && r.owner_user_id === actor.id));
+    const canDecide = r.status === 'pending' && mayDecideApproval(actor, r.kind as string, payload.toStage,
+      { team_id: r.team_id as string | null, owner_user_id: r.owner_user_id as string | null });
     return {
       id: r.id as string, kind: r.kind as string, status: r.status as string, version: r.version as number,
       reason: r.reason as string | null, createdAt: r.created_at as string, decidedAt: r.decided_at as string | null,
@@ -268,8 +285,8 @@ export async function leadDetail(db: D1Database, actor: Actor, leadId: string) {
   const row = await db.prepare(`${LEAD_SELECT} WHERE l.id = ? AND ${scope.sql}`).bind(leadId, ...scope.binds).first<LeadListRow>();
   if (!row) return null;
   const lead = toLeadItem(row, new Date());
-  const extra = await db.prepare('SELECT contact_id, lost_note, created_by_user_id FROM lead WHERE id = ?').bind(leadId)
-    .first<{ contact_id: string; lost_note: string | null; created_by_user_id: string | null }>();
+  const extra = await db.prepare('SELECT contact_id, lost_note, won_note, created_by_user_id FROM lead WHERE id = ?').bind(leadId)
+    .first<{ contact_id: string; lost_note: string | null; won_note: string | null; created_by_user_id: string | null }>();
   const [points, account, tasks, activities, approvals, audit, members] = await Promise.all([
     db.prepare('SELECT type, value FROM contact_point WHERE contact_id = ? ORDER BY type').bind(extra?.contact_id).all<{ type: string; value: string }>(),
     row.account_id ? db.prepare('SELECT id, name, tax_code AS taxCode, industry, city FROM account WHERE id = ?').bind(row.account_id).first() : null,
@@ -286,7 +303,7 @@ export async function leadDetail(db: D1Database, actor: Actor, leadId: string) {
   const isTeamLeader = actor.role === 'leader' && (row.team_id === actor.teamId || (row.status === 'queue'));
   const writer = ['sale', 'leader', 'head', 'director'].includes(actor.role);
   return {
-    lead: { ...lead, lostNote: extra?.lost_note ?? null },
+    lead: { ...lead, lostNote: extra?.lost_note ?? null, wonNote: extra?.won_note ?? null },
     contactPoints: points.results,
     account,
     tasks: tasks.results,
@@ -308,7 +325,7 @@ export async function leadDetail(db: D1Database, actor: Actor, leadId: string) {
 
 export async function listAccounts(db: D1Database, actor: Actor, q?: string) {
   const scope = leadScope(actor);
-  const like = q ? `%${q.trim().toLowerCase()}%` : null;
+  const ownerScope = leadScope(actor, 'l2');
   const rows = await db.prepare(`
     SELECT a.id, a.name, a.tax_code AS taxCode, a.industry, a.city,
       COUNT(l.id) AS leadCount, SUM(l.status IN ('queue', 'active')) AS openCount,
@@ -316,12 +333,14 @@ export async function listAccounts(db: D1Database, actor: Actor, q?: string) {
       SUM(CASE WHEN l.status = 'active' THEN coalesce(l.expected_value, 0) ELSE 0 END) AS pipelineValue,
       MAX(l.last_activity_at) AS lastActivityAt,
       (SELECT group_concat(DISTINCT u2.display_name) FROM lead l2 JOIN app_user u2 ON u2.id = l2.owner_user_id
-        WHERE l2.account_id = a.id AND l2.status = 'active') AS owners
+        WHERE l2.account_id = a.id AND l2.status = 'active' AND ${ownerScope.sql}) AS owners
     FROM account a JOIN lead l ON l.account_id = a.id
-    WHERE ${scope.sql}${like ? ' AND (lower(a.name) LIKE ? OR coalesce(a.tax_code, \'\') LIKE ?)' : ''}
-    GROUP BY a.id ORDER BY lastActivityAt DESC NULLS LAST, a.name LIMIT 300`)
-    .bind(...scope.binds, ...(like ? [like, like] : [])).all();
-  return rows.results;
+    WHERE ${scope.sql}
+    GROUP BY a.id ORDER BY lastActivityAt DESC NULLS LAST, a.name${q ? '' : ' LIMIT 300'}`)
+    .bind(...ownerScope.binds, ...scope.binds).all<Record<string, unknown> & { name: string; taxCode: string | null }>();
+  if (!q) return rows.results;
+  const text = foldText(q);
+  return rows.results.filter((r) => foldText(r.name).includes(text) || (r.taxCode ?? '').includes(q.trim())).slice(0, 300);
 }
 
 export async function accountDetail(db: D1Database, actor: Actor, accountId: string) {

@@ -133,7 +133,7 @@ describe('search', () => {
 describe('account detail scope', () => {
   test('shows only the leads, contacts and activities the viewer can see', async () => {
     const created = await post('u-long', 'createLead', {
-      contactName: 'Người liên hệ mới', phone: '0977000555', taxCode: '0310000004', confirmNotDuplicate: true,
+      contactName: 'Người liên hệ mới', phone: '0977000555', taxCode: '0310000004', companyName: 'Dược phẩm Lộc Thọ', confirmNotDuplicate: true,
       source: 'self', needSummary: 'Mua thêm', nextAction: { title: 'Gọi', dueAt: new Date(Date.now() + 48 * HOUR).toISOString() },
     });
     expect(created.ok).toBe(true);

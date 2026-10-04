@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { COMMANDS, type ApiResult, type CommandName } from '@abm/contracts';
+import { COMMANDS, SEARCH_MAX_LENGTH, type ApiResult, type CommandName } from '@abm/contracts';
 import { requireActor } from './actor';
 import { runCommand } from './commands';
 import type { AppBindings } from './env';
@@ -36,6 +36,13 @@ app.use('*', requireActor);
 const data = <T>(value: T) => ({ ok: true as const, data: value });
 const notFound = { ok: false as const, error: { code: 'NOT_FOUND' as const, message: 'Không tìm thấy trong phạm vi của bạn' } };
 const forbidden = { ok: false as const, error: { code: 'FORBIDDEN' as const, message: 'Vai trò hiện tại không xem được mục này' } };
+
+const tooLong = { ok: false as const, error: { code: 'VALIDATION_FAILED' as const, message: `Từ khoá tối đa ${SEARCH_MAX_LENGTH} ký tự`, fields: { q: 'Quá dài' } } };
+// Search text is matched in the Worker; an unbounded keyword only costs CPU.
+app.use('*', async (c, next) => {
+  if ((c.req.query('q')?.length ?? 0) > SEARCH_MAX_LENGTH) return c.json(tooLong, 422);
+  await next();
+});
 
 app.get('/me', (c) => c.json(data(c.get('actor'))));
 app.get('/dashboard', async (c) => c.json(data(await dashboard(c.env.DB, c.get('actor')))));
