@@ -1,7 +1,7 @@
 ---
 phase: 1
 title: "Đúng nghiệp vụ và API"
-status: pending
+status: completed
 priority: P1
 runtime: claude
 dependencies: []
