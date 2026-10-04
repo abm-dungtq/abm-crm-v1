@@ -1,0 +1,12 @@
+{
+  "name": "abm-crm-poc-identity",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-03",
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "abm-crm-poc-identity",
+    // Replace only with the ID returned by the user-approved d1 create command.
+    "database_id": "00000000-0000-0000-0000-000000000000",
+    "migrations_dir": "migrations"
+  }]
+}

@@ -2,3 +2,8 @@ packages:
   - "apps/*"
   - "packages/*"
   - "poc/*"
+allowBuilds:
+  esbuild: true
+  workerd: true
+minimumReleaseAgeExclude:
+  - '@cloudflare/workers-types@5.20261003.1'
