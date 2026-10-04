@@ -73,12 +73,23 @@ async function replay(db: D1Database, actor: Actor, key: string, command: string
   return JSON.parse(stored.result_json) as ApiResult<unknown>;
 }
 
+// A missing switch row counts as off, so an emptied table never blocks every agent write.
+const AGENT_WRITES_OPEN = 'SELECT COALESCE(MAX(enabled), 0) = 0 FROM agent_kill_switch WHERE id = 1';
+
+async function agentWritesBlocked(db: D1Database) {
+  const row = await db.prepare(`SELECT (${AGENT_WRITES_OPEN}) AS open`).first<{ open: number }>();
+  return row?.open !== 1;
+}
+
+const killSwitchOn = () => fail('KILL_SWITCH_ON', 'Bot đang bị tạm khóa ghi dữ liệu');
+
 /** ADR-005 command pipeline: role → schema → idempotency → handler → one guarded batch. */
 export async function runCommand(db: D1Database, actor: Actor, name: CommandName, raw: unknown, idempotencyKey: string | undefined): Promise<ApiResult<unknown>> {
   const definition = COMMANDS[name];
   if (!(definition.roles as readonly string[]).includes(actor.role)) {
     return fail('FORBIDDEN', 'Vai trò hiện tại không được thực hiện thao tác này');
   }
+  if (actor.kind === 'agent' && await agentWritesBlocked(db)) return killSwitchOn();
   if (!idempotencyKey || idempotencyKey.length > 100) {
     return fail('VALIDATION_FAILED', 'Thiếu Idempotency-Key');
   }
@@ -97,12 +108,15 @@ export async function runCommand(db: D1Database, actor: Actor, name: CommandName
   const result = await handler({ db, actor, input: parsed.data, tx });
   if (!result.ok) return result;
   tx.idempotency(idempotencyKey, hash, result);
+  // Re-checked inside the batch so a switch flipped after the pre-check still stops the write.
+  if (actor.kind === 'agent') tx.assert(AGENT_WRITES_OPEN, []);
   try {
     await tx.commit();
     return result;
   } catch (error) {
     const concurrent = await replay(db, actor, idempotencyKey, name, hash);
     if (concurrent) return replayInScope(db, actor, name, parsed.data, concurrent);
+    if (actor.kind === 'agent' && isGuardFailure(error) && await agentWritesBlocked(db)) return killSwitchOn();
     if (isGuardFailure(error)) return fail('STALE_VERSION', 'Dữ liệu vừa được người khác cập nhật. Tải lại rồi thử lại.');
     throw error;
   }
@@ -443,7 +457,7 @@ async function requestOwnerChange({ db, actor, input, tx }: Ctx<RequestOwnerChan
   tx.insertVersioned('approval', {
     id: approvalId, kind: 'owner_change', lead_id: lead.id, target_version: lead.version,
     payload_json: JSON.stringify({ fromUserId: lead.owner_user_id, toUserId: member.id }),
-    reason: input.reason, status: 'pending', requested_by_user_id: actor.id, requested_by_kind: 'human',
+    reason: input.reason, status: 'pending', requested_by_user_id: actor.id, requested_by_kind: actor.kind,
   });
   // The pre-read above cannot lock; this keeps two concurrent requests from both landing.
   tx.assert(`SELECT COUNT(*) = 1 FROM approval WHERE lead_id = ? AND kind = 'owner_change' AND status = 'pending'`, [lead.id]);

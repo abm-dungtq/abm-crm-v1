@@ -61,7 +61,7 @@ Mặc định đã chọn theo tư vấn (đổi chỉ khi user yêu cầu):
 | # | Phase | Phụ thuộc | Trạng thái |
 |---|---|---|---|
 | 01 | [Admin ghi nghiệp vụ trên web](phase-01-admin-business-write.md) | — | completed |
-| 02 | [Nền tảng agent: schema, Actor.kind, kill switch, token](phase-02-agent-foundation.md) | 01 | pending |
+| 02 | [Nền tảng agent: schema, Actor.kind, kill switch, token](phase-02-agent-foundation.md) | 01 | completed |
 | 03 | [Endpoint `/api/mcp` và công cụ bot](phase-03-mcp-endpoint-tools.md) | 02 | pending |
 | 04 | [Nhắn Leader qua Lark khi có yêu cầu duyệt](phase-04-lark-approval-dm.md) | 03 | pending |
 | 05 | [Triển khai eval, nối GoClaw, chạy kịch bản](phase-05-rollout-live-test.md) | 04 | pending |

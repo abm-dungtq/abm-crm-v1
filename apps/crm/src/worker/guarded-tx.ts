@@ -72,13 +72,13 @@ export class GuardedTx {
   activity(leadId: string, type: string, summary: string, occurredAt = this.now) {
     this.insertDependent('activity', {
       id: crypto.randomUUID(), lead_id: leadId, type, summary, actor_user_id: this.actor.id,
-      actor_kind: 'human', occurred_at: occurredAt, created_at: this.now,
+      actor_kind: this.actor.kind, occurred_at: occurredAt, created_at: this.now,
     });
   }
 
   audit(entity: string, entityId: string, before: unknown, after: unknown) {
     this.insertDependent('audit_log', {
-      id: crypto.randomUUID(), actor_user_id: this.actor.id, actor_kind: 'human', command: this.command,
+      id: crypto.randomUUID(), actor_user_id: this.actor.id, actor_kind: this.actor.kind, command: this.command,
       entity, entity_id: entityId, before_json: before == null ? null : JSON.stringify(before),
       after_json: after == null ? null : JSON.stringify(after), created_at: this.now,
     });

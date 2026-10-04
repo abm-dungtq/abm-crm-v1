@@ -22,19 +22,24 @@ interface UserRow {
   must_change_password: number;
 }
 
-async function loadUser(db: D1Database, userId: string) {
+async function loadUser(db: D1Database, userId: string, kind: Actor['kind'] = 'human') {
   const row = await db.prepare(`SELECT id, organization_id, department_id, team_id, role, display_name, must_change_password
     FROM app_user WHERE id = ? AND status = 'active'`).bind(userId).first<UserRow>();
   if (!row) return null;
   const actor: Actor = {
     id: row.id, organizationId: row.organization_id, departmentId: row.department_id,
-    teamId: row.team_id, role: row.role, displayName: row.display_name,
+    teamId: row.team_id, role: row.role, displayName: row.display_name, kind,
   };
   return { actor, mustChangePassword: row.must_change_password === 1 };
 }
 
 export async function loadActor(db: D1Database, userId: string): Promise<Actor | null> {
   return (await loadUser(db, userId))?.actor ?? null;
+}
+
+/** Actor for a chat agent acting with this user's token; a disabled user resolves to null. */
+export async function loadAgentActor(db: D1Database, userId: string): Promise<Actor | null> {
+  return (await loadUser(db, userId, 'agent'))?.actor ?? null;
 }
 
 // While a temporary password is in force only these routes stay open.

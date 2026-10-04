@@ -18,6 +18,8 @@ export interface Actor {
   teamId: string | null;
   role: RoleCode;
   displayName: string;
+  /** Channel of the request: the web session (human) or a chat agent acting for this user (agent). */
+  kind: 'human' | 'agent';
 }
 
 export type AppBindings = { Bindings: Env; Variables: { actor: Actor; mustChangePassword: boolean } };

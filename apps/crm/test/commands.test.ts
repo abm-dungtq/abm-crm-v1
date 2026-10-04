@@ -212,6 +212,8 @@ describe('admin business write', () => {
   test('admin assigns a queue lead to any team of its department, never to itself', async () => {
     const self = await command('u-admin', 'assignLead', { leadId: 'lead-20', expectedVersion: 1, ownerUserId: 'u-admin' });
     expect(self.json.error?.code).toBe('VALIDATION_FAILED');
+    const crossTeam = await command('u-admin', 'assignLead', { leadId: 'lead-10', expectedVersion: 1, ownerUserId: 'u-lan' });
+    expect(crossTeam.json.error?.code).toBe('VALIDATION_FAILED');
     const r = await command('u-admin', 'assignLead', { leadId: 'lead-20', expectedVersion: 1, ownerUserId: 'u-huy' });
     expect(r.json.ok).toBe(true);
     expect(await lead('lead-20')).toMatchObject({ status: 'active', owner_user_id: 'u-huy', team_id: 'team-kd2' });

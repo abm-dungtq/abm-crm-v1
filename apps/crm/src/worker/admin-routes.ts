@@ -1,5 +1,5 @@
 import { Hono, type Context } from 'hono';
-import { foldText, larkLinkInput, normalizeEmail, rosterImportInput, updateUserInput, userStatusInput, versionInput, type RoleCode } from '@abm/contracts';
+import { agentKillSwitchInput, foldText, larkLinkInput, normalizeEmail, rosterImportInput, updateUserInput, userStatusInput, versionInput, type RoleCode } from '@abm/contracts';
 import type { z } from 'zod';
 import type { Actor, AppBindings } from './env';
 import { GuardedTx, isConstraintFailure, isGuardFailure } from './guarded-tx';
@@ -73,6 +73,15 @@ const loadUser = (db: D1Database, actor: Actor, id: string) => db.prepare(`SELEC
 
 const snapshot = (u: { display_name: string; email: string; role: RoleCode; department_id: string | null; team_id: string | null }) =>
   ({ name: u.display_name, email: u.email, role: u.role, departmentId: u.department_id, teamId: u.team_id });
+
+const revokeAgentTokens = (db: D1Database, userId: string, now: string) =>
+  db.prepare('UPDATE agent_token SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL').bind(now, userId);
+
+/** Audit row for admin changes outside versioned tables (kill switch, agent tokens). */
+const auditRow = (db: D1Database, actor: Actor, command: string, entity: string, entityId: string, before: unknown, after: unknown, now: string) =>
+  db.prepare(`INSERT INTO audit_log (id, actor_user_id, actor_kind, command, entity, entity_id, before_json, after_json, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(crypto.randomUUID(), actor.id, actor.kind, command, entity, entityId,
+    JSON.stringify(before), JSON.stringify(after), now);
 
 export const adminRoutes = new Hono<AppBindings>();
 
@@ -211,7 +220,10 @@ adminRoutes.post('/users/:id/status', async (c) => {
   }
   const tx = new GuardedTx(db, actor, status === 'disabled' ? 'disableUser' : 'enableUser');
   tx.update('app_user', user.id, version, { status });
-  if (status === 'disabled') tx.raw(revokeUserSessions(db, user.id, tx.now));
+  if (status === 'disabled') {
+    tx.raw(revokeUserSessions(db, user.id, tx.now));
+    tx.raw(revokeAgentTokens(db, user.id, tx.now));
+  }
   tx.audit('app_user', user.id, { status: user.status }, { status });
   assertAdminRemains(tx, actor);
   const failed = await commit(c, tx, status === 'disabled' && user.role === 'admin' ? lastAdmin : stale);
@@ -281,4 +293,40 @@ adminRoutes.post('/users/:id/temp-password', async (c) => {
   if (failed) return failed;
   c.header('Cache-Control', 'no-store');
   return c.json(ok({ password: temp.password, expiresAt: temp.expiresAt }));
+});
+
+
+adminRoutes.get('/agent-kill-switch', async (c) => {
+  const row = await c.env.DB.prepare('SELECT enabled, updated_at FROM agent_kill_switch WHERE id = 1').first<{ enabled: number; updated_at: string | null }>();
+  return c.json(ok({ enabled: row?.enabled === 1, updatedAt: row?.updated_at ?? null }));
+});
+
+adminRoutes.put('/agent-kill-switch', async (c) => {
+  const input = await body(c, agentKillSwitchInput);
+  if ('error' in input) return input.error;
+  const actor = c.get('actor');
+  const db = c.env.DB;
+  const now = new Date().toISOString();
+  const before = await db.prepare('SELECT enabled FROM agent_kill_switch WHERE id = 1').first<{ enabled: number }>();
+  const enabled = input.data.enabled ? 1 : 0;
+  await db.batch([
+    db.prepare(`INSERT INTO agent_kill_switch (id, enabled, updated_by_user_id, updated_at) VALUES (1, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled, updated_by_user_id = excluded.updated_by_user_id, updated_at = excluded.updated_at`)
+      .bind(enabled, actor.id, now),
+    auditRow(db, actor, 'setAgentKillSwitch', 'agent_kill_switch', '1', { enabled: before?.enabled === 1 }, { enabled: enabled === 1 }, now),
+  ]);
+  return c.json(ok({ enabled: enabled === 1, updatedAt: now }));
+});
+
+adminRoutes.post('/users/:id/agent-token/revoke', async (c) => {
+  const actor = c.get('actor');
+  const db = c.env.DB;
+  const user = await loadUser(db, actor, c.req.param('id'));
+  if (!user) return c.json(notFound, 404);
+  const now = new Date().toISOString();
+  const [revoked] = await db.batch([
+    revokeAgentTokens(db, user.id, now),
+    auditRow(db, actor, 'revokeAgentToken', 'app_user', user.id, null, { agentTokensRevoked: true }, now),
+  ]);
+  return c.json(ok({ revoked: revoked!.meta.changes ?? 0 }));
 });

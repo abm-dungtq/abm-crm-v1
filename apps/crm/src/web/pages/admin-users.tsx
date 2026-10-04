@@ -28,7 +28,7 @@ function passwordState(u: AdminUser): [string, Tone] {
   return [`Mật khẩu tạm, hạn ${fmtDateTime(u.tempPasswordExpiresAt)}`, 'warn'];
 }
 
-type Dialog = { kind: 'edit' | 'status' | 'temp'; user: AdminUser } | null;
+type Dialog = { kind: 'edit' | 'status' | 'temp' | 'bot'; user: AdminUser } | null;
 
 export function AdminUsersPage() {
   const actor = useActor();
@@ -56,6 +56,7 @@ export function AdminUsersPage() {
             {larkResult.message && <div className="small">{larkResult.message}</div>}
           </Alert>
         )}
+        {q.data && <AgentKillSwitch enabled={q.data.counts.agentKillSwitch === 1} />}
         <RosterImport onIssued={setIssued} />
         {q.isLoading && <Loading />}
         {q.error && <ErrorState error={q.error} onRetry={() => q.refetch()} />}
@@ -64,7 +65,7 @@ export function AdminUsersPage() {
             <div className="card-head"><h2>Danh sách người dùng</h2><span className="spacer" /><Badge>{q.data.users.length}</Badge></div>
             <div className="table-wrap">
               <table className="table responsive">
-                <thead><tr><th>Tên</th><th>Vai trò</th><th>Phòng ban / Nhóm</th><th>Trạng thái</th><th>Mật khẩu</th><th>Lark</th><th><span className="visually-hidden">Thao tác</span></th></tr></thead>
+                <thead><tr><th>Tên</th><th>Vai trò</th><th>Phòng ban / Nhóm</th><th>Trạng thái</th><th>Mật khẩu</th><th>Lark</th><th>Bot</th><th><span className="visually-hidden">Thao tác</span></th></tr></thead>
                 <tbody>
                   {q.data.users.map((u) => {
                     const [pw, pwTone] = passwordState(u);
@@ -78,11 +79,13 @@ export function AdminUsersPage() {
                         <td data-label="Trạng thái"><Badge tone={u.status === 'active' ? 'ok' : 'danger'}>{u.status === 'active' ? 'Hoạt động' : 'Đã khóa'}</Badge></td>
                         <td data-label="Mật khẩu"><Badge tone={pwTone}>{pw}</Badge></td>
                         <td data-label="Lark"><Badge tone={larkTone} title={u.larkCheckedAt ? `Kiểm lúc ${fmtDateTime(u.larkCheckedAt)}` : undefined}>{lark}</Badge></td>
+                        <td data-label="Bot"><Badge tone={u.agentTokens ? 'ok' : 'neutral'}>{u.agentTokens ? `Có chìa khóa (${u.agentTokens})` : 'Chưa'}</Badge></td>
                         <td>
                           <div className="row-wrap">
                             <button className="btn btn-sm" onClick={() => setDialog({ kind: 'edit', user: u })}>Sửa</button>
                             {!self && <button className="btn btn-sm" onClick={() => setDialog({ kind: 'status', user: u })}>{u.status === 'active' ? 'Khóa' : 'Mở khóa'}</button>}
                             <button className="btn btn-sm" onClick={() => setDialog({ kind: 'temp', user: u })}>Cấp mật khẩu tạm</button>
+                            {u.agentTokens > 0 && <button className="btn btn-sm btn-ghost" onClick={() => setDialog({ kind: 'bot', user: u })}>Thu hồi chìa khóa bot</button>}
                             {u.status === 'active' && u.larkLinkStatus !== 'linked' && (
                               <button className="btn btn-sm btn-ghost" onClick={() => runLink([u.id])} disabled={link.isPending}>Thử liên kết Lark</button>
                             )}
@@ -100,6 +103,7 @@ export function AdminUsersPage() {
       {dialog?.kind === 'edit' && q.data && <EditUserDialog user={dialog.user} overview={q.data} self={dialog.user.id === actor.id} onClose={() => setDialog(null)} />}
       {dialog?.kind === 'status' && <StatusDialog user={dialog.user} onClose={() => setDialog(null)} />}
       {dialog?.kind === 'temp' && <TempPasswordDialog user={dialog.user} self={dialog.user.id === actor.id} onClose={() => setDialog(null)} onIssued={(p) => { setDialog(null); setIssued([p]); }} />}
+      {dialog?.kind === 'bot' && <RevokeBotDialog user={dialog.user} onClose={() => setDialog(null)} />}
       {issued && <IssuedPasswordsDialog items={issued} onClose={() => setIssued(null)} />}
     </>
   );
@@ -272,7 +276,7 @@ function StatusDialog({ user, onClose }: { user: AdminUser; onClose: () => void 
       </button>
     </>}>
       <FormError error={save.error} />
-      <p>{disabling ? 'Người này bị đăng xuất ngay và không đăng nhập được cho đến khi mở khóa. Dữ liệu của họ giữ nguyên.' : 'Người này đăng nhập lại được bằng mật khẩu hiện có.'}</p>
+      <p>{disabling ? 'Người này bị đăng xuất ngay, chìa khóa bot bị thu hồi và không đăng nhập được cho đến khi mở khóa. Dữ liệu của họ giữ nguyên.' : 'Người này đăng nhập lại được bằng mật khẩu hiện có.'}</p>
     </Modal>
   );
 }
@@ -326,6 +330,50 @@ function IssuedPasswordsDialog({ items, onClose }: { items: IssuedPassword[]; on
           </tbody>
         </table>
       </div>
+    </Modal>
+  );
+}
+
+/** Stops every write made through the chat bot, including Admin's; web work is unaffected. */
+function AgentKillSwitch({ enabled }: { enabled: boolean }) {
+  const toast = useToast();
+  const [confirming, setConfirming] = useState(false);
+  const save = useAdminMutation((next: boolean) => api.put('/admin/agent-kill-switch', { enabled: next }));
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h2>Bot ghi dữ liệu</h2><span className="spacer" />
+        <Badge tone={enabled ? 'danger' : 'ok'}>{enabled ? 'Đang tạm khóa' : 'Đang mở'}</Badge>
+        <button className={enabled ? 'btn btn-sm' : 'btn btn-sm btn-danger'} onClick={() => setConfirming(true)}>{enabled ? 'Mở lại' : 'Tạm khóa bot'}</button>
+      </div>
+      <div className="card-body small text-2">Khi tạm khóa, mọi lệnh ghi qua bot Lark bị chặn, kể cả của Admin. Bot vẫn đọc được dữ liệu; làm trên web không bị ảnh hưởng.</div>
+      {confirming && (
+        <Modal open title={enabled ? 'Mở lại cho bot ghi dữ liệu?' : 'Tạm khóa bot ghi dữ liệu?'} onClose={() => setConfirming(false)} footer={<>
+          <button className="btn" onClick={() => setConfirming(false)}>Hủy</button>
+          <button className={enabled ? 'btn btn-primary' : 'btn btn-danger'} disabled={save.isPending}
+            onClick={() => save.mutate(!enabled, { onSuccess: () => { toast(enabled ? 'Đã mở lại bot' : 'Đã tạm khóa bot'); setConfirming(false); } })}>
+            {enabled ? 'Mở lại' : 'Tạm khóa'}
+          </button>
+        </>}>
+          <FormError error={save.error} />
+          <p>{enabled ? 'Bot sẽ ghi được dữ liệu CRM trở lại theo quyền của từng người.' : 'Mọi lệnh ghi qua bot sẽ bị từ chối ngay cho đến khi mở lại.'}</p>
+        </Modal>
+      )}
+    </section>
+  );
+}
+
+function RevokeBotDialog({ user, onClose }: { user: AdminUser; onClose: () => void }) {
+  const toast = useToast();
+  const revoke = useAdminMutation(() => api.post(`/admin/users/${user.id}/agent-token/revoke`, {}));
+  return (
+    <Modal open title={`Thu hồi chìa khóa bot của ${user.name}?`} onClose={onClose} footer={<>
+      <button className="btn" onClick={onClose}>Hủy</button>
+      <button className="btn btn-danger" disabled={revoke.isPending}
+        onClick={() => revoke.mutate(undefined, { onSuccess: () => { toast('Đã thu hồi chìa khóa bot'); onClose(); } })}>Thu hồi</button>
+    </>}>
+      <FormError error={revoke.error} />
+      <p>Bot không đọc hay ghi CRM thay người này được nữa cho đến khi cấp chìa khóa mới. Tài khoản web không bị ảnh hưởng.</p>
     </Modal>
   );
 }

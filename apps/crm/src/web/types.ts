@@ -20,6 +20,7 @@ export interface AdminUser {
   /** SQLite booleans arrive as 0/1. */
   mustChangePassword: number; hasPassword: number; tempPasswordExpiresAt: string | null;
   larkLinkStatus: LarkLinkStatus; larkCheckedAt: string | null;
+  agentTokens: number;
 }
 export interface IssuedPassword { name: string; email: string; password: string; expiresAt: string }
 export interface LarkLinkResult { linked: number; unmatched: number; error: number; message?: string }
@@ -150,5 +151,5 @@ export interface AdminOverview {
   departments: { id: string; name: string }[];
   teams: { id: string; name: string; departmentName: string }[];
   users: AdminUser[];
-  counts: { leads: number; audit: number; outboxPending: number; approvalsPending: number };
+  counts: { leads: number; audit: number; outboxPending: number; approvalsPending: number; agentKillSwitch: number };
 }

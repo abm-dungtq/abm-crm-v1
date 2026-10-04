@@ -263,6 +263,7 @@ export const updateUserInput = z.object({
 });
 export const userStatusInput = z.object({ version, status: z.enum(['active', 'disabled']) });
 export const versionInput = z.object({ version });
+export const agentKillSwitchInput = z.object({ enabled: z.boolean() });
 // A retry list stays small: D1 caps bound parameters per query.
 export const larkLinkInput = z.object({ userIds: z.array(id).min(1).max(50).optional() });
 

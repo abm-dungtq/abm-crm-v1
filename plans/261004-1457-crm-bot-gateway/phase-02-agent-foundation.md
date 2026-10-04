@@ -1,7 +1,7 @@
 ---
 phase: 2
 title: "Nền tảng agent: schema, Actor.kind, kill switch, token"
-status: pending
+status: completed
 priority: P1
 effort: "1d"
 dependencies: [1]

@@ -397,11 +397,13 @@ export async function adminOverview(db: D1Database, actor: Actor) {
       WHERE d.organization_id = ? ORDER BY t.name`).bind(actor.organizationId).all(),
     db.prepare(`SELECT u.id, u.display_name AS name, u.email, u.role, u.status, u.version, t.name AS teamName, d.name AS departmentName,
         u.must_change_password = 1 AS mustChangePassword, u.password_hash IS NOT NULL AS hasPassword,
-        u.temp_password_expires_at AS tempPasswordExpiresAt, u.lark_link_status AS larkLinkStatus, u.lark_checked_at AS larkCheckedAt
+        u.temp_password_expires_at AS tempPasswordExpiresAt, u.lark_link_status AS larkLinkStatus, u.lark_checked_at AS larkCheckedAt,
+        (SELECT COUNT(*) FROM agent_token at WHERE at.user_id = u.id AND at.revoked_at IS NULL) AS agentTokens
       FROM app_user u LEFT JOIN team t ON t.id = u.team_id LEFT JOIN department d ON d.id = u.department_id
       WHERE u.organization_id = ? ORDER BY u.role, u.display_name`).bind(actor.organizationId).all(),
     db.prepare(`SELECT (SELECT COUNT(*) FROM lead) AS leads, (SELECT COUNT(*) FROM audit_log) AS audit,
-      (SELECT COUNT(*) FROM outbox WHERE status = 'pending') AS outboxPending, (SELECT COUNT(*) FROM approval WHERE status = 'pending') AS approvalsPending`).first(),
+      (SELECT COUNT(*) FROM outbox WHERE status = 'pending') AS outboxPending, (SELECT COUNT(*) FROM approval WHERE status = 'pending') AS approvalsPending,
+      (SELECT COALESCE(MAX(enabled), 0) FROM agent_kill_switch WHERE id = 1) = 1 AS agentKillSwitch`).first(),
   ]);
   return { departments: departments.results, teams: teams.results, users: users.results, counts };
 }
