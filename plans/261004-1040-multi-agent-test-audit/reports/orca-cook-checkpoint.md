@@ -2,8 +2,8 @@
 
 ## 1. Run and authority
 
-- Hiện tại: đợt 1 — phase 01 (claude) + phase 02 (codex). Phase 03 (antigravity) chờ chỗ trống; phase 04 chờ 01–03.
-- Tiếp theo: theo dõi 01 và 02 bằng `check --wait` (≤60s), xử lý câu hỏi, chấp nhận + commit từng phase.
+- Hiện tại: Run hoàn tất. Mọi worker đã release. Việc sửa lỗi chuyển sang `/ak:fix` ngoài Run này.
+- Tiếp theo: không còn việc trong Run.
 - Coordinator: Claude Code, terminal `term_8f722355-880a-48fc-948b-ccc821217a4f`. Run `run_715a6126d381`.
 - Skill: `C:/Users/ABM/.claude/skills/orca-cook-plan/SKILL.md`. Plan: `D:/TQD/CRM/plans/261004-1040-multi-agent-test-audit/plan.md`. Worktree: `D:/TQD/CRM` (current, nhánh main, baseline 92cf488).
 - Flags: không `--auto` → câu hỏi duyệt chuyển cho user. Không flag cook. Runtime theo phase (do plan chỉ định): claude, codex, antigravity; model = mặc định cấu hình (không override).
@@ -16,8 +16,8 @@
 | --- | --- | --- | --- | --- |
 | 01 / — / `apps/crm/test/domain-*.test.ts`, reports/phase-01 | task_bf3fb5ffa5d7 / ctx_83c1bc68c9c4 / claude / term_27e7fedc-96f0-4664-a284-6afe1b921d8a | settled succeeded, released | Verified: 4 file test 69/69 pass, worker tsconfig sạch, scope đúng; 13 phát hiện D-01..D-13 | 6cf7f50 |
 | 02 / — / `apps/crm/test/security-*.test.ts`, reports/phase-02 | task_a01caf94f3d4 / ctx_cbe99d2a2ede / codex / term_b7861389-70ec-46ce-8990-2264ed23e8fc | settled succeeded | Verified: typecheck sạch, 110/110 test kết hợp, scope đúng; 10 phát hiện S-01..S-10 | commit phase 02 |
-| 03 / — / reports/phase-03 | task_ca0bb1c4589c / ctx_d743a7233bd8 / antigravity / term_1d6d9408-64bc-4dd0-b2cd-a6dc5e019076 | running (screen: đọc skill, 11:01) | — | — |
-| 04 / 01,02,03 / reports/phase-04 | task_66658f22016f / chưa dispatch | — | — | — |
+| 03 / — / reports/phase-03 | task_ca0bb1c4589c / ctx_d743a7233bd8 / antigravity / term_1d6d9408-64bc-4dd0-b2cd-a6dc5e019076 | settled succeeded (dừng sớm theo user 11:32), released | Verified: chỉ 2 file báo cáo, cổng 8787 trống; 8 phát hiện U-01..U-08 | e398526 |
+| 04 / 01,02,03 / reports/phase-04 | task_66658f22016f / không dispatch — user yêu cầu coordinator tổng hợp rồi /ak:fix | cancelled | reports/phase-04-consolidated-findings.md | e398526 |
 
 Scope snapshot đợt 1: `<scratchpad>/snapshot-wave1.json` (chụp ngay sau dispatch 01/02, 10:47). Allow: `apps/crm/test/domain-*.test.ts`, `apps/crm/test/security-*.test.ts`, `plans/261004-1040-multi-agent-test-audit/reports/**`.
 
