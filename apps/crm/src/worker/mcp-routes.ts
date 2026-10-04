@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { loadAgentActor } from './actor';
+import { notifyCommitted } from './approval-notify';
 import { sha256 } from './commands';
 import { background, type AppBindings } from './env';
 import { callTool, tools } from './mcp-tools';
@@ -52,7 +53,7 @@ mcpRoutes.post('/', async (c) => {
       return c.json({ jsonrpc: '2.0', id: rpc.id, error: { code: -32602, message: 'Invalid parameters' } });
     }
     try {
-      return reply(await callTool(c.env.DB, c.get('actor'), name, args as Record<string, unknown>, new URL(c.req.url).origin));
+      return reply(await callTool(c.env.DB, c.get('actor'), name, args as Record<string, unknown>, new URL(c.req.url).origin, notifyCommitted(c)));
     } catch (error) {
       console.error('mcp_error', error instanceof Error ? error.message : error);
       return c.json({ jsonrpc: '2.0', id: rpc.id, error: { code: -32603, message: 'Internal error' } });

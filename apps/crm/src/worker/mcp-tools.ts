@@ -1,11 +1,13 @@
 import { foldText, type ApiError, type ApiResult, type CommandName } from '@abm/contracts';
 import { runCommand, sha256 } from './commands';
 import type { Actor } from './env';
+import type { GuardedTx } from './guarded-tx';
 import { dashboard, leadDetail, listLeads, listTasks } from './queries';
 import { leadScope } from './scope';
 
 type Args = Record<string, unknown>;
 type Json = Record<string, unknown>;
+type OnCommitted = (tx: GuardedTx) => Promise<void>;
 
 const str = (description: string) => ({ type: 'string', description });
 const nextAction = {
@@ -99,7 +101,7 @@ const REPLAY_WINDOW_MS = 5 * 60_000;
  * (another activity, or a proposal again after a rejection) and runs under a fresh key. The first
  * call uses a fixed suffix so two identical calls arriving together still write once.
  */
-async function command(db: D1Database, actor: Actor, tool: string, args: Args, name: CommandName, input: Json) {
+async function command(db: D1Database, actor: Actor, tool: string, args: Args, name: CommandName, onCommitted: OnCommitted, input: Json) {
   const base = `mcp:${await sha256(tool + canonicalJson(args))}:`;
   // ';' sorts right after ':', so this range is every key with the prefix and stays on the primary key index.
   const recent = await db.prepare(`SELECT key, created_at, result_json FROM idempotency_key
@@ -107,13 +109,13 @@ async function command(db: D1Database, actor: Actor, tool: string, args: Args, n
     .bind(actor.id, base, `${base.slice(0, -1)};`).first<{ key: string; created_at: string; result_json: string }>();
   if (recent && Date.now() - Date.parse(recent.created_at) < REPLAY_WINDOW_MS) return JSON.parse(recent.result_json) as ApiResult<unknown>;
   const key = `${base}${recent ? Date.now() : 0}`;
-  const result = await runCommand(db, actor, name, input, key);
+  const result = await runCommand(db, actor, name, input, key, onCommitted);
   if (result.ok || result.error.code !== 'IDEMPOTENCY_CONFLICT') return result;
   // A concurrent identical call won the key with a different expectedVersion: return its result.
   const winner = await db.prepare('SELECT result_json FROM idempotency_key WHERE actor_user_id = ? AND key = ?').bind(actor.id, key).first<{ result_json: string }>();
   return winner ? JSON.parse(winner.result_json) as ApiResult<unknown> : result;
 }
-async function writeTool(db: D1Database, actor: Actor, name: string, args: Args): Promise<ApiResult<unknown>> {
+async function writeTool(db: D1Database, actor: Actor, name: string, args: Args, onCommitted: OnCommitted): Promise<ApiResult<unknown>> {
   if (name === 'create_lead') {
     let departmentId: string | undefined;
     if (!actor.departmentId) {
@@ -123,7 +125,7 @@ async function writeTool(db: D1Database, actor: Actor, name: string, args: Args)
       departmentId = wanted ? departments.find((d) => foldText(d.name) === foldText(wanted))?.id : undefined;
       if (!departmentId) return fail('VALIDATION_FAILED', `Cần ghi rõ phòng ban: ${departments.map((d) => d.name).join(', ')}`);
     }
-    return command(db, actor, name, args, 'createLead', {
+    return command(db, actor, name, args, 'createLead', onCommitted, {
       contactName: args.contact_name, phone: args.phone, email: args.email, companyName: args.company_name, taxCode: args.tax_code,
       source: args.source, needSummary: args.need_summary, confirmNotDuplicate: args.confirm_not_duplicate,
       nextAction: toNextAction(args.next_action), departmentId,
@@ -136,7 +138,7 @@ async function writeTool(db: D1Database, actor: Actor, name: string, args: Args)
         .bind(args.task_id, ...scope.binds).first<{ id: string; version: number }>()
       : null;
     if (!task) return fail('NOT_FOUND', 'Không tìm thấy việc trong phạm vi của bạn');
-    return command(db, actor, name, args, 'completeTask', {
+    return command(db, actor, name, args, 'completeTask', onCommitted, {
       taskId: task.id, expectedVersion: task.version, outcome: args.outcome, nextAction: toNextAction(args.next_action),
     });
   }
@@ -145,21 +147,21 @@ async function writeTool(db: D1Database, actor: Actor, name: string, args: Args)
   if (!lead) return notFound();
   const target = { leadId: lead.id, expectedVersion: lead.version };
   if (name === 'log_activity') {
-    return command(db, actor, name, args, 'logActivity', { ...target, type: args.type, summary: args.summary, occurredAt: args.occurred_at });
+    return command(db, actor, name, args, 'logActivity', onCommitted, { ...target, type: args.type, summary: args.summary, occurredAt: args.occurred_at });
   }
   if (name === 'change_stage') {
-    return command(db, actor, name, args, 'changeStage', {
+    return command(db, actor, name, args, 'changeStage', onCommitted, {
       ...target, toStage: args.to_stage, lostReason: args.lost_reason, lostNote: args.lost_note, wonValue: args.won_value, wonNote: args.won_note,
     });
   }
   if (name === 'assign_lead') {
     const ownerUserId = await userIdByEmail(db, actor, args.owner_email);
     if (!ownerUserId) return fail('VALIDATION_FAILED', 'Không tìm thấy người nhận theo email');
-    return command(db, actor, name, args, 'assignLead', { ...target, ownerUserId, nextAction: toNextAction(args.next_action) });
+    return command(db, actor, name, args, 'assignLead', onCommitted, { ...target, ownerUserId, nextAction: toNextAction(args.next_action) });
   }
   const toUserId = await userIdByEmail(db, actor, args.new_owner_email);
   if (!toUserId) return fail('VALIDATION_FAILED', 'Không tìm thấy người nhận theo email');
-  const requested = await command(db, actor, name, args, 'requestOwnerChange', { ...target, toUserId, reason: args.reason });
+  const requested = await command(db, actor, name, args, 'requestOwnerChange', onCommitted, { ...target, toUserId, reason: args.reason });
   return requested.ok ? { ok: true, data: { status: 'pending_approval', kind: 'owner_change', ...(requested.data as Json) } } : requested;
 }
 
@@ -206,9 +208,9 @@ const toolResult = (value: unknown, isError = false) =>
   ({ content: [{ type: 'text', text: JSON.stringify(value) }], ...(isError ? { isError: true } : {}) });
 
 /** Identity always comes from the token: fields such as acting_user or user_id in args are never read. */
-export async function callTool(db: D1Database, actor: Actor, name: string, args: Args, origin: string) {
+export async function callTool(db: D1Database, actor: Actor, name: string, args: Args, origin: string, onCommitted: OnCommitted) {
   if (!READ_TOOLS.has(name) && !WRITE_TOOLS.has(name)) return toolResult({ code: 'UNKNOWN_TOOL', message: 'Không có công cụ này' }, true);
-  const result = READ_TOOLS.has(name) ? await readTool(db, actor, name, args) : await writeTool(db, actor, name, args);
+  const result = READ_TOOLS.has(name) ? await readTool(db, actor, name, args) : await writeTool(db, actor, name, args, onCommitted);
   if (!result.ok) return toolResult(result.error, true);
   const data = result.data as { status?: string; toStage?: string | null; kind?: string };
   if (data && data.status === 'pending_approval') return toolResult({ ...data, message: pendingMessage(data, origin) });

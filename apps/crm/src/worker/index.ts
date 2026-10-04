@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { COMMANDS, SEARCH_MAX_LENGTH, type ApiResult, type CommandName } from '@abm/contracts';
 import { isDemoMode, requireActor } from './actor';
 import { adminRoutes } from './admin-routes';
+import { notifyCommitted } from './approval-notify';
 import { mcpRoutes } from './mcp-routes';
 import { publicAuth, sessionAuth } from './auth-routes';
 import { originGuard } from './session';
@@ -88,7 +89,7 @@ app.post('/commands/:name', async (c) => {
   const name = c.req.param('name');
   if (!Object.hasOwn(COMMANDS, name)) return c.json(notFound, 404);
   const body = await c.req.json().catch(() => null);
-  const result: ApiResult<unknown> = await runCommand(c.env.DB, c.get('actor'), name as CommandName, body, c.req.header('Idempotency-Key'));
+  const result: ApiResult<unknown> = await runCommand(c.env.DB, c.get('actor'), name as CommandName, body, c.req.header('Idempotency-Key'), notifyCommitted(c));
   return c.json(result, result.ok ? 200 : STATUS[result.error.code] ?? 400);
 });
 

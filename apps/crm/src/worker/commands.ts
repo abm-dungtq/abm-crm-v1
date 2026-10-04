@@ -84,7 +84,8 @@ async function agentWritesBlocked(db: D1Database) {
 const killSwitchOn = () => fail('KILL_SWITCH_ON', 'Bot đang bị tạm khóa ghi dữ liệu');
 
 /** ADR-005 command pipeline: role → schema → idempotency → handler → one guarded batch. */
-export async function runCommand(db: D1Database, actor: Actor, name: CommandName, raw: unknown, idempotencyKey: string | undefined): Promise<ApiResult<unknown>> {
+export async function runCommand(db: D1Database, actor: Actor, name: CommandName, raw: unknown, idempotencyKey: string | undefined,
+  onCommitted?: (tx: GuardedTx) => Promise<void>): Promise<ApiResult<unknown>> {
   const definition = COMMANDS[name];
   if (!(definition.roles as readonly string[]).includes(actor.role)) {
     return fail('FORBIDDEN', 'Vai trò hiện tại không được thực hiện thao tác này');
@@ -114,7 +115,6 @@ export async function runCommand(db: D1Database, actor: Actor, name: CommandName
   if (actor.kind === 'agent') tx.assert(AGENT_WRITES_OPEN, []);
   try {
     await tx.commit();
-    return result;
   } catch (error) {
     const concurrent = await replay(db, actor, idempotencyKey, name, hash);
     if (concurrent) return replayInScope(db, actor, name, parsed.data, concurrent);
@@ -122,6 +122,9 @@ export async function runCommand(db: D1Database, actor: Actor, name: CommandName
     if (isGuardFailure(error)) return fail('STALE_VERSION', 'Dữ liệu vừa được người khác cập nhật. Tải lại rồi thử lại.');
     throw error;
   }
+  // Only a fresh commit reaches here; a replayed result already had its follow-up work.
+  await onCommitted?.(tx);
+  return result;
 }
 
 /**
@@ -488,7 +491,7 @@ async function requestOwnerChange({ db, actor, input, tx }: Ctx<RequestOwnerChan
   // The pre-read above cannot lock; this keeps two concurrent requests from both landing.
   tx.assert(`SELECT COUNT(*) = 1 FROM approval WHERE lead_id = ? AND kind = 'owner_change' AND status = 'pending'`, [lead.id]);
   tx.audit('approval', approvalId, null, { kind: 'owner_change', leadId: lead.id, toUserId: member.id, reason: input.reason });
-  tx.event('approval.requested', { approvalId, leadId: lead.id, kind: 'owner_change' });
+  tx.event('approval.requested', { approvalId, leadId: lead.id, kind: 'owner_change', toStage: null, requesterId: actor.id });
   return ok({ approvalId });
 }
 
@@ -560,7 +563,7 @@ async function propose(db: D1Database, actor: Actor, tx: GuardedTx, lead: LeadRo
   });
   tx.assert('SELECT COUNT(*) = 1 FROM approval WHERE lead_id = ? AND kind = ? AND status = ?', [lead.id, kind, 'pending']);
   tx.audit('approval', approvalId, null, { kind, leadId: lead.id, ...payload });
-  tx.event('approval.requested', { approvalId, leadId: lead.id, kind, toStage: payload.toStage ?? null });
+  tx.event('approval.requested', { approvalId, leadId: lead.id, kind, toStage: payload.toStage ?? null, requesterId: actor.id });
   return ok({ status: 'pending_approval', approvalId, kind, toStage: payload.toStage ?? null });
 }
 

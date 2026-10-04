@@ -144,7 +144,8 @@ test.each(['createLead', 'assignLead', 'releaseLead', 'logActivity', 'completeTa
     expect(JSON.parse(audit!.after_json)).toMatchObject({ stage: 'qualified' });
   }
   const event = await db.prepare('SELECT * FROM outbox WHERE event_type=?').bind(input.event).first<Record<string, any>>();
-  expect(event!.status).toBe('pending');
+  // The Leader DM runs after the commit; no Leader is linked to Lark in this seed.
+  expect(event!.status).toBe(name === 'requestOwnerChange' ? 'no_recipient' : 'pending');
   expect(JSON.stringify(JSON.parse(event!.payload_json))).toContain(target);
   const stored = await db.prepare('SELECT * FROM idempotency_key WHERE actor_user_id=? AND key=?').bind(input.user, key).first<Record<string, any>>();
   expect(JSON.parse(stored!.result_json)).toEqual(res.json);

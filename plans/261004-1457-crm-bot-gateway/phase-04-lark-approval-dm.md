@@ -1,7 +1,7 @@
 ---
 phase: 4
 title: "Nhắn Leader qua Lark khi có yêu cầu duyệt"
-status: pending
+status: completed
 priority: P1
 effort: "0.5-1d"
 dependencies: [3]

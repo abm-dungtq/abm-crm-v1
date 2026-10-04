@@ -2,6 +2,7 @@ import { Hono, type Context } from 'hono';
 import { agentKillSwitchInput, foldText, larkLinkInput, normalizeEmail, rosterImportInput, updateUserInput, userStatusInput, versionInput, type RoleCode } from '@abm/contracts';
 import type { z } from 'zod';
 import type { Actor, AppBindings } from './env';
+import { deliverApprovalDm } from './approval-notify';
 import { GuardedTx, isConstraintFailure, isGuardFailure } from './guarded-tx';
 import { LarkError, lookupOpenIds } from './lark';
 import { TEMP_PASSWORD_HOURS, TEMP_PASSWORD_ITERATIONS, generateTempPassword, hashPassword } from './password';
@@ -329,4 +330,17 @@ adminRoutes.post('/users/:id/agent-token/revoke', async (c) => {
     auditRow(db, actor, 'revokeAgentToken', 'app_user', user.id, null, { agentTokensRevoked: true }, now),
   ]);
   return c.json(ok({ revoked: revoked!.meta.changes ?? 0 }));
+});
+
+/** Retries a Leader DM that failed (or had nobody to reach before a Leader linked Lark). */
+adminRoutes.post('/outbox/:id/resend', async (c) => {
+  const actor = c.get('actor');
+  const db = c.env.DB;
+  const id = c.req.param('id');
+  const before = await db.prepare(`SELECT status FROM outbox WHERE id = ? AND event_type = 'approval.requested'`).bind(id).first<{ status: string }>();
+  if (!before) return c.json(notFound, 404);
+  if (before.status === 'no_recipient') await db.prepare(`UPDATE outbox SET status = 'pending' WHERE id = ?`).bind(id).run();
+  const status = await deliverApprovalDm(c.env, id, new URL(c.req.url).origin) ?? before.status;
+  await auditRow(db, actor, 'resendApprovalDm', 'outbox', id, { status: before.status }, { status }, new Date().toISOString()).run();
+  return c.json(ok({ status }));
 });

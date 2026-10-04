@@ -20,6 +20,8 @@ export class GuardedTx {
   readonly now = new Date().toISOString();
   private readonly statements: D1PreparedStatement[] = [];
   private anchor: RowRef | null = null;
+  /** Outbox rows written by this transaction, for work that must follow the commit. */
+  readonly events: { id: string; type: string; payload: unknown }[] = [];
 
   constructor(private readonly db: D1Database, private readonly actor: Actor, readonly command: string) {}
 
@@ -85,9 +87,9 @@ export class GuardedTx {
   }
 
   event(eventType: string, payload: unknown) {
-    this.insertDependent('outbox', {
-      id: crypto.randomUUID(), event_type: eventType, payload_json: JSON.stringify(payload), created_at: this.now,
-    });
+    const id = crypto.randomUUID();
+    this.insertDependent('outbox', { id, event_type: eventType, payload_json: JSON.stringify(payload), created_at: this.now });
+    this.events.push({ id, type: eventType, payload });
   }
 
   idempotency(key: string, requestHash: string, result: unknown) {
