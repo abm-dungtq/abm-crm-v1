@@ -31,6 +31,8 @@ Merge, archive/delete/ẩn danh, export, discount, payment confirmation, contrac
 
 Phase 04 task 4.7 ghi Department Head duyệt export, nhưng QĐ5/user chốt BGĐ duyệt. Theo coordinator giữ BGĐ duyệt cuối, Head chỉ review scope. Audit cells đã duyệt 2026-10-04 theo scope lead của từng vai trò; Admin không đọc audit nghiệp vụ. Admin quản trị cấu hình không tự nhận quyền nghiệp vụ; cần role nghiệp vụ riêng nếu có nhu cầu.
 
+Quản lý người dùng ([ADR-006](../adr/adr-006-password-login.md)) chỉ dành cho Admin: nhập danh sách nhân sự, sửa tên/email/vai trò/phòng ban/nhóm, khóa và mở khóa, cấp mật khẩu tạm, liên kết Lark theo email. Admin không tự đổi vai trò hay tự khóa mình, và hệ thống luôn giữ ít nhất một Admin hoạt động. Quyền này không mở quyền xem dữ liệu kinh doanh.
+
 ## Gate triển khai
 
 Ma trận này cần user review riêng ở phase 08; không ghi [APPROVED] khi chưa có trả lời thật. Sinh allow/deny tests cho từng ô đã cấp; test cross-user/team/department, critical capability, agent projection và REST/MCP parity theo [test strategy](../engineering/test-strategy.md). Danh sách phòng ban/nhóm/Leader bổ sung trước plan MVP1; các role/capability tương lai chốt trước plan tương ứng.

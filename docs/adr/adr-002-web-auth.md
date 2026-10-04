@@ -1,6 +1,6 @@
 # ADR-002: Xác thực web và đường MCP
 
-Trạng thái: proposed [ADR-PROPOSED]
+Trạng thái: superseded by [ADR-006](adr-006-password-login.md) cho đăng nhập web; phần `/mcp` vẫn tham chiếu khi thiết kế xác thực GoClaw.
 Ngày: 2026-10-03
 
 ## Bối cảnh
