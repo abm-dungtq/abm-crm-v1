@@ -1,7 +1,7 @@
 ---
 phase: 2
 title: Review worker/API và contracts
-status: pending
+status: completed
 runtime: grok
 ---
 
