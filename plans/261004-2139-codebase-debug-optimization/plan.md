@@ -48,3 +48,4 @@ phương án tối ưu. Orca điều phối; coordinator chỉ giao việc, ki�
 ## Ghi chú triển khai
 
 - 2026-10-05 06:46: user đồng ý deploy bản sửa lỗi (commit `0dba63d`) lên eval. Không có migration. Version `c0601acd-3752-40a9-8e85-22dc9582606f`. Kiểm sau deploy: `/api/health` 200; `/api/overview` và `/api/mcp` chưa đăng nhập 401; `/api/mcp` có header Origin 403; `/overview` và `/leads` 200.
+- 2026-10-05 07:52: user chọn phương án trả 401 chung cho tài khoản bị khóa (commit `b68dea4`, chưa deploy) và cho chạy migration index. Backup `exports/abm-crm-eval-before-0005-20261005-0752.sql`. Migration `0005_lookup_indexes.sql` đã áp trên eval: đủ 7 index, dữ liệu giữ nguyên (22 lead, 10 user), `/api/health` 200.
