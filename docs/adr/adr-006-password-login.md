@@ -30,6 +30,6 @@ CRM dùng nội bộ, người dùng là nhân viên công ty. Một số nhân 
 
 - Số vòng PBKDF2 phụ thuộc gói Cloudflare. Nâng gói thì tăng được số vòng; mật khẩu cũ vẫn dùng được vì số vòng lưu theo từng dòng.
 - Admin chịu trách nhiệm cấp và gửi mật khẩu tạm; quên mật khẩu thì Admin cấp lại.
-- Đăng nhập không phân biệt "email không tồn tại" và "sai mật khẩu" bằng thông báo, nhưng thời gian phản hồi và mã 423 khi bị khóa vẫn có thể lộ việc email tồn tại. Chấp nhận được với mức bảo mật nội bộ đã chốt.
+- Đăng nhập trả cùng một lỗi 401 "Email hoặc mật khẩu không đúng" cho email không tồn tại, sai mật khẩu và tài khoản đang bị khóa. Cả ba trường hợp đều chạy một lần băm mật khẩu, nên thời gian phản hồi cũng không lộ email nào có thật hay đang bị khóa (user chốt 2026-10-05). Người bị khóa không được báo là bị khóa; hết 5 phút thì đăng nhập lại được. Đổi mật khẩu khi đã đăng nhập vẫn trả 423 khi bị khóa, vì người dùng đó đã được xác thực.
 - Client không phải trình duyệt (script, GoClaw) gọi API web phải gửi `Origin`.
 - Bảng `user_session` chưa có việc dọn phiên hết hạn; cần thêm khi số phiên lớn.

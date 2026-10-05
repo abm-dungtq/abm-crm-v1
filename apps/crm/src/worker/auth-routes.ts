@@ -4,7 +4,7 @@ import { changePasswordInput, loginInput, normalizeEmail } from '@abm/contracts'
 import { isDemoMode } from './actor';
 import type { AppBindings } from './env';
 import { GuardedTx, isGuardFailure } from './guarded-tx';
-import { hashPassword, verifyPassword } from './password';
+import { PASSWORD_ITERATIONS, hashPassword, verifyPassword } from './password';
 import { SESSION_COOKIE, clearedSessionCookie, createSession, newSession, revokeSession, revokeUserSessions, sessionCookie } from './session';
 
 const MAX_FAILED_LOGINS = 10;
@@ -32,6 +32,11 @@ const stored = (row: CredentialRow | null) => row?.password_hash && row.password
   ? { hash: row.password_hash, salt: row.password_salt, iterations: row.password_iterations } : null;
 
 const locked = (row: CredentialRow, now: Date) => !!row.locked_until && row.locked_until > now.toISOString();
+/**
+ * Login answers an unknown email or a locked account exactly like a wrong password, and still pays
+ * for one full hash, so neither the reply nor its timing reveals which emails exist or are locked.
+ */
+const DUMMY_CREDENTIAL = { hash: `${'A'.repeat(43)}=`, salt: `${'A'.repeat(22)}==`, iterations: PASSWORD_ITERATIONS };
 const lockedResponse = fail('ACCOUNT_LOCKED', `Nhập sai mật khẩu quá nhiều lần, thử lại sau ${LOCK_MINUTES} phút`);
 
 /** Counts a wrong password in one statement, so concurrent attempts cannot slip past the limit. */
@@ -57,9 +62,15 @@ publicAuth.post('/login', async (c) => {
       temp_password_expires_at, failed_login_count, locked_until
     FROM app_user WHERE email = ? AND status = 'active'`).bind(normalizeEmail(parsed.data.email)).first<CredentialRow>();
   const credential = stored(row);
-  if (!row || !credential) return c.json(wrongCredentials, 401);
+  if (!row || !credential) {
+    await verifyPassword(parsed.data.password, DUMMY_CREDENTIAL);
+    return c.json(wrongCredentials, 401);
+  }
   const now = new Date();
-  if (locked(row, now)) return c.json(lockedResponse, 423);
+  if (locked(row, now)) {
+    await verifyPassword(parsed.data.password, credential);
+    return c.json(wrongCredentials, 401);
+  }
   if (!(await verifyPassword(parsed.data.password, credential))) {
     await recordFailure(db, row.id, now);
     return c.json(wrongCredentials, 401);

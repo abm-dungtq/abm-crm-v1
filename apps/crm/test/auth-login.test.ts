@@ -66,15 +66,18 @@ test('wrong password and unknown email fail with the same message', async () => 
 test('ten wrong passwords lock the account even for the right password', async () => {
   for (let i = 0; i < 10; i++) expect((await login(LAN, `sai-${i}`)).status).toBe(401);
   const locked = await login(LAN, PASSWORD);
-  expect(locked.status).toBe(423);
-  expect(locked.json.error.code).toBe('ACCOUNT_LOCKED');
+  const wrong = await login(LAN, 'sai-mat-khau');
+  // A locked account must look exactly like a wrong password, so outsiders cannot learn who exists or is locked.
+  expect(locked.status).toBe(401);
+  expect(locked.json).toEqual(wrong.json);
+  expect(locked.cookie).toBeFalsy();
   await db.prepare("UPDATE app_user SET locked_until = '2000-01-01T00:00:00.000Z' WHERE id = 'u-lan'").run();
   expect((await login(LAN, PASSWORD)).status).toBe(200);
 });
 
 test('parallel wrong passwords still lock after ten', async () => {
   await Promise.all(Array.from({ length: 10 }, (_, i) => login(LAN, `sai-${i}`)));
-  expect((await login(LAN, PASSWORD)).status).toBe(423);
+  expect((await login(LAN, PASSWORD)).status).toBe(401);
 });
 
 test('wrong current password on change counts toward the lock', async () => {
