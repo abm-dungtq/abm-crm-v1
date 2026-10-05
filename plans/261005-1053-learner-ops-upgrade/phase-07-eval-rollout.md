@@ -1,7 +1,7 @@
 ---
 phase: 7
 title: "Deploy eval và kiểm thử theo vai trò"
-status: pending
+status: in-progress
 priority: P1
 effort: "0.5d"
 dependencies: [6]

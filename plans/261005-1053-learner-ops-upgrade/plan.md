@@ -1,7 +1,7 @@
 ---
 title: "CRM: thêm luồng học viên cá nhân (tuyển sinh, tổ chức, điểm danh, học phí)"
 description: "Thêm pipeline học viên, giữ khách 3 tháng, hành trình 8 bước, khóa/lớp/buổi, ghi danh, điểm danh, sổ học phí, hợp đồng đối tác và báo cáo theo PRD 'CRM bàn làm việc', chạy song song luồng B2B trên Cloudflare + bot Lark."
-status: pending
+status: in-progress
 priority: P1
 effort: 12-13d
 branch: main
@@ -115,7 +115,7 @@ Do user chốt ngày 2026-10-05:
 | 04 | [Giáo viên và điểm danh](phase-04-teacher-attendance.md) | 1d | 03 | completed |
 | 05 | [Kế toán: học phí, phân bổ, hàng đợi](phase-05-accounting-fees.md) | 2.5d | 04 | completed |
 | 06 | [Báo cáo, dữ liệu cá nhân, bot, tài liệu](phase-06-reports-privacy-bot-docs.md) | 1.5d | 04, 05 | completed |
-| 07 | [Deploy eval và kiểm thử theo vai trò](phase-07-eval-rollout.md) | 0.5d | 06 | pending |
+| 07 | [Deploy eval và kiểm thử theo vai trò](phase-07-eval-rollout.md) | 0.5d | 06 | in-progress |
 
 Chạy tuần tự từ 01 đến 07. Các phase sửa chung `packages/contracts`, `commands.ts`, `router.tsx` và dùng chuỗi số migration, nên không chạy song song.
 
@@ -149,3 +149,9 @@ Chạy tuần tự từ 01 đến 07. Các phase sửa chung `packages/contracts
 - **CPU của gói miễn phí:** báo cáo và phân bổ tiền phải dùng truy vấn tổng hợp trong SQL, không lặp trong JS.
 - **Phạm vi lớn:** mỗi phase có điểm dừng xanh riêng. Không gộp phase.
 - **Rò dữ liệu cá nhân qua bot:** phase 06 có test MCP cho việc che số điện thoại.
+
+## Kết quả deploy
+
+Ngày 2026-10-05, commit `1531f58` đã lên eval (Worker `be2f8e11`). Migration 0006 đến 0011 đã áp, dữ liệu cũ còn nguyên. Hằng đã chuyển sang Tổ chức, Thanh làm Kế toán. Báo cáo: [deploy-261005-2321-learner-ops-eval.md](../reports/deploy-261005-2321-learner-ops-eval.md).
+
+Phase 07 còn chờ user làm hai việc: nhập thử file 200 học viên (Task 7.6b) và chạy danh sách thử theo vai trò. Khi có kết quả thì đổi plan sang `completed`.
