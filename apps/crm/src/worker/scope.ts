@@ -26,6 +26,32 @@ export function leadScope(actor: Actor, alias = 'l'): SqlFragment {
     case 'admin':
       return { sql: `${a}.organization_id = ?`, binds: [actor.organizationId] };
     default:
+      // academic, teacher and accountant read B2B leads nowhere; their own screens use dedicated queries.
+      return { sql: '0 = 1', binds: [] };
+  }
+}
+
+/** Same visibility as leadScope, limited to the B2B pipeline. Learner leads stay on the learner screens. */
+export function b2bLeadScope(actor: Actor, alias = 'l'): SqlFragment {
+  const scope = leadScope(actor, alias);
+  return { sql: `${scope.sql} AND ${alias}.pipeline = 'b2b'`, binds: [...scope.binds] };
+}
+
+/**
+ * Customer (contact) visibility in the learner flow: Sale own, Leader the team's customers,
+ * Admin and BGĐ organization-wide. Other roles reach customers only through their own queries.
+ */
+export function customerScope(actor: Actor, alias = 'c'): SqlFragment {
+  const a = alias;
+  switch (actor.role) {
+    case 'sale':
+      return { sql: `${a}.owner_user_id = ?`, binds: [actor.id] };
+    case 'leader':
+      return { sql: `${a}.owner_user_id IN (SELECT id FROM app_user WHERE team_id = ?)`, binds: [actor.teamId] };
+    case 'director':
+    case 'admin':
+      return { sql: `${a}.organization_id = ?`, binds: [actor.organizationId] };
+    default:
       return { sql: '0 = 1', binds: [] };
   }
 }

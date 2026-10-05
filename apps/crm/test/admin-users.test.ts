@@ -1,19 +1,14 @@
-import { env, applyD1Migrations } from 'cloudflare:test';
+import { env } from 'cloudflare:test';
 import { beforeEach, expect, test } from 'vitest';
 import seedSql from '../seed/demo.sql?raw';
 import demoRoster from '../seed/demo-roster.csv?raw';
 import app from '../src/worker/index';
 import { hashPassword } from '../src/worker/password';
+import { resetDb } from './helpers/reset-db';
 
 const db = env.DB;
-const tables = ['user_session', '_guard', 'idempotency_key', 'outbox', 'audit_log', 'approval', 'activity', 'task', 'lead', 'lead_counter',
-  'contact_point', 'account_contact', 'contact', 'account', 'app_user', 'team', 'department', 'organization'];
 const ORIGIN = 'http://crm.test';
-beforeEach(async () => {
-  await applyD1Migrations(db, env.TEST_MIGRATIONS);
-  await db.batch(tables.map(t => db.prepare(`DELETE FROM ${t}`)));
-  await db.batch(seedSql.split('\n').filter(l => l.startsWith('INSERT')).map(l => db.prepare(l)));
-});
+beforeEach(() => resetDb(db, seedSql));
 
 async function call(user: string, path: string, body?: unknown, method = body === undefined ? 'GET' : 'POST') {
   const res = await app.fetch(new Request(`${ORIGIN}/api${path}`, {
@@ -94,7 +89,7 @@ test('invalid rows are reported per line and block the commit', async () => {
     'A,dup@demo.abm.example,,,BGĐ',
     'B,dup@demo.abm.example,,,BGĐ',
     'C,,,,BGĐ',
-    'D,d@demo.abm.example,,,Kế toán',
+    'D,d@demo.abm.example,,,Bảo vệ',
     'E,e@demo.abm.example,Phòng Kinh doanh,,Sale',
     'F,f@demo.abm.example,Phòng Kinh doanh,,BGĐ',
   ].join('\n');

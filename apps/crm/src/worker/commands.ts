@@ -3,12 +3,19 @@ import {
   foldText, lostReasonLabel, normalizeEmail, normalizePhone, stageLabel, workingMinutesBetween,
   type ApiError, type ApiResult, type AssignLeadInput, type ChangeStageInput, type CommandName,
   type CompleteTaskInput, type CreateLeadInput, type DecideApprovalInput, type LogActivityInput,
-  type NextActionInput, type ReleaseLeadInput, type RequestOwnerChangeInput, type StageCode,
+  type NextActionInput, type PipelineCode, type RecordConsentInput, type ReleaseLeadInput, type RequestOwnerChangeInput, type StageCode,
+  type UpsertProductInput,
 } from '@abm/contracts';
 import type { z } from 'zod';
 import type { Actor } from './env';
 import { GuardedTx, isGuardFailure } from './guarded-tx';
-import { canSeeLead, leaderOnly, leadScope, mayDecideApproval } from './scope';
+import { fail, ok, type Ctx, type Handler } from './command-result';
+import { academicHandlers } from './academic-commands';
+import { attendanceHandlers } from './attendance';
+import { feeHandlers } from './fees';
+import { learnerHandlers } from './learner-commands';
+import { privacyHandlers } from './privacy';
+import { canSeeLead, customerScope, leaderOnly, leadScope, mayDecideApproval } from './scope';
 
 export interface LeadRow {
   id: string;
@@ -18,6 +25,7 @@ export interface LeadRow {
   team_id: string | null;
   account_id: string | null;
   contact_id: string;
+  pipeline: PipelineCode;
   owner_user_id: string | null;
   stage: StageCode;
   status: 'queue' | 'active' | 'won' | 'lost';
@@ -47,15 +55,10 @@ interface ApprovalRow {
   version: number;
 }
 
-const fail = (code: ApiError['code'], message: string, extra?: Partial<ApiError>): ApiResult<never> =>
-  ({ ok: false, error: { code, message, ...extra } });
-const ok = <T>(data: T): ApiResult<T> => ({ ok: true, data });
-
-type Ctx<I> = { db: D1Database; actor: Actor; input: I; tx: GuardedTx };
-type Handler<I> = (ctx: Ctx<I>) => Promise<ApiResult<unknown>>;
 
 const handlers: { [K in CommandName]: Handler<z.infer<(typeof COMMANDS)[K]['schema']>> } = {
   createLead, assignLead, releaseLead, logActivity, completeTask, changeStage, requestOwnerChange, decideApproval,
+  upsertProduct, recordConsent, ...learnerHandlers, ...academicHandlers, ...attendanceHandlers, ...feeHandlers, ...privacyHandlers,
 };
 
 export async function sha256(text: string) {
@@ -110,6 +113,8 @@ export async function runCommand(db: D1Database, actor: Actor, name: CommandName
   const handler = (proposes ? proposals[name as keyof typeof proposals] : handlers[name]) as Handler<unknown>;
   const result = await handler({ db, actor, input: parsed.data, tx });
   if (!result.ok) return result;
+  // A dry run (an import preview) stages nothing, so there is nothing to commit or replay.
+  if (!tx.hasAnchor) return result;
   tx.idempotency(idempotencyKey, hash, result);
   // Re-checked inside the batch so a switch flipped after the pre-check still stops the write.
   if (actor.kind === 'agent') tx.assert(AGENT_WRITES_OPEN, []);
@@ -120,6 +125,12 @@ export async function runCommand(db: D1Database, actor: Actor, name: CommandName
     if (concurrent) return replayInScope(db, actor, name, parsed.data, concurrent);
     if (actor.kind === 'agent' && isGuardFailure(error) && await agentWritesBlocked(db)) return killSwitchOn();
     if (isGuardFailure(error)) return fail('STALE_VERSION', 'Dữ liệu vừa được người khác cập nhật. Tải lại rồi thử lại.');
+    const message = error instanceof Error ? error.message : String(error);
+    // Two writers can insert the same charge code, or the first attendance row of one session, at the same time.
+    // Those races are a stale read. Any other unique failure stays an error so a real duplicate is not hidden.
+    if (message.includes('UNIQUE constraint failed') && /charge\.code|attendance\.session_id|attendance_session_enrollment|attendance_session_trial/.test(message)) {
+      return fail('STALE_VERSION', 'Dữ liệu vừa được người khác cập nhật. Tải lại rồi thử lại.');
+    }
     throw error;
   }
   // Only a fresh commit reaches here; a replayed result already had its follow-up work.
@@ -146,6 +157,8 @@ export async function replayInScope(db: D1Database, actor: Actor, name: CommandN
 }
 
 // ---------- helpers ----------
+
+const learnerLead = () => fail('VALIDATION_FAILED', 'Lead học viên đi theo hành trình học viên');
 
 async function loadLead(db: D1Database, actor: Actor, leadId: string) {
   if (!(await canSeeLead(db, actor, leadId))) return null;
@@ -229,6 +242,40 @@ async function applyStageChange(db: D1Database, tx: GuardedTx, lead: LeadRow, ex
 }
 
 // ---------- handlers ----------
+
+async function upsertProduct({ db, actor, input, tx }: Ctx<UpsertProductInput>) {
+  const fields = { name: input.name, description: input.description ?? null, price_vnd: input.priceVnd, active: input.active ? 1 : 0 };
+  if (!input.id) {
+    const id = crypto.randomUUID();
+    tx.insertVersioned('product', { id, organization_id: actor.organizationId, ...fields });
+    tx.audit('product', id, null, fields);
+    return ok({ id, version: 1 });
+  }
+  if (!input.version) return fail('VALIDATION_FAILED', 'Thiếu version của sản phẩm', { fields: { version: 'Bắt buộc' } });
+  const before = await db.prepare('SELECT name, description, price_vnd, active, version FROM product WHERE id = ? AND organization_id = ?')
+    .bind(input.id, actor.organizationId).first<{ name: string; description: string | null; price_vnd: number; active: number; version: number }>();
+  if (!before) return fail('NOT_FOUND', 'Không tìm thấy sản phẩm');
+  if (before.version !== input.version) return fail('STALE_VERSION', 'Sản phẩm vừa được người khác cập nhật. Tải lại rồi thử lại.');
+  tx.update('product', input.id, input.version, fields);
+  tx.audit('product', input.id, { name: before.name, description: before.description, price_vnd: before.price_vnd, active: before.active }, fields);
+  return ok({ id: input.id, version: input.version + 1 });
+}
+
+async function recordConsent({ db, actor, input, tx }: Ctx<RecordConsentInput>) {
+  const contact = await db.prepare('SELECT version FROM contact WHERE id = ? AND organization_id = ?')
+    .bind(input.contactId, actor.organizationId).first<{ version: number }>();
+  if (!contact) return fail('NOT_FOUND', 'Không tìm thấy khách trong phạm vi của bạn');
+  const scope = customerScope(actor);
+  const allowed = await db.prepare(`SELECT 1 AS ok FROM contact c WHERE c.id = ? AND ${scope.sql}`).bind(input.contactId, ...scope.binds).first();
+  if (!allowed) return fail('FORBIDDEN', 'Khách này không thuộc phạm vi của bạn');
+  // consent is append-only, so a versioned contact row anchors the batch.
+  tx.update('contact', input.contactId, contact.version, {});
+  const id = crypto.randomUUID();
+  tx.raw(db.prepare(`INSERT INTO consent (id, contact_id, purpose, granted, note, recorded_by_user_id, recorded_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)`).bind(id, input.contactId, input.purpose, input.granted ? 1 : 0, input.note ?? null, actor.id, tx.now));
+  tx.audit('consent', id, null, { contactId: input.contactId, purpose: input.purpose, granted: input.granted });
+  return ok({ id });
+}
 
 async function createLead({ db, actor, input, tx }: Ctx<CreateLeadInput>) {
   const phone = input.phone ? normalizePhone(input.phone) : null;
@@ -384,6 +431,7 @@ async function applyAssign(db: D1Database, tx: GuardedTx, actor: Actor, lead: Le
 async function assignLead({ db, actor, input, tx }: Ctx<AssignLeadInput>) {
   const lead = await loadLead(db, actor, input.leadId);
   if (!lead) return notFound();
+  if (lead.pipeline === 'learner') return learnerLead();
   if (lead.version !== input.expectedVersion) return stale();
   const checked = await checkAssign(db, actor, lead, input.ownerUserId);
   if ('error' in checked) return checked.error;
@@ -394,6 +442,7 @@ async function assignLead({ db, actor, input, tx }: Ctx<AssignLeadInput>) {
 async function releaseLead({ db, actor, input, tx }: Ctx<ReleaseLeadInput>) {
   const lead = await loadLead(db, actor, input.leadId);
   if (!lead || lead.team_id !== actor.teamId) return notFound();
+  if (lead.pipeline === 'learner') return learnerLead();
   if (lead.version !== input.expectedVersion) return stale();
   if (lead.status !== 'active' || lead.first_contact_at || !lead.assigned_at) {
     return fail('VALIDATION_FAILED', 'Chỉ nhả lead đã giao mà chưa có liên hệ lần đầu');
@@ -469,6 +518,7 @@ async function completeTask({ db, actor, input, tx }: Ctx<CompleteTaskInput>) {
 async function changeStage({ db, actor, input, tx }: Ctx<ChangeStageInput>) {
   const lead = await loadLead(db, actor, input.leadId);
   if (!lead) return notFound();
+  if (lead.pipeline === 'learner') return learnerLead();
   if (lead.version !== input.expectedVersion) return stale();
   const invalid = await applyStageChange(db, tx, lead, input.expectedVersion, input);
   return invalid ?? ok({ leadId: lead.id, stage: input.toStage });
@@ -477,6 +527,7 @@ async function changeStage({ db, actor, input, tx }: Ctx<ChangeStageInput>) {
 async function requestOwnerChange({ db, actor, input, tx }: Ctx<RequestOwnerChangeInput>) {
   const lead = await loadLead(db, actor, input.leadId);
   if (!lead) return notFound();
+  if (lead.pipeline === 'learner') return learnerLead();
   if (lead.version !== input.expectedVersion) return stale();
   if (lead.status !== 'active') return fail('VALIDATION_FAILED', 'Chỉ chuyển owner lead đang mở');
   if (input.toUserId === lead.owner_user_id) return fail('VALIDATION_FAILED', 'Người nhận đang là owner');
@@ -573,6 +624,7 @@ const proposals = {
   async changeStage({ db, actor, input, tx }: Ctx<ChangeStageInput>) {
     const lead = await loadLead(db, actor, input.leadId);
     if (!lead) return notFound();
+    if (lead.pipeline === 'learner') return learnerLead();
     if (lead.version !== input.expectedVersion) return stale();
     const invalid = validateStageChange(lead, input);
     if (invalid) return invalid;
@@ -582,6 +634,7 @@ const proposals = {
   async assignLead({ db, actor, input, tx }: Ctx<AssignLeadInput>) {
     const lead = await loadLead(db, actor, input.leadId);
     if (!lead) return notFound();
+    if (lead.pipeline === 'learner') return learnerLead();
     if (lead.version !== input.expectedVersion) return stale();
     const checked = await checkAssign(db, actor, lead, input.ownerUserId);
     if ('error' in checked) return checked.error;

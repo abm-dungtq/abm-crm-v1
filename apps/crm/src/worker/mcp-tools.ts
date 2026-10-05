@@ -1,7 +1,8 @@
-import { foldText, type ApiError, type ApiResult, type CommandName } from '@abm/contracts';
+import { foldText, type ApiError, type ApiResult, type CommandName, type RoleCode } from '@abm/contracts';
 import { replayInScope, runCommand, sha256 } from './commands';
 import type { Actor } from './env';
 import type { GuardedTx } from './guarded-tx';
+import { learnerPhoneVisible } from './learner-queries';
 import { dashboard, leadDetail, listLeads, listTasks } from './queries';
 import { leadScope } from './scope';
 
@@ -16,16 +17,27 @@ const nextAction = {
 };
 const schema = (properties: Json = {}, required: string[] = []) => ({ type: 'object', properties, required });
 
+const STAFF: readonly RoleCode[] = ['sale', 'leader', 'head', 'director', 'admin'];
+const EVERYONE: readonly RoleCode[] = [...STAFF, 'academic', 'teacher', 'accountant'];
+
+interface ToolDef {
+  name: string;
+  description: string;
+  inputSchema: ReturnType<typeof schema>;
+  roles: readonly RoleCode[];
+}
+
 /** Tools the chat agent may call. Approvals and releasing a lead stay on the web on purpose. */
-export const tools = [
-  { name: 'whoami', description: 'Cho biết bạn đang dùng CRM với tư cách ai (tên, vai trò, nhóm, phòng ban).', inputSchema: schema() },
+export const tools: ToolDef[] = [
+  { name: 'whoami', description: 'Cho biết bạn đang dùng CRM với tư cách ai (tên, vai trò, nhóm, phòng ban).', inputSchema: schema(), roles: EVERYONE },
   {
     name: 'search_leads', description: 'Tìm lead trong phạm vi của bạn theo từ khóa, trạng thái hoặc stage. Trả tối đa 20 lead kèm SĐT, email.',
     inputSchema: schema({ q: str('Từ khóa: mã lead, tên khách, công ty, SĐT'), status: str('open, queue, active, won hoặc lost'), stage: str('Mã stage') }),
+    roles: STAFF,
   },
-  { name: 'get_lead', description: 'Xem chi tiết một lead theo mã (ví dụ L-0001).', inputSchema: schema({ lead_code: str('Mã lead') }, ['lead_code']) },
-  { name: 'my_tasks', description: 'Danh sách việc cần làm của bạn.', inputSchema: schema({ status: str('open (mặc định) hoặc completed') }) },
-  { name: 'dashboard_summary', description: 'Số liệu tổng quan pipeline trong phạm vi của bạn.', inputSchema: schema() },
+  { name: 'get_lead', description: 'Xem chi tiết một lead theo mã (ví dụ L-0001).', inputSchema: schema({ lead_code: str('Mã lead') }, ['lead_code']), roles: STAFF },
+  { name: 'my_tasks', description: 'Danh sách việc cần làm của bạn.', inputSchema: schema({ status: str('open (mặc định) hoặc completed') }), roles: STAFF },
+  { name: 'dashboard_summary', description: 'Số liệu tổng quan pipeline trong phạm vi của bạn.', inputSchema: schema(), roles: STAFF },
   {
     name: 'create_lead', description: 'Tạo lead mới. Admin và BGĐ phải ghi rõ phòng ban.',
     inputSchema: schema({
@@ -34,6 +46,7 @@ export const tools = [
       department: str('Tên phòng ban (bắt buộc với Admin, BGĐ)'), confirm_not_duplicate: { type: 'boolean', description: 'Xác nhận không trùng sau khi đã kiểm tra' },
       next_action: nextAction,
     }, ['contact_name', 'source', 'need_summary']),
+    roles: STAFF,
   },
   {
     name: 'log_activity', description: 'Ghi hoạt động cho lead (gọi điện, gặp mặt, email, nhắn tin, ghi chú…).',
@@ -41,10 +54,12 @@ export const tools = [
       lead_code: str('Mã lead'), type: str('call, meeting, email, message, customer_reply, file_sent, proposal_sent hoặc note'),
       summary: str('Nội dung'), occurred_at: str('Thời điểm, ISO 8601, mặc định là bây giờ'),
     }, ['lead_code', 'type', 'summary']),
+    roles: STAFF,
   },
   {
     name: 'complete_task', description: 'Hoàn thành một việc. Nếu là Next Action của lead đang mở thì phải có next_action mới.',
     inputSchema: schema({ task_id: str('Mã việc'), outcome: str('Kết quả'), next_action: nextAction }, ['task_id']),
+    roles: STAFF,
   },
   {
     name: 'change_stage', description: 'Đổi stage lead. Với người không phải Admin, bot chỉ tạo yêu cầu để xác nhận trên web.',
@@ -52,16 +67,26 @@ export const tools = [
       lead_code: str('Mã lead'), to_stage: str('Stage đích'), lost_reason: str('Lý do Lost'), lost_note: str('Ghi chú Lost'),
       won_value: { type: 'integer', description: 'Giá trị chốt (đồng)' }, won_note: str('Bằng chứng chốt'),
     }, ['lead_code', 'to_stage']),
+    roles: STAFF,
   },
   {
     name: 'assign_lead', description: 'Giao lead cho người trong nhóm theo email. Với Leader, bot chỉ tạo yêu cầu để xác nhận trên web.',
     inputSchema: schema({ lead_code: str('Mã lead'), owner_email: str('Email người nhận'), next_action: nextAction }, ['lead_code', 'owner_email']),
+    roles: STAFF,
   },
   {
     name: 'request_owner_change', description: 'Sale xin chuyển lead của mình cho người khác trong nhóm; Leader duyệt trên web.',
     inputSchema: schema({ lead_code: str('Mã lead'), new_owner_email: str('Email người nhận'), reason: str('Lý do') }, ['lead_code', 'new_owner_email', 'reason']),
+    roles: STAFF,
   },
 ];
+
+/** Tools this person may see. The role list stays off the JSON-RPC payload. */
+export function toolsFor(actor: Actor) {
+  return tools
+    .filter((tool) => tool.roles.includes(actor.role))
+    .map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
+}
 
 const fail = (code: ApiError['code'], message: string): ApiResult<never> => ({ ok: false, error: { code, message } });
 const notFound = () => fail('NOT_FOUND', 'Không tìm thấy lead trong phạm vi của bạn');
@@ -178,12 +203,16 @@ async function readTool(db: D1Database, actor: Actor, name: string, args: Args):
     // The ids come from the scoped list, so this lookup cannot widen what the actor sees.
     const points = (await db.prepare(`SELECT l.id, cp.type, cp.value FROM lead l JOIN contact_point cp ON cp.contact_id = l.contact_id
       WHERE l.id IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(leads.map((l) => l.id))).all<{ id: string; type: string; value: string }>()).results;
+    const learnerIds = leads.filter((l) => l.pipeline === 'learner').map((l) => l.id);
+    const phoneVisible = await learnerPhoneVisible(db, actor, learnerIds);
     const pick = (id: string, type: string) => points.filter((p) => p.id === id && p.type === type).map((p) => p.value);
     return {
       ok: true,
       data: leads.map((l) => ({
         code: l.code, contactName: l.contactName, company: l.account?.name ?? null, stage: l.stage, status: l.status,
-        owner: l.owner?.name ?? null, phones: pick(l.id, 'phone'), emails: pick(l.id, 'email'), nextAction: l.nextAction,
+        owner: l.owner?.name ?? null,
+        phones: l.pipeline === 'learner' && phoneVisible.get(l.id) !== true ? [] : pick(l.id, 'phone'),
+        emails: pick(l.id, 'email'), nextAction: l.nextAction,
       })),
     };
   }
@@ -211,6 +240,9 @@ const toolResult = (value: unknown, isError = false) =>
 
 /** Identity always comes from the token: fields such as acting_user or user_id in args are never read. */
 export async function callTool(db: D1Database, actor: Actor, name: string, args: Args, origin: string, onCommitted: OnCommitted) {
+  const tool = tools.find((item) => item.name === name);
+  if (!tool) return toolResult({ code: 'UNKNOWN_TOOL', message: 'Không có công cụ này' }, true);
+  if (!tool.roles.includes(actor.role)) return toolResult({ code: 'FORBIDDEN', message: 'Vai trò hiện tại không được thực hiện thao tác này' }, true);
   if (!READ_TOOLS.has(name) && !WRITE_TOOLS.has(name)) return toolResult({ code: 'UNKNOWN_TOOL', message: 'Không có công cụ này' }, true);
   const result = READ_TOOLS.has(name) ? await readTool(db, actor, name, args) : await writeTool(db, actor, name, args, onCommitted);
   if (!result.ok) return toolResult(result.error, true);

@@ -1,19 +1,26 @@
-import { LEAD_SOURCES, LOST_REASONS, STAGES, WORKDAY } from '@abm/contracts';
+import { useState } from 'react';
+import { LEAD_SOURCES, LOST_REASONS, STAGES, WORKDAY, type UpdateOrgBankInput } from '@abm/contracts';
 import { useActor } from '../actor-context';
-import { useApi } from '../api';
+import { useApi, useCommand } from '../api';
 import { roleLabel } from '../components/layout';
-import { Alert, Badge, ErrorState, Loading } from '../components/ui';
+import { Alert, Badge, ErrorState, Field, FormError, Loading, fieldErrors, useToast } from '../components/ui';
 import type { AdminOverview } from '../types';
+
+interface OrgBank { version: number; bankName: string | null; bankAccountNo: string | null; bankAccountHolder: string | null }
 
 export function AdminPage() {
   const actor = useActor();
   const q = useApi<AdminOverview>(actor.role === 'admin' ? '/admin/overview' : null);
+  const bank = useApi<OrgBank>(actor.role === 'admin' ? '/fees/settings' : null);
   if (actor.role !== 'admin') return <Alert tone="warn">Chỉ Admin xem cấu hình.</Alert>;
   return (
     <>
       <div className="page-head">
         <div><h1>Cấu hình</h1><p className="sub">Admin quản trị cấu hình, xem và cập nhật dữ liệu toàn công ty; không duyệt yêu cầu.</p></div>
       </div>
+      {bank.isLoading && <Loading />}
+      {bank.error && <ErrorState error={bank.error} onRetry={() => bank.refetch()} />}
+      {bank.data && <OrgBankForm key={bank.data.version} bank={bank.data} />}
       {q.isLoading && <Loading />}
       {q.error && <ErrorState error={q.error} onRetry={() => q.refetch()} />}
       {q.data && (
@@ -66,5 +73,35 @@ export function AdminPage() {
         </div>
       )}
     </>
+  );
+}
+
+function OrgBankForm({ bank }: { bank: OrgBank }) {
+  const toast = useToast();
+  const [form, setForm] = useState({
+    bankName: bank.bankName ?? '', bankAccountNo: bank.bankAccountNo ?? '', bankAccountHolder: bank.bankAccountHolder ?? '',
+  });
+  const m = useCommand<UpdateOrgBankInput>('updateOrgBank');
+  const errors = fieldErrors(m.error);
+  const submit = () => m.mutate({
+    version: bank.version, bankName: form.bankName.trim(), bankAccountNo: form.bankAccountNo.trim(), bankAccountHolder: form.bankAccountHolder.trim(),
+  }, { onSuccess: () => toast('Đã lưu tài khoản nhận tiền') });
+  return (
+    <section className="card" style={{ marginBottom: 16 }}>
+      <div className="card-head"><h2>Tài khoản nhận tiền</h2></div>
+      <form className="card-body stack" onSubmit={(e) => { e.preventDefault(); submit(); }}>
+        <Field label="Ngân hàng" htmlFor="bank-name" required error={errors.bankName}>
+          <input id="bank-name" value={form.bankName} onChange={(e) => setForm({ ...form, bankName: e.target.value })} required maxLength={120} />
+        </Field>
+        <Field label="Số tài khoản" htmlFor="bank-no" required error={errors.bankAccountNo}>
+          <input id="bank-no" value={form.bankAccountNo} onChange={(e) => setForm({ ...form, bankAccountNo: e.target.value })} required maxLength={40} />
+        </Field>
+        <Field label="Chủ tài khoản" htmlFor="bank-holder" required error={errors.bankAccountHolder}>
+          <input id="bank-holder" value={form.bankAccountHolder} onChange={(e) => setForm({ ...form, bankAccountHolder: e.target.value })} required maxLength={120} />
+        </Field>
+        <FormError error={m.error && !Object.keys(errors).length ? m.error : null} />
+        <button className="btn btn-primary" disabled={m.isPending}>{m.isPending ? 'Đang lưu…' : 'Lưu tài khoản'}</button>
+      </form>
+    </section>
   );
 }

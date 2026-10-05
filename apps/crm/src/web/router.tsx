@@ -15,6 +15,22 @@ import { DashboardPage } from './pages/dashboard';
 import { LeadDetailPage } from './pages/lead-detail';
 import { LeadNewPage } from './pages/lead-new';
 import { LeadsPage } from './pages/leads';
+import { LearnerDetailPage } from './pages/learner-detail';
+import { LearnerReportsPage } from './pages/learner-reports';
+import { PrivacyRequestsPage } from './pages/privacy-requests';
+import { LearnerNewPage } from './pages/learner-new';
+import { LearnersPage } from './pages/learners';
+import { ClassDetailPage } from './pages/class-detail';
+import { CoursesPage } from './pages/courses';
+import { FeeGuidePage } from './pages/fee-guide';
+import { FeesLedgerPage } from './pages/fees-ledger';
+import { FeesPage } from './pages/fees';
+import { FeesQueuePage } from './pages/fees-queue';
+import { MyClassesPage } from './pages/my-classes';
+import { SessionAttendancePage } from './pages/session-attendance';
+import { PartnerDetailPage } from './pages/partner-detail';
+import { ProductsPage } from './pages/products';
+import { PartnersPage } from './pages/partners';
 import { OverviewPage } from './pages/overview';
 import { PipelinePage } from './pages/pipeline';
 import { TasksPage } from './pages/tasks';
@@ -86,6 +102,20 @@ const routes = [
   }),
   createRoute({ getParentRoute: () => rootRoute, path: '/leads/new', component: LeadNewPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/leads/$leadId', component: LeadDetailPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/learners', component: LearnersPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/learners/new', component: LearnerNewPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/learners/$contactId', component: LearnerDetailPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/partners', component: PartnersPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/partners/$id', component: PartnerDetailPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/products', component: ProductsPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/courses', component: CoursesPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/classes/$classId', component: ClassDetailPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/my-classes', component: MyClassesPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/fees', component: FeesPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/fees/queue', component: FeesQueuePage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/fees/ledger/$contactId', component: FeesLedgerPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/fees/guide/$chargeId', component: FeeGuidePage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/sessions/$sessionId', component: SessionAttendancePage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/customers', component: CustomersPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/customers/$accountId', component: AccountDetailPage }),
   createRoute({
@@ -95,6 +125,8 @@ const routes = [
     validateSearch: (s: Record<string, unknown>): { view?: 'open' | 'completed' } => ({ view: s.view === 'completed' ? 'completed' : undefined }),
   }),
   createRoute({ getParentRoute: () => rootRoute, path: '/approvals', component: ApprovalsPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/reports/learner', component: LearnerReportsPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/privacy', component: PrivacyRequestsPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/audit', component: AuditPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/admin', component: AdminPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/admin/users', component: AdminUsersPage }),

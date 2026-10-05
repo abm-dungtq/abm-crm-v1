@@ -1,17 +1,11 @@
-import { env, applyD1Migrations } from 'cloudflare:test';
+import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, test } from 'vitest';
 import seedSql from '../seed/demo.sql?raw';
 import app from '../src/worker/index';
+import { resetDb } from './helpers/reset-db';
 
 const db = env.DB;
-const TABLES = ['_guard', 'idempotency_key', 'outbox', 'audit_log', 'approval', 'activity', 'task', 'lead', 'lead_counter',
-  'contact_point', 'account_contact', 'contact', 'account', 'app_user', 'team', 'department', 'organization'];
-
-beforeEach(async () => {
-  await applyD1Migrations(db, env.TEST_MIGRATIONS);
-  await db.batch(TABLES.map((t) => db.prepare(`DELETE FROM ${t}`)));
-  await db.batch(seedSql.split('\n').filter((line) => line.startsWith('INSERT')).map((line) => db.prepare(line)));
-});
+beforeEach(() => resetDb(db, seedSql));
 
 async function get(user: string, path: string) {
   const response = await app.fetch(new Request(`http://crm.test/api${path}`, { headers: { 'X-Demo-User': user } }), { ...env, DEMO_MODE: '1' });

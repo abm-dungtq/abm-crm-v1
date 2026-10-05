@@ -1,17 +1,14 @@
-import { env, applyD1Migrations } from 'cloudflare:test';
+import { env } from 'cloudflare:test';
 import { beforeEach, expect, test } from 'vitest';
 import seedSql from '../seed/demo.sql?raw';
 import app from '../src/worker/index';
 import { loadActor, loadAgentActor } from '../src/worker/actor';
 import { runCommand } from '../src/worker/commands';
+import { resetDb } from './helpers/reset-db';
 
 const db = env.DB;
-const tables = ['agent_token', 'user_session', '_guard', 'idempotency_key', 'outbox', 'audit_log', 'approval', 'activity', 'task', 'lead',
-  'lead_counter', 'contact_point', 'account_contact', 'contact', 'account', 'app_user', 'team', 'department', 'organization'];
 beforeEach(async () => {
-  await applyD1Migrations(db, env.TEST_MIGRATIONS);
-  await db.batch(tables.map(t => db.prepare(`DELETE FROM ${t}`)));
-  await db.batch(seedSql.split('\n').filter(l => l.startsWith('INSERT')).map(l => db.prepare(l)));
+  await resetDb(db, seedSql);
   await db.prepare('INSERT INTO agent_kill_switch (id, enabled) VALUES (1, 0) ON CONFLICT(id) DO UPDATE SET enabled = 0').run();
 });
 

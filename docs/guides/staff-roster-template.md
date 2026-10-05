@@ -4,7 +4,7 @@ File mẫu: [`apps/crm/public/mau-danh-sach-nhan-su.csv`](../../apps/crm/public/
 
 ## Cách điền
 
-1. Mở file mẫu bằng Excel. Giữ nguyên dòng tiêu đề, xóa 5 dòng ví dụ.
+1. Mở file mẫu bằng Excel. Giữ nguyên dòng tiêu đề, xóa các dòng ví dụ.
 2. Mỗi nhân viên một dòng, gồm 5 cột:
 
 | Cột | Bắt buộc | Ghi chú |
@@ -13,7 +13,7 @@ File mẫu: [`apps/crm/public/mau-danh-sach-nhan-su.csv`](../../apps/crm/public/
 | Email | Có | Email công ty, trùng với email trong Lark để bot nhận ra người đó. Mỗi email chỉ xuất hiện một lần. |
 | Phòng ban | Theo vai trò | Viết giống hệt nhau cho mọi người cùng phòng, ví dụ luôn là "Phòng Kinh doanh". |
 | Nhóm | Theo vai trò | Nhóm thuộc phòng ban ở cột trước, ví dụ "Kinh doanh 1". |
-| Vai trò | Có | Một trong: `Sale`, `Leader`, `Trưởng phòng`, `BGĐ`, `Admin`. |
+| Vai trò | Có | Một trong: `Sale`, `Leader`, `Trưởng phòng`, `BGĐ`, `Admin`, `Tổ chức`, `Giáo viên`, `Kế toán`. |
 
 3. Cột Phòng ban và Nhóm điền theo vai trò:
 
@@ -22,6 +22,7 @@ File mẫu: [`apps/crm/public/mau-danh-sach-nhan-su.csv`](../../apps/crm/public/
 | Sale, Leader | Bắt buộc | Bắt buộc |
 | Trưởng phòng | Bắt buộc | Để trống |
 | BGĐ, Admin | Để trống | Để trống |
+| Tổ chức, Giáo viên, Kế toán | Để trống | Để trống |
 
 4. Lưu lại bằng **File → Save As → CSV UTF-8 (Comma delimited)**. Nếu Excel lưu với dấu chấm phẩy thay dấu phẩy, CRM vẫn đọc được.
 

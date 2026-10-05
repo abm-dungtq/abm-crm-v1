@@ -1,19 +1,14 @@
-import { env, applyD1Migrations } from 'cloudflare:test';
+import { env } from 'cloudflare:test';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import seedSql from '../seed/demo.sql?raw';
 import app from '../src/worker/index';
+import { resetDb } from './helpers/reset-db';
 
 const db = env.DB;
-const tables = ['user_session', '_guard', 'idempotency_key', 'outbox', 'audit_log', 'approval', 'activity', 'task', 'lead', 'lead_counter',
-  'contact_point', 'account_contact', 'contact', 'account', 'app_user', 'team', 'department', 'organization'];
 const FAKE_SECRET = 'fake-secret-value-123';
 const lark = { LARK_APP_ID: 'cli_fake', LARK_APP_SECRET: FAKE_SECRET };
 
-beforeEach(async () => {
-  await applyD1Migrations(db, env.TEST_MIGRATIONS);
-  await db.batch(tables.map(t => db.prepare(`DELETE FROM ${t}`)));
-  await db.batch(seedSql.split('\n').filter(l => l.startsWith('INSERT')).map(l => db.prepare(l)));
-});
+beforeEach(() => resetDb(db, seedSql));
 afterEach(() => vi.restoreAllMocks());
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });

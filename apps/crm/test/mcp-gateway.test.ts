@@ -1,19 +1,17 @@
-import { env, applyD1Migrations } from 'cloudflare:test';
+import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, test } from 'vitest';
 import seedSql from '../seed/demo.sql?raw';
 import app from '../src/worker/index';
 import { sha256 } from '../src/worker/commands';
 import { hashPassword } from '../src/worker/password';
+import { addUser, get, makeLead } from './helpers/learner-fixtures';
+import { resetDb } from './helpers/reset-db';
 
 const db = env.DB;
 const ORIGIN = 'http://crm.test';
-const tables = ['agent_token', 'user_session', '_guard', 'idempotency_key', 'outbox', 'audit_log', 'approval', 'activity', 'task', 'lead',
-  'lead_counter', 'contact_point', 'account_contact', 'contact', 'account', 'app_user', 'team', 'department', 'organization'];
 const tokens: Record<string, string> = {};
 beforeEach(async () => {
-  await applyD1Migrations(db, env.TEST_MIGRATIONS);
-  await db.batch(tables.map(t => db.prepare(`DELETE FROM ${t}`)));
-  await db.batch(seedSql.split('\n').filter(l => l.startsWith('INSERT')).map(l => db.prepare(l)));
+  await resetDb(db, seedSql);
   await db.prepare('INSERT INTO agent_kill_switch (id, enabled) VALUES (1, 0) ON CONFLICT(id) DO UPDATE SET enabled = 0').run();
   for (const user of ['u-lan', 'u-hung', 'u-admin']) {
     tokens[user] = crypto.randomUUID();
@@ -109,9 +107,11 @@ describe('auth', () => {
 describe('protocol', () => {
   test('initialize and tools/list expose exactly the eleven tools', async () => {
     expect((await mcp(rpc('initialize', {}), bearer('u-lan'))).json.result.serverInfo.name).toBe('abm-crm');
-    const names = (await mcp(rpc('tools/list'), bearer('u-lan'))).json.result.tools.map((t: any) => t.name);
+    const listed = (await mcp(rpc('tools/list'), bearer('u-lan'))).json.result.tools;
+    const names = listed.map((t: { name: string }) => t.name);
     expect(names).toHaveLength(11);
     expect(names.some((n: string) => /decide|release/.test(n))).toBe(false);
+    expect(listed.every((t: { roles?: unknown }) => t.roles === undefined)).toBe(true);
   });
 });
 
@@ -239,5 +239,75 @@ describe('write', () => {
     await tool('u-lan', 'log_activity', { ...call, acting_user: 'u-admin', user_id: 'u-hung' });
     const row = await db.prepare("SELECT actor_user_id FROM activity WHERE lead_id = 'lead-04' AND summary = 'Gọi xác nhận lịch'").first<any>();
     expect(row.actor_user_id).toBe('u-lan');
+  });
+});
+
+describe('learner privacy on the bot', () => {
+  async function issueToken(user: string) {
+    tokens[user] = crypto.randomUUID();
+    await db.prepare("INSERT INTO agent_token (id, user_id, token_hash, created_at) VALUES (?, ?, ?, '2026-10-04T00:00:00Z')")
+      .bind(`tok-${user}`, user, await sha256(tokens[user]!)).run();
+  }
+
+  test('an accountant lists only whoami and cannot search leads', async () => {
+    await addUser('u-accountant', 'accountant');
+    await issueToken('u-accountant');
+    const listed = (await mcp(rpc('tools/list'), bearer('u-accountant'))).json.result.tools;
+    expect(listed.map((t: { name: string }) => t.name)).toEqual(['whoami']);
+    expect(listed.every((t: { roles?: unknown }) => t.roles === undefined)).toBe(true);
+    const denied = await tool('u-accountant', 'search_leads', {});
+    expect(denied.isError).toBe(true);
+    expect(denied.data.code).toBe('FORBIDDEN');
+  });
+
+  test('another sale cannot open a learner lead, and a head sees no phone', async () => {
+    const phone = '0913300202';
+    const { leadId } = await makeLead('Học viên Ẩn', phone);
+    const code = (await db.prepare('SELECT code FROM lead WHERE id = ?').bind(leadId).first<{ code: string }>())!.code;
+    await issueToken('u-long');
+    const other = await tool('u-long', 'get_lead', { lead_code: code });
+    expect(other.isError).toBe(true);
+    expect(other.data.code).toBe('NOT_FOUND');
+    await issueToken('u-head');
+    const viaBot = await tool('u-head', 'get_lead', { lead_code: code });
+    expect(viaBot.isError).toBe(false);
+    expect(viaBot.data.contactPoints.every((point: { value: string | null }) => point.value === null)).toBe(true);
+    expect(JSON.stringify(viaBot.data)).not.toContain(phone);
+    const viaWeb = await get('u-head', `/leads/${leadId}`);
+    expect(viaWeb.status, JSON.stringify(viaWeb.json)).toBe(200);
+    expect(viaWeb.json.data.contactPoints.every((point: { value: string | null }) => point.value === null)).toBe(true);
+    expect(JSON.stringify(viaWeb.json)).not.toContain(phone);
+  });
+
+  test('a head sees no phone after the hold has expired', async () => {
+    const phone = '0913300204';
+    const { leadId, contactId } = await makeLead('Học viên Hồ chung', phone);
+    const code = (await db.prepare('SELECT code FROM lead WHERE id = ?').bind(leadId).first<{ code: string }>())!.code;
+    await db.prepare("UPDATE contact SET hold_expires_at = '2020-01-01T00:00:00.000Z' WHERE id = ?").bind(contactId).run();
+    await issueToken('u-head');
+    const viaBot = await tool('u-head', 'get_lead', { lead_code: code });
+    expect(viaBot.isError).toBe(false);
+    expect(viaBot.data.contactPoints.length).toBeGreaterThan(0);
+    expect(viaBot.data.contactPoints.every((point: { value: string | null }) => point.value === null)).toBe(true);
+    expect(JSON.stringify(viaBot.data)).not.toContain(phone);
+    const viaWeb = await get('u-head', `/leads/${leadId}`);
+    expect(viaWeb.status, JSON.stringify(viaWeb.json)).toBe(200);
+    expect(viaWeb.json.data.contactPoints.every((point: { value: string | null }) => point.value === null)).toBe(true);
+    expect(JSON.stringify(viaWeb.json)).not.toContain(phone);
+  });
+
+  test('changing the stage of a learner lead is refused', async () => {
+    const { leadId } = await makeLead('Học viên Đi', '0913300203');
+    const code = (await db.prepare('SELECT code FROM lead WHERE id = ?').bind(leadId).first<{ code: string }>())!.code;
+    const res = await tool('u-lan', 'change_stage', { lead_code: code, to_stage: 'contacted' });
+    expect(res.isError).toBe(true);
+    expect(res.data.code).toBe('VALIDATION_FAILED');
+    expect(res.data.message).toContain('hành trình học viên');
+  });
+
+  test('the bot has no learner write tools', async () => {
+    const listed = (await mcp(rpc('tools/list'), bearer('u-lan'))).json.result.tools as { name: string; roles?: unknown }[];
+    expect(listed.some((t) => ['winLearnerLead', 'closeLearnerLead', 'changeCustomerOwner'].includes(t.name))).toBe(false);
+    expect(listed[0]?.roles).toBeUndefined();
   });
 });

@@ -1,6 +1,9 @@
 import type { Actor } from './env';
 
-type GuardedTable = 'lead' | 'task' | 'approval' | 'app_user' | 'department' | 'team';
+type GuardedTable = 'lead' | 'task' | 'approval' | 'app_user' | 'department' | 'team' | 'contact' | 'product' | 'customer_product'
+  | 'lead_step' | 'partner_contract' | 'partner_contract_step'
+  | 'course' | 'class_group' | 'class_session' | 'enrollment' | 'trial_booking' | 'attendance'
+  | 'org_setting' | 'charge' | 'payment' | 'payment_allocation' | 'privacy_request';
 
 interface RowRef {
   table: GuardedTable;
@@ -24,6 +27,11 @@ export class GuardedTx {
   readonly events: { id: string; type: string; payload: unknown }[] = [];
 
   constructor(private readonly db: D1Database, private readonly actor: Actor, readonly command: string) {}
+
+  /** True once a guarded row exists; a handler that stages nothing (a dry-run preview) has none and writes nothing. */
+  get hasAnchor() {
+    return this.anchor !== null;
+  }
 
   /** UPDATE a versioned row with optimistic concurrency, then guard it. */
   update(table: GuardedTable, id: string, expectedVersion: number, set: Record<string, unknown>) {

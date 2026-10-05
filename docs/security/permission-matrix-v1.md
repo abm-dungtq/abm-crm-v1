@@ -33,6 +33,30 @@ Phase 04 task 4.7 ghi Department Head duyệt export, nhưng QĐ5/user chốt BG
 
 Quản lý người dùng ([ADR-006](../adr/adr-006-password-login.md)) chỉ dành cho Admin: nhập danh sách nhân sự, sửa tên/email/vai trò/phòng ban/nhóm, khóa và mở khóa, cấp mật khẩu tạm, liên kết Lark theo email. Admin không tự đổi vai trò hay tự khóa mình, và hệ thống luôn giữ ít nhất một Admin hoạt động. Quyền ghi dữ liệu kinh doanh của Admin nằm ở bảng trên, không suy từ quyền quản lý người dùng.
 
+## Luồng học viên
+
+Nguồn: [ADR-007](../adr/adr-007-learner-pipeline-and-fees.md), [PRD học viên §1–§11](../source-package/sources/prd-crm-ban-lam-viec-learner-ops-20261005.md) và mục "Mặc định thiết kế" của [plan](../../plans/261005-1053-learner-ops-upgrade/plan.md). Các hàng B2B ở trên không đổi. Mỗi người đúng một vai. Tuyển sinh là `sale` hoặc `leader`, chủ đơn vị là `admin`. `academic` hiển thị "Tổ chức (quản lý học viên)". Admin được gán làm giáo viên của lớp và điểm danh được. Ba vai trò mới (`academic`, `teacher`, `accountant`) không đọc lead B2B và không có công cụ ghi qua bot.
+
+| Thao tác | Sale (tuyển sinh) | Leader | Tổ chức (`academic`) | Giáo viên | Kế toán | Admin |
+| --- | --- | --- | --- | --- | --- | --- |
+| Xem khách học viên | khách mình giữ; số điện thoại của khách người khác giữ bị ẩn | khách của nhóm, có số điện thoại | none | none | none | toàn bộ |
+| Tạo khách, lead học viên, gắn/gỡ sản phẩm trên khách | khách mình giữ | khách của nhóm | none | none | none | toàn bộ |
+| Nhận khách từ hồ chung | có | none | none | none | none | none |
+| Đổi sale của khách | none | trong nhóm mình | none | none | none | mọi khách |
+| Hành trình: Liên hệ, Xác nhận nhu cầu | lead mình giữ | lead của nhóm | none | none | none | toàn bộ |
+| Hành trình: Chia lớp, Thu học phí, Vào học | none (hệ thống tự đánh dấu) | none | none | none | none | none |
+| Ghi đồng ý theo mục đích | khách mình giữ | khách của nhóm | none | none | none | toàn bộ |
+| Danh mục sản phẩm | R chỉ sản phẩm còn bán | R chỉ sản phẩm còn bán | R/W | none | R | R/W |
+| Hợp đồng đối tác, nhập học viên từ file | R/W | R/W | none | none | none | R/W |
+| Khóa, lớp, buổi, gán giáo viên | none | none | R/W | R lớp mình | none | R/W |
+| Giữ chỗ, xác nhận chỗ, bảo lưu, chuyển lớp | hủy ghi danh chờ của lead mình | none | R/W (kiểm đồng ý `enrollment`) | none | none | R/W |
+| Điểm danh | none | none | R/W mọi lớp | W lớp mình; chỉ thấy tên học viên | none | R/W mọi lớp |
+| Học phí: khoản phải thu, tiền vào, phân bổ, hàng đợi tiền chưa khớp, số tham chiếu hóa đơn | none (không thấy số tiền) | none | none | none (không thấy số tiền) | R/W | R/W |
+| Báo cáo học viên | đếm theo nguồn và hợp đồng của mình | như Sale cho nhóm | số đếm lớp, không thấy tên doanh nghiệp | điểm danh và giờ dạy của lớp mình | tiền vào, tuổi nợ | toàn bộ |
+| Yêu cầu dữ liệu cá nhân (truy cập, sửa, rút đồng ý, xóa hồ sơ) | ghi yêu cầu cho khách mình giữ | ghi yêu cầu cho khách của nhóm | ghi yêu cầu cho khách có lead học viên | none | ghi yêu cầu cho khách có lead học viên | R/W; chỉ Admin xử lý yêu cầu và ẩn danh. Ẩn danh chỉ ẩn tên và số điện thoại, giữ chứng từ tiền |
+
+Quy tắc đi kèm: hết 3 tháng giữ mà khách chưa có lead thắng thì về hồ chung; khách đã thắng không nhả. Duyệt qua bot (Won/Lost của agent) giữ như B2B. Đồng ý `enrollment` là điều kiện xác nhận chỗ; các mục khác chỉ để ghi lại và xem. BGĐ đọc học phí, không ghi khoản phải thu hay tiền vào. Chỉ Admin sửa tài khoản ngân hàng nhận tiền.
+
 ## Gate triển khai
 
 Ma trận này cần user review riêng ở phase 08; không ghi [APPROVED] khi chưa có trả lời thật. Sinh allow/deny tests cho từng ô đã cấp; test cross-user/team/department, critical capability, agent projection và REST/MCP parity theo [test strategy](../engineering/test-strategy.md). Danh sách phòng ban/nhóm/Leader bổ sung trước plan MVP1; các role/capability tương lai chốt trước plan tương ứng.

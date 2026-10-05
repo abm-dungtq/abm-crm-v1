@@ -1,7 +1,7 @@
 ---
 phase: 1
 title: "Nền tảng: vai trò mới, pipeline học viên, sản phẩm, đồng ý, ADR"
-status: pending
+status: completed
 priority: P1
 effort: "2d"
 dependencies: []
@@ -18,6 +18,8 @@ Mọi lệnh đều chạy từ `D:\TQD\CRM`.
 ## Files to Create / Modify
 
 - Create: `apps/crm/migrations/0006_learner_foundation.sql`
+- Modify: `apps/crm/src/worker/guarded-tx.ts` (type `GuardedTable`)
+- Modify: `apps/crm/src/web/pages/admin-users.tsx` (ô chọn vai trò)
 - Create: `apps/crm/test/helpers/reset-db.ts`
 - Modify: 5 file test đang có hằng `TABLES`. Tìm bằng `Select-String -Path apps/crm/test/*.ts -Pattern "const TABLES"`.
 - Modify: `packages/contracts/src/index.ts` (`ROLES`, stage, nguồn, lý do mất của luồng học viên, `LEARNER_JOURNEY`, `CONSENT_PURPOSES`, schema lệnh mới, `COMMANDS`)
@@ -52,18 +54,22 @@ Mọi lệnh đều chạy từ `D:\TQD\CRM`.
   1. Dòng đầu: `PRAGMA defer_foreign_keys = ON;`
   2. **Dựng lại `app_user`** để đổi CHECK `role` thành `('sale','leader','head','director','admin','academic','teacher','accountant')`.
      - Lấy nguyên định nghĩa cột từ `0001_init.sql` (dòng 35-48), cộng thêm các cột đã `ALTER` trong `0003_user_auth.sql` (dòng 2-12, gồm cả các CHECK).
-     - Trình tự: `CREATE TABLE app_user_new (...)`, rồi `INSERT INTO app_user_new SELECT * FROM app_user`, rồi `DROP TABLE app_user`, rồi `ALTER TABLE app_user_new RENAME TO app_user`.
-     - Tạo lại mọi index của `app_user`. Tìm `ON app_user(` trong **mọi** file migration: có `app_user_lark_open_id` (UNIQUE, có `WHERE`, ở 0003) và index `organization_id` ở 0005.
-     - Thứ tự cột của `app_user_new` phải đúng thứ tự cột của bảng thật hiện tại. Kiểm bằng `PRAGMA table_info(app_user)` trên D1 cục bộ sau khi chạy `pnpm -F @abm/crm db:migrate:local`.
-  3. **Dựng lại `lead`** theo cùng cách. Định nghĩa gốc ở `0001_init.sql` (dòng 97-133), cộng cột `won_note` từ `0002`. Thêm:
+     - **Trình tự bắt buộc.** Kongming đã thử: làm theo kiểu `_new` rồi `RENAME` của `0004` sẽ hỏng khóa ngoại khi bảng có dữ liệu con. Trình tự đúng là:
+       1. `CREATE TABLE app_user_backup AS SELECT * FROM app_user;`
+       2. `DROP TABLE app_user;`
+       3. `CREATE TABLE app_user (<định nghĩa mới>);`
+       4. `INSERT INTO app_user (<liệt kê đủ cột>) SELECT <đúng các cột đó> FROM app_user_backup;`
+       5. `DROP TABLE app_user_backup;`
+     - Sau đó tạo lại mọi index của `app_user`. Tìm `ON app_user(` trong **mọi** file migration: có `app_user_lark_open_id` (UNIQUE, có `WHERE`, ở 0003) và index `organization_id` ở 0005.
+  3. **Dựng lại `lead`** theo đúng trình tự 5 bước ở trên, dùng `lead_backup`. Định nghĩa gốc ở `0001_init.sql` (dòng 97-133), cộng cột `won_note` từ `0002`. Thêm:
      - cột `pipeline TEXT NOT NULL DEFAULT 'b2b' CHECK (pipeline IN ('b2b','learner'))`;
      - cột `partner_contract_id TEXT` (khóa ngoại thêm ở phase 02 qua kiểm tra trong lệnh, không dùng FK);
      - cột `lost_note` giữ như cũ;
      - CHECK `stage` mở rộng thêm `'trial_booked','trial_done','not_fit'`;
      - CHECK mới `(stage <> 'not_fit' OR lost_reason IS NOT NULL)`;
      - CHECK mới `(pipeline <> 'learner' OR status <> 'queue')`.
-     - Tạo lại mọi index `ON lead(` có trong 0001 và 0005.
-     - Cột mới đặt ở **cuối** bảng, để `INSERT ... SELECT *` không chạy được. Phải ghi rõ danh sách cột: `INSERT INTO lead_new (<các cột cũ>) SELECT <các cột cũ> FROM lead`.
+     - Tạo lại mọi index `ON lead(` có trong 0001, 0002 và 0005.
+     - Cột mới đặt ở **cuối** bảng. Câu `INSERT` chỉ liệt kê các cột cũ: `INSERT INTO lead (<các cột cũ>) SELECT <các cột cũ> FROM lead_backup`.
   4. Thêm cột cho `contact`: `owner_user_id TEXT REFERENCES app_user(id)`, `hold_started_at TEXT`, `hold_expires_at TEXT`, `archived_at TEXT`. Thêm index `contact_owner ON contact(owner_user_id)`.
   5. `CREATE TABLE product`: `id`, `organization_id`, `name TEXT NOT NULL`, `description TEXT`, `price_vnd INTEGER NOT NULL CHECK (price_vnd >= 0)`, `active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1))`, `created_at`, `updated_at`, `version`, `last_txn_id`.
   6. `CREATE TABLE customer_product`:
@@ -74,10 +80,21 @@ Mọi lệnh đều chạy từ `D:\TQD\CRM`.
      - đây là bảng chỉ ghi thêm. Trạng thái hiện tại là dòng mới nhất của mỗi cặp (`contact_id`, `purpose`);
      - index `(contact_id, purpose, recorded_at)`.
   8. Thêm `product`, `customer_product`, `consent` vào `TABLES` trong `reset-db.ts`, đặt **trước** `contact` và `app_user`.
-- Success criteria: migration chạy được trên D1 cục bộ và trong Vitest. Lead và user trong seed vẫn còn đủ.
-- Verify:
-  - `pnpm -F @abm/crm db:migrate:local` exit 0.
-  - `pnpm -F @abm/crm test` exit 0.
+  9. **Mở `GuardedTx` cho bảng mới.** Trong `apps/crm/src/worker/guarded-tx.ts`:
+     - Thêm `'contact' | 'product' | 'customer_product'` vào type `GuardedTable` (dòng 3).
+     - Mỗi phase sau thêm tên bảng có version của mình vào type này.
+     - **Phân loại bảng** (áp dụng cho mọi phase):
+       - *Bảng có version*, ghi bằng `insertVersioned` hoặc `update`: `contact`, `product`, `customer_product`, `lead_step`, `partner_contract`, `partner_contract_step`, `course`, `class_group`, `class_session`, `enrollment`, `trial_booking`, `attendance`, `org_setting`, `charge`, `payment`, `payment_allocation`, `privacy_request`.
+       - *Bảng chỉ ghi thêm*, ghi bằng `tx.raw`: `consent`, `class_teacher`. Mỗi lệnh ghi vào hai bảng này phải đồng thời `tx.update` một dòng có version (gọi là "dòng neo") trong cùng batch.
+     - **Quy tắc dòng neo:** `runCommand` (`commands.ts` khoảng dòng 113) luôn gọi `tx.idempotency`. Hàm này dùng `insertDependent`, mà `insertDependent` ném lỗi khi transaction chưa có dòng có version nào. Vì vậy **mọi lệnh phải ghi ít nhất một dòng có version**, kể cả khi lệnh không đổi gì khác.
+  10. **Test giữ dữ liệu khi dựng lại bảng**, trong `apps/crm/test/learner-foundation.test.ts`:
+      - Áp `env.TEST_MIGRATIONS.filter((m) => m.name < '0006')`.
+      - Chèn seed `demo.sql`.
+      - Áp các migration còn lại.
+      - Kiểm: số dòng `app_user`, `lead`, `task`, `activity` bằng trước; `PRAGMA foreign_key_check` trả rỗng; `SELECT pipeline FROM lead` chỉ có `'b2b'`.
+      - Test này phải tự dựng DB, không dùng `resetDb`.
+- Success criteria: migration chạy trong Vitest. Test giữ dữ liệu xanh.
+- Verify: `pnpm -F @abm/crm test` exit 0, và output có `learner-foundation.test.ts` mà không có `failed`.
 
 ### Task 1.3: Hợp đồng dùng chung (`@abm/contracts`)
 
@@ -85,7 +102,7 @@ Mọi lệnh đều chạy từ `D:\TQD\CRM`.
 - Target: `packages/contracts/src/index.ts`.
 - Steps:
   1. Thêm 3 phần tử vào `ROLES`:
-     - `{ code: 'academic', label: 'Học vụ', scope: 'organization' }`
+     - `{ code: 'academic', label: 'Tổ chức (quản lý học viên)', scope: 'organization' }`
      - `{ code: 'teacher', label: 'Giáo viên', scope: 'class' }`
      - `{ code: 'accountant', label: 'Kế toán', scope: 'organization' }`
   2. Thêm `PIPELINES = ['b2b','learner'] as const` và type `PipelineCode`.
@@ -116,7 +133,8 @@ Mọi lệnh đều chạy từ `D:\TQD\CRM`.
   7. Thêm schema zod:
      - `upsertProductInput`: `{ id?, version?, name (1-160 ký tự), description? (≤2000), priceVnd (số nguyên ≥ 0, ≤ MAX_DEAL_VALUE), active (boolean) }`
      - `recordConsentInput`: `{ contactId, purpose (enum), granted (boolean), note? }`
-  8. Thêm vào `COMMANDS`:
+  8. Sửa `updateUserInput` (khoảng dòng 262): `role` dùng enum lấy từ `ROLES` (8 vai trò), không ghi cứng 5 vai trò nữa.
+  9. Thêm vào `COMMANDS`:
      - `upsertProduct`: roles `['academic','admin']`, riskLevel `low`, `expectedVersion: false`, `agentNeedsApproval: false`
      - `recordConsent`: roles `['sale','leader','admin']`, riskLevel `low`, `expectedVersion: false`, `agentNeedsApproval: false`
 - Success criteria: typecheck xanh.
@@ -143,7 +161,7 @@ Mọi lệnh đều chạy từ `D:\TQD\CRM`.
 
 ### Task 1.5: Lệnh sản phẩm và đồng ý
 
-- Goal: Học vụ hoặc Admin sửa được danh mục sản phẩm. Tuyển sinh ghi được đồng ý.
+- Goal: Tổ chức hoặc Admin sửa được danh mục sản phẩm. Tuyển sinh ghi được đồng ý.
 - Target: `apps/crm/src/worker/commands.ts` (thêm handler vào map `handlers`), `apps/crm/src/worker/queries.ts`, `apps/crm/src/worker/index.ts`.
 - Steps:
   1. Handler `upsertProduct`:
@@ -153,7 +171,8 @@ Mọi lệnh đều chạy từ `D:\TQD\CRM`.
   2. Handler `recordConsent`:
      - kiểm khách thuộc `customerScope` của actor; Admin luôn qua;
      - không thuộc thì `fail('FORBIDDEN', …)`;
-     - chèn một dòng `consent` bằng `tx.insertDependent` hoặc lệnh insert thường của GuardedTx, theo mẫu của bảng `activity`;
+     - đọc `contact.version` rồi gọi `tx.update('contact', contactId, version, {})` làm dòng neo;
+     - chèn một dòng `consent` bằng `tx.raw(db.prepare('INSERT INTO consent …'))`;
      - ghi audit.
   3. `listProducts(db, actor)`:
      - trả `id`, `name`, `description`, `priceVnd`, `active`, `version`;
@@ -171,6 +190,7 @@ Mọi lệnh đều chạy từ `D:\TQD\CRM`.
   1. Thêm nhãn `SCOPE_LABEL` cho `academic`, `teacher`, `accountant`.
   2. Gắn `roles: ['sale','leader','head','director','admin']` cho các mục nav B2B đang không có `roles`: Tổng quan, Pipeline, Lead, Khách hàng 360, Việc, Hàng chờ duyệt.
   3. Chạy typecheck. Sửa mọi chỗ `Record<RoleCode, …>` bị báo thiếu khóa.
+  4. `apps/crm/src/web/pages/admin-users.tsx` (khoảng dòng 227 và 242): ô chọn vai trò hiện đủ 8 vai trò. Ba vai trò mới ẩn ô phòng ban và nhóm, giống `director`/`admin`.
 - Success criteria: typecheck và build xanh.
 - Verify: `pnpm -F @abm/crm typecheck` exit 0 và `pnpm -F @abm/crm build` exit 0.
 
@@ -186,6 +206,7 @@ Mọi lệnh đều chạy từ `D:\TQD\CRM`.
   5. `recordConsent`: ghi `granted: true` cho `marketing`, rồi đọc dòng mới nhất, phải là `granted = 1`.
   6. Lead B2B cũ trong seed có `pipeline = 'b2b'`.
   7. Roster preview với vai trò `Kế toán` và không có phòng ban thì hợp lệ.
+  8. `PATCH /admin/users/:id` đổi một user sang `teacher` thì trả 200, không phải 422.
 - Success criteria: tất cả test xanh.
 - Verify: `pnpm -F @abm/crm test -- learner-foundation` exit 0, output có `learner-foundation.test.ts`, không có `failed`. Sau đó chạy `pnpm -F @abm/crm test`, phải exit 0.
 
@@ -201,8 +222,8 @@ Mọi lệnh đều chạy từ `D:\TQD\CRM`.
      - học phí ghi trong CRM, thay QĐ8 cho luồng học viên; MISA chỉ còn dùng để xuất hóa đơn;
      - link tới PRD và báo cáo brainstorm.
   2. `permission-matrix-v1.md`: thêm mục `## Luồng học viên`, là bảng vai trò × thao tác lấy từ PRD §1-§11 cùng phần "Mặc định thiết kế" trong `plan.md`. Không sửa các hàng B2B đang có.
-- Success criteria: các link trong ADR mở được.
-- Verify: `Test-Path docs/adr/adr-007-learner-pipeline-and-fees.md` trả `True`.
+- Success criteria: ADR có link tới PRD và báo cáo brainstorm.
+- Verify: `Select-String -Path docs/adr/adr-007-learner-pipeline-and-fees.md -Pattern "prd-crm-ban-lam-viec-learner-ops-20261005.md","brainstorm-261005-1053-learner-ops-prd-upgrade.md"` ra đúng 2 dòng trở lên, và cả hai tên file đều xuất hiện.
 
 ## Failure Protocol
 If any Verify step does not meet its stated pass condition, STOP this phase.
@@ -218,5 +239,5 @@ failure evidence to the user. Never continue by self-reasoning.
 
 ## Rủi ro và rollback
 
-- **Dựng lại bảng có thể làm mất dữ liệu nếu thứ tự cột sai.** Task 1.2 bắt kiểm bằng `PRAGMA table_info`. Trên eval chỉ chạy migration ở phase 07, sau khi đã sao lưu.
+- **Dựng lại bảng có thể làm mất dữ liệu.** Test giữ dữ liệu ở Task 1.2 bước 10 chặn lỗi này. Trên eval chỉ chạy migration ở phase 07, sau khi đã sao lưu.
 - **Rollback:** revert commit. Migration chưa được áp lên eval cho tới phase 07.

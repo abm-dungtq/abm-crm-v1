@@ -3,7 +3,8 @@ import {
   workingDaysBetween, workingMinutesBetween, type StageCode,
 } from '@abm/contracts';
 import type { Actor } from './env';
-import { leadScope, mayDecideApproval, type SqlFragment } from './scope';
+import { learnerPhoneVisible } from './learner-queries';
+import { b2bLeadScope, leadScope, mayDecideApproval, type SqlFragment } from './scope';
 
 export type HealthState = 'ok' | 'warn' | 'breach';
 
@@ -17,15 +18,16 @@ export interface LeadListRow {
   id: string; code: string; stage: StageCode; status: string; source: string; need_summary: string;
   expected_value: number | null; first_contact_at: string | null; assigned_at: string | null;
   stage_entered_at: string; last_activity_at: string | null; created_at: string; updated_at: string;
-  closed_at: string | null; lost_reason: string | null; version: number;
+  closed_at: string | null; lost_reason: string | null; version: number; pipeline: string;
   owner_user_id: string | null; owner_name: string | null; team_id: string | null; team_name: string | null;
   contact_name: string; account_id: string | null; account_name: string | null;
   na_id: string | null; na_title: string | null; na_due_at: string | null;
 }
 
-export function leadHealth(row: Pick<LeadListRow, 'stage' | 'status' | 'first_contact_at' | 'assigned_at' | 'stage_entered_at' | 'na_due_at'>, now = new Date()): LeadHealth {
+export function leadHealth(row: Pick<LeadListRow, 'stage' | 'status' | 'first_contact_at' | 'assigned_at' | 'stage_entered_at' | 'na_due_at'> & { pipeline?: string }, now = new Date()): LeadHealth {
   const health: LeadHealth = { firstContact: null, stageSla: null, nextActionOverdue: false };
-  if (row.status !== 'active') return health;
+  // The B2B first-contact and stage SLAs do not apply to the learner journey.
+  if (row.status !== 'active' || row.pipeline === 'learner') return health;
   if (row.stage === 'new' && !row.first_contact_at && row.assigned_at) {
     const minutes = workingMinutesBetween(new Date(row.assigned_at), now);
     const state = minutes >= RELEASE_AFTER_HOURS * 60 ? 'release'
@@ -45,7 +47,7 @@ export function leadHealth(row: Pick<LeadListRow, 'stage' | 'status' | 'first_co
 export const LEAD_SELECT = `
   SELECT l.id, l.code, l.stage, l.status, l.source, l.need_summary, l.expected_value, l.first_contact_at,
     l.assigned_at, l.stage_entered_at, l.last_activity_at, l.created_at, l.updated_at, l.closed_at, l.lost_reason,
-    l.version, l.owner_user_id, u.display_name AS owner_name, l.team_id, t.name AS team_name,
+    l.version, l.pipeline, l.owner_user_id, u.display_name AS owner_name, l.team_id, t.name AS team_name,
     c.display_name AS contact_name, a.id AS account_id, a.name AS account_name,
     na.id AS na_id, na.title AS na_title, na.due_at AS na_due_at
   FROM lead l
@@ -57,7 +59,7 @@ export const LEAD_SELECT = `
 
 export function toLeadItem(row: LeadListRow, now: Date) {
   return {
-    id: row.id, code: row.code, stage: row.stage, status: row.status, source: row.source,
+    id: row.id, code: row.code, pipeline: row.pipeline, stage: row.stage, status: row.status, source: row.source,
     needSummary: row.need_summary, expectedValue: row.expected_value, version: row.version,
     firstContactAt: row.first_contact_at, assignedAt: row.assigned_at, stageEnteredAt: row.stage_entered_at,
     lastActivityAt: row.last_activity_at, createdAt: row.created_at, closedAt: row.closed_at, lostReason: row.lost_reason,
@@ -93,7 +95,7 @@ const SEARCH_CANDIDATE_LIMIT = 2000;
 const LEAD_PAGE_LIMIT = 500;
 
 function leadWhere(actor: Actor, filter: LeadFilter, includeStatus = true) {
-  const scope = leadScope(actor);
+  const scope = b2bLeadScope(actor);
   const where = [scope.sql];
   const binds = [...scope.binds];
   if (includeStatus && filter.status === 'open') where.push(`l.status IN ('queue', 'active')`);
@@ -146,7 +148,7 @@ function phoneQuery(q: string) {
   return /^[\d\s+().-]+$/.test(q.trim()) && digits.length >= 3
     ? (q.includes('+') || digits.length >= 9 ? normalizePhone(q) : digits) : null;
 }
-function searchMatcher(q: string) {
+export function searchMatcher(q: string) {
   const text = foldText(q);
   const phone = phoneQuery(q);
   return (fields: (string | null | undefined)[]) => fields.some((f) => {
@@ -169,6 +171,7 @@ export async function listTasks(db: D1Database, actor: Actor, status: 'open' | '
     SELECT tk.id, tk.title, tk.due_at, tk.status, tk.outcome, tk.completed_at, tk.version,
       tk.assignee_user_id, u.display_name AS assignee_name,
       l.id AS lead_id, l.code AS lead_code, l.stage AS lead_stage, l.status AS lead_status, l.version AS lead_version,
+      l.pipeline, l.contact_id,
       (l.next_action_task_id = tk.id) AS is_next_action,
       c.display_name AS contact_name, a.name AS account_name
     FROM task tk
@@ -188,7 +191,8 @@ export async function listTasks(db: D1Database, actor: Actor, status: 'open' | '
     isNextAction: Boolean(r.is_next_action),
     lead: {
       id: r.lead_id as string, code: r.lead_code as string, stage: r.lead_stage as string, status: r.lead_status as string,
-      version: r.lead_version as number, contactName: r.contact_name as string, accountName: r.account_name as string | null,
+      version: r.lead_version as number, pipeline: r.pipeline as string, contactId: r.contact_id as string,
+      contactName: r.contact_name as string, accountName: r.account_name as string | null,
     },
     bucket: r.status !== 'open' ? 'done' : new Date(r.due_at) < now ? 'overdue' : vnDate(new Date(r.due_at)) === today ? 'today' : 'upcoming',
   }));
@@ -201,7 +205,7 @@ export async function dashboard(db: D1Database, actor: Actor) {
   const since = new Date(`${monthStart}T00:00:00+07:00`).toISOString();
   const today = new Date(`${vnDate(now)}T00:00:00+07:00`).toISOString();
   const tomorrow = new Date(Date.parse(today) + 86_400_000).toISOString();
-  const scope = leadScope(actor);
+  const scope = b2bLeadScope(actor);
   const taskFilter = taskScope(actor);
   const [groups, taskCounts] = await Promise.all([
     db.prepare(`SELECT l.status, l.stage, l.owner_user_id, u.display_name AS owner_name, l.lost_reason,
@@ -306,13 +310,24 @@ const toAudit = (r: Record<string, unknown>) => ({
 });
 
 /** Business audit per permission-matrix-v1: Leader team, Trưởng phòng department, BGĐ and Admin organization; Sale none. */
-export const canReadAudit = (actor: Actor) => actor.role !== 'sale';
+export const canReadAudit = (actor: Actor) => !['sale', 'academic', 'teacher', 'accountant'].includes(actor.role);
 
 export async function listAudit(db: D1Database, actor: Actor, leadId?: string) {
   const scope = leadScope(actor);
   const rows = await db.prepare(`${AUDIT_SELECT} WHERE ${scope.sql}${leadId ? ' AND l.id = ?' : ''}
     ORDER BY al.created_at DESC LIMIT 300`).bind(...scope.binds, ...(leadId ? [leadId] : [])).all();
   return rows.results.map(toAudit);
+}
+
+/** The product catalogue: Sale and Leader see only active products; the teacher role has no use for it. */
+export const canReadProducts = (actor: Actor) => actor.role !== 'teacher';
+
+export async function listProducts(db: D1Database, actor: Actor) {
+  const activeOnly = actor.role === 'sale' || actor.role === 'leader';
+  const rows = await db.prepare(`SELECT id, name, description, price_vnd, active, version FROM product
+    WHERE organization_id = ?${activeOnly ? ' AND active = 1' : ''} ORDER BY name`).bind(actor.organizationId)
+    .all<{ id: string; name: string; description: string | null; price_vnd: number; active: number; version: number }>();
+  return rows.results.map((r) => ({ id: r.id, name: r.name, description: r.description, priceVnd: r.price_vnd, active: r.active === 1, version: r.version }));
 }
 
 export async function listApprovals(db: D1Database, actor: Actor, status?: string, leadId?: string) {
@@ -373,9 +388,14 @@ export async function leadDetail(db: D1Database, actor: Actor, leadId: string) {
   const isOwner = row.owner_user_id === actor.id;
   const isTeamLeader = actor.role === 'leader' && (row.team_id === actor.teamId || (row.status === 'queue'));
   const writer = ['sale', 'leader', 'head', 'director', 'admin'].includes(actor.role);
+  let contactPoints: { type: string; value: string | null }[] = points.results;
+  if (row.pipeline === 'learner') {
+    const visible = await learnerPhoneVisible(db, actor, [leadId]);
+    if (visible.get(leadId) !== true) contactPoints = contactPoints.map((point) => ({ type: point.type, value: null }));
+  }
   return {
     lead: { ...lead, lostNote: extra?.lost_note ?? null, wonNote: extra?.won_note ?? null },
-    contactPoints: points.results,
+    contactPoints,
     account,
     tasks: tasks.results,
     activities: activities.results,

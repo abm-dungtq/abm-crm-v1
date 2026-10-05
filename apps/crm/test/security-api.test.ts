@@ -1,16 +1,11 @@
-import { env, applyD1Migrations } from 'cloudflare:test';
+import { env } from 'cloudflare:test';
 import { beforeEach, expect, test } from 'vitest';
 import seedSql from '../seed/demo.sql?raw';
 import app from '../src/worker/index';
+import { resetDb } from './helpers/reset-db';
 
 const db = env.DB;
-const tables = ['_guard', 'idempotency_key', 'outbox', 'audit_log', 'approval', 'activity', 'task', 'lead', 'lead_counter',
-  'contact_point', 'account_contact', 'contact', 'account', 'app_user', 'team', 'department', 'organization'];
-beforeEach(async () => {
-  await applyD1Migrations(db, env.TEST_MIGRATIONS);
-  await db.batch(tables.map(t => db.prepare(`DELETE FROM ${t}`)));
-  await db.batch(seedSql.split('\n').filter(l => l.startsWith('INSERT')).map(l => db.prepare(l)));
-});
+beforeEach(() => resetDb(db, seedSql));
 async function call(user: string | undefined, path: string, body?: unknown, mode = '1', key = crypto.randomUUID()) {
   const headers: Record<string, string> = { 'Content-Type': 'application/json', 'Idempotency-Key': key };
   if (user !== undefined) headers['X-Demo-User'] = user;

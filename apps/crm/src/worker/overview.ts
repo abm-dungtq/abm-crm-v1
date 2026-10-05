@@ -1,7 +1,7 @@
 import { ACTIVE_STAGES, type StageCode } from '@abm/contracts';
 import type { Actor } from './env';
 import { AUDIT_SELECT, LEAD_SELECT, needsAttention, toLeadItem, vnDate, type LeadItem, type LeadListRow } from './queries';
-import { leadScope } from './scope';
+import { b2bLeadScope } from './scope';
 import { AGENT_WRITES_OPEN } from './commands';
 
 /** The organization overview is for the people who run the company: Admin and the Board. */
@@ -37,7 +37,7 @@ export async function overviewData(db: D1Database, actor: Actor, opts: { period?
   const departments = (await db.prepare('SELECT id, name FROM department WHERE organization_id = ? ORDER BY name')
     .bind(actor.organizationId).all<{ id: string; name: string }>()).results;
   const departmentId = departments.some((d) => d.id === opts.departmentId) ? opts.departmentId! : null;
-  const base = leadScope(actor);
+  const base = b2bLeadScope(actor);
   const scope = departmentId ? { sql: `${base.sql} AND l.department_id = ?`, binds: [...base.binds, departmentId] } : base;
   const inView = `${scope.sql} AND (l.status IN ('queue', 'active') OR l.closed_at >= ?)`;
 

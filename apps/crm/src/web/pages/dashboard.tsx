@@ -1,4 +1,4 @@
-import { Link } from '@tanstack/react-router';
+import { Link, Navigate } from '@tanstack/react-router';
 import { lostReasonLabel, stageLabel } from '@abm/contracts';
 import { useActor } from '../actor-context';
 import { useApi } from '../api';
@@ -8,6 +8,14 @@ import { fmtDue, fmtMoney } from '../format';
 import type { Dashboard } from '../types';
 
 export function DashboardPage() {
+  const actor = useActor();
+  if (actor.role === 'teacher') return <Navigate to="/my-classes" />;
+  if (actor.role === 'academic') return <Navigate to="/courses" />;
+  if (actor.role === 'accountant') return <Navigate to="/fees" />;
+  return <DashboardHome />;
+}
+
+function DashboardHome() {
   const actor = useActor();
   const q = useApi<Dashboard>('/dashboard');
   const isSale = actor.role === 'sale';
@@ -125,7 +133,9 @@ function DashboardBody({ data, isSale, canQueue }: { data: Dashboard; isSale: bo
                     <div className="row">
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div className="truncate" style={{ fontWeight: 500 }}>{t.title}</div>
-                        <Link to="/leads/$leadId" params={{ leadId: t.lead.id }} className="small truncate" style={{ display: 'block' }}>{t.lead.code} · {t.lead.contactName}</Link>
+                        {t.lead.pipeline === 'learner'
+                          ? <Link to="/learners/$contactId" params={{ contactId: t.lead.contactId }} className="small truncate" style={{ display: 'block' }}>{t.lead.code} · {t.lead.contactName}</Link>
+                          : <Link to="/leads/$leadId" params={{ leadId: t.lead.id }} className="small truncate" style={{ display: 'block' }}>{t.lead.code} · {t.lead.contactName}</Link>}
                       </div>
                       <Badge tone={t.bucket === 'overdue' ? 'danger' : t.bucket === 'today' ? 'warn' : 'neutral'}>{fmtDue(t.dueAt)}</Badge>
                     </div>

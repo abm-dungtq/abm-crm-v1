@@ -398,7 +398,223 @@ erDiagram
     user ||--o{ agent_kill_switch : changes
     user ||--o{ notification : receives
     outbox o|--o{ notification : delivers
+    contact ||--o{ consent : records
+    contact ||--o{ customer_product : studies
+    product ||--o{ customer_product : offered_on
+    organization ||--o{ product : catalogues
+    organization ||--o{ partner_contract : signs
+    account ||--o{ partner_contract : partners
+    partner_contract ||--o{ partner_contract_step : checks
+    lead ||--o{ lead_step : follows
+    lead }o--o| partner_contract : sourced_from
+    organization ||--o{ course : runs
+    product ||--o{ course : teaches
+    course ||--o{ class_group : splits_into
+    class_group ||--o{ class_teacher : assigns
+    user ||--o{ class_teacher : teaches
+    class_group ||--o{ class_session : schedules
+    class_group ||--o{ enrollment : seats
+    lead ||--o{ enrollment : places
+    contact ||--o{ enrollment : attends
+    lead ||--o{ trial_booking : books
+    class_session ||--o{ trial_booking : hosts
+    class_session ||--o{ attendance : marks
+    enrollment ||--o{ attendance : marked_on
+    trial_booking ||--o{ attendance : marked_on
+    organization ||--|| org_setting : configures
+    organization ||--o| fee_counter : numbers
+    contact ||--o{ charge : owes
+    enrollment o|--o{ charge : bills
+    organization ||--o{ payment : receives
+    payment ||--o{ payment_allocation : splits
+    charge ||--o{ payment_allocation : settles
+    contact ||--o{ privacy_request : asks
+    organization ||--o{ privacy_request : handles
 ```
+
+Sơ đồ phía trên là thiết kế B2B gốc. Các bảng học viên được nối thêm vào cuối sơ đồ đó, không thay sơ đồ MVP1. Sơ đồ trong mục dưới khớp với SQL đang chạy (bảng thật, không phải tên logic `user`).
+
+## Luồng học viên
+
+```mermaid
+erDiagram
+    organization ||--o{ product : catalogues
+    organization ||--o{ course : runs
+    product ||--o{ course : teaches
+    course ||--o{ class_group : splits_into
+    class_group ||--o{ class_teacher : assigns
+    app_user ||--o{ class_teacher : teaches
+    class_group ||--o{ class_session : schedules
+    class_group ||--o{ enrollment : seats
+    lead ||--o{ enrollment : places
+    contact ||--o{ enrollment : attends
+    lead ||--o{ trial_booking : books
+    class_session ||--o{ trial_booking : hosts
+    class_session ||--o{ attendance : marks
+    enrollment ||--o{ attendance : marked_on
+    trial_booking ||--o{ attendance : marked_on
+    lead ||--o{ lead_step : follows
+    organization ||--o{ partner_contract : signs
+    account ||--o{ partner_contract : partners
+    partner_contract ||--o{ partner_contract_step : checks
+    lead }o--o| partner_contract : sourced_from
+    contact ||--o{ consent : records
+    contact ||--o{ customer_product : studies
+    product ||--o{ customer_product : offered_on
+    organization ||--|| org_setting : configures
+    organization ||--o| fee_counter : numbers
+    contact ||--o{ charge : owes
+    enrollment o|--o{ charge : bills
+    organization ||--o{ payment : receives
+    payment ||--o{ payment_allocation : splits
+    charge ||--o{ payment_allocation : settles
+    contact ||--o{ privacy_request : asks
+    organization ||--o{ privacy_request : handles
+
+    course {
+        TEXT id PK
+        TEXT organization_id FK
+        TEXT product_id FK
+        TEXT name
+        TEXT status
+    }
+    class_group {
+        TEXT id PK
+        TEXT course_id FK
+        TEXT name
+        TEXT schedule_text
+        TEXT note
+        TEXT status
+    }
+    class_teacher {
+        TEXT id PK
+        TEXT class_id FK
+        TEXT user_id FK
+        TEXT created_at
+    }
+    class_session {
+        TEXT id PK
+        TEXT class_id FK
+        TEXT starts_at
+        INTEGER duration_minutes
+        TEXT kind
+        TEXT status
+        TEXT makeup_for_attendance_id
+    }
+    enrollment {
+        TEXT id PK
+        TEXT organization_id FK
+        TEXT lead_id FK
+        TEXT contact_id FK
+        TEXT class_id FK
+        TEXT status
+        TEXT deferred_until
+        TEXT confirmed_at
+        TEXT ended_at
+    }
+    trial_booking {
+        TEXT id PK
+        TEXT lead_id FK
+        TEXT session_id FK
+        TEXT status
+    }
+    attendance {
+        TEXT id PK
+        TEXT session_id FK
+        TEXT enrollment_id FK
+        TEXT trial_booking_id FK
+        TEXT status
+    }
+    lead_step {
+        TEXT id PK
+        TEXT lead_id FK
+        TEXT step_code
+        TEXT status
+    }
+    partner_contract {
+        TEXT id PK
+        TEXT organization_id FK
+        TEXT account_id FK
+        TEXT name
+        TEXT status
+    }
+    partner_contract_step {
+        TEXT id PK
+        TEXT contract_id FK
+        TEXT name
+        INTEGER position
+    }
+    consent {
+        TEXT id PK
+        TEXT contact_id FK
+        TEXT purpose
+        INTEGER granted
+        TEXT note
+    }
+    customer_product {
+        TEXT id PK
+        TEXT contact_id FK
+        TEXT product_id FK
+        TEXT detached_at
+    }
+    product {
+        TEXT id PK
+        TEXT organization_id FK
+        TEXT name
+        INTEGER price_vnd
+        INTEGER active
+    }
+    org_setting {
+        TEXT id PK
+        TEXT organization_id FK
+        TEXT bank_name
+        TEXT bank_account_no
+        TEXT bank_account_holder
+    }
+    fee_counter {
+        TEXT organization_id PK
+        INTEGER next_value
+    }
+    charge {
+        TEXT id PK
+        TEXT organization_id FK
+        TEXT code
+        TEXT contact_id FK
+        TEXT enrollment_id FK
+        TEXT kind
+        INTEGER amount_vnd
+        TEXT status
+    }
+    payment {
+        TEXT id PK
+        TEXT organization_id FK
+        TEXT direction
+        TEXT method
+        INTEGER amount_vnd
+        TEXT received_at
+        TEXT memo
+        TEXT payer_note
+    }
+    payment_allocation {
+        TEXT id PK
+        TEXT payment_id FK
+        TEXT charge_id FK
+        INTEGER amount_vnd
+        TEXT revoked_at
+    }
+    privacy_request {
+        TEXT id PK
+        TEXT organization_id FK
+        TEXT contact_id FK
+        TEXT kind
+        TEXT detail
+        TEXT status
+        TEXT resolution
+        INTEGER version
+    }
+```
+
+`course.status` là `active` hoặc `closed`. `class_group.status` là `open`, `cancelled` hoặc `finished`. `class_teacher` có `UNIQUE (class_id, user_id)` và không có cột version. `class_session.kind` là `regular`, `trial` hoặc `makeup`; `status` là `scheduled` hoặc `cancelled`. `enrollment.status` là `pending`, `confirmed`, `studying`, `deferred`, `transferred`, `completed`, `withdrawn` hoặc `cancelled`. `trial_booking.status` là `booked`, `done` hoặc `cancelled`. `attendance` gắn đúng một trong `enrollment_id` hoặc `trial_booking_id`; `status` là `unmarked`, `present`, `absent`, `excused` hoặc `late`. `lead_step` có `UNIQUE (lead_id, step_code)`. `partner_contract.status` là `draft`, `active`, `done` hoặc `cancelled`. `consent` chỉ thêm dòng, mục đích `enrollment`, `fee`, `attendance`, `marketing`, `image`. `charge.kind` là `tuition`, `deposit`, `material` hoặc `adjustment`; `status` là `open` hoặc `void`; `UNIQUE (organization_id, code)`. `payment.direction` là `in` hoặc `refund`. `privacy_request.kind` là `access`, `correct`, `withdraw_consent` hoặc `delete`; `status` là `open`, `done` hoặc `rejected`.
 
 ### Ý nghĩa và liên kết
 

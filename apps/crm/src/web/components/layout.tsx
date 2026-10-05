@@ -12,9 +12,15 @@ export const roleLabel = (role: string) => ROLES.find((r) => r.code === role)?.l
 
 export const SCOPE_LABEL: Record<RoleCode, string> = {
   sale: 'Lead của tôi', leader: 'Team + hàng chờ phòng', head: 'Toàn phòng ban', director: 'Toàn công ty', admin: 'Toàn công ty + cấu hình',
+  academic: 'Khóa, lớp, ghi danh', teacher: 'Lớp của tôi', accountant: 'Học phí và thu tiền',
 };
 
-interface NavItem { to: string; label: string; icon: IconName; roles?: RoleCode[]; badge?: number }
+/** The B2B screens only make sense for the roles that work B2B leads. */
+const B2B_ROLES: RoleCode[] = ['sale', 'leader', 'head', 'director', 'admin'];
+/** Admissions screens: Sale, Leader and Admin work them; BGĐ reads them. */
+const LEARNER_ROLES: RoleCode[] = ['sale', 'leader', 'director', 'admin'];
+
+interface NavItem { to: string; label: string; icon: IconName; roles?: RoleCode[]; badge?: number; badgeLabel?: string }
 
 export function Shell({ actor, children }: { actor: Actor; children: ReactNode }) {
   const [open, setOpen] = useState(false);
@@ -28,16 +34,28 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
   }, [open]);
   const approvals = useApi<ApprovalItem[]>('/approvals?status=pending');
   const pending = approvals.data?.filter((a) => a.canDecide).length ?? 0;
+  const seesMoney = actor.role === 'accountant' || actor.role === 'admin' || actor.role === 'director';
+  const unmatched = useApi<{ id: string }[]>(seesMoney ? '/fees/payments?unallocated=1' : null);
+  const unmatchedCount = unmatched.data?.length ?? 0;
 
   const nav: NavItem[] = [
-    { to: '/', label: 'Tổng quan', icon: 'home' },
-    { to: '/pipeline', label: 'Pipeline', icon: 'board' },
+    { to: '/', label: 'Tổng quan', icon: 'home', roles: B2B_ROLES },
+    { to: '/pipeline', label: 'Pipeline', icon: 'board', roles: B2B_ROLES },
     { to: '/overview', label: 'Toàn cảnh', icon: 'trophy', roles: ['admin', 'director'] },
-    { to: '/leads', label: 'Lead', icon: 'leads' },
-    { to: '/customers', label: 'Khách hàng 360', icon: 'building' },
-    { to: '/tasks', label: actor.role === 'admin' ? 'Công việc' : 'Việc của tôi', icon: 'check' },
-    { to: '/approvals', label: 'Hàng chờ duyệt', icon: 'approve', badge: pending },
+    { to: '/leads', label: 'Lead', icon: 'leads', roles: B2B_ROLES },
+    { to: '/customers', label: 'Khách hàng 360', icon: 'building', roles: B2B_ROLES },
+    { to: '/learners', label: 'Học viên', icon: 'leads', roles: LEARNER_ROLES },
+    { to: '/partners', label: 'Đối tác', icon: 'building', roles: LEARNER_ROLES },
+    { to: '/products', label: 'Sản phẩm', icon: 'file', roles: ['academic', 'admin', 'sale', 'leader'] },
+    { to: '/my-classes', label: 'Lớp của tôi', icon: 'check', roles: ['teacher', 'academic', 'admin'] },
+    { to: '/courses', label: 'Khóa & lớp', icon: 'board', roles: ['academic', 'admin'] },
+    { to: '/reports/learner', label: 'Báo cáo học viên', icon: 'trophy', roles: ['sale', 'leader', 'director', 'admin', 'academic', 'teacher', 'accountant'] },
+    { to: '/fees', label: 'Học phí', icon: 'file', roles: ['accountant', 'admin', 'director'] },
+    { to: '/fees/queue', label: 'Tiền chưa khớp', icon: 'inbox', roles: ['accountant', 'admin', 'director'], badge: unmatchedCount, badgeLabel: `${unmatchedCount} khoản chưa khớp` },
+    { to: '/tasks', label: actor.role === 'admin' ? 'Công việc' : 'Việc của tôi', icon: 'check', roles: B2B_ROLES },
+    { to: '/approvals', label: 'Hàng chờ duyệt', icon: 'approve', roles: B2B_ROLES, badge: pending },
     { to: '/audit', label: 'Nhật ký audit', icon: 'audit', roles: ['leader', 'head', 'director', 'admin'] },
+    { to: '/privacy', label: 'Dữ liệu cá nhân', icon: 'audit', roles: ['admin'] },
     { to: '/admin/users', label: 'Người dùng', icon: 'leads', roles: ['admin'] },
     { to: '/admin', label: 'Cấu hình', icon: 'settings', roles: ['admin'] },
   ];
@@ -52,9 +70,9 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
         </div>
         <nav className="nav">
           {nav.filter((n) => !n.roles || n.roles.includes(actor.role)).map((n) => (
-            <Link key={n.to} to={n.to as '/'} activeOptions={{ exact: n.to === '/' || n.to === '/admin' }}>
+            <Link key={n.to} to={n.to as '/'} activeOptions={{ exact: n.to === '/' || n.to === '/admin' || n.to === '/fees' }}>
               <Icon name={n.icon} />{n.label}
-              {n.badge ? <span className="count" aria-label={`${n.badge} chờ bạn duyệt`}>{n.badge}</span> : null}
+              {n.badge ? <span className="count" aria-label={n.badgeLabel ?? `${n.badge} chờ bạn duyệt`}>{n.badge}</span> : null}
             </Link>
           ))}
         </nav>
@@ -182,6 +200,9 @@ export function RolePicker() {
     head: 'Xem toàn phòng ban, dashboard theo Sale.',
     director: 'Xem toàn công ty.',
     admin: 'Xem và cập nhật dữ liệu toàn công ty (không duyệt yêu cầu), quản lý người dùng và cấu hình.',
+    academic: 'Quản lý danh mục sản phẩm, khóa, lớp và ghi danh học viên.',
+    teacher: 'Điểm danh các lớp được gán; chỉ thấy tên học viên.',
+    accountant: 'Ghi khoản phải thu, ghi tiền vào và phân bổ học phí.',
   };
   return (
     <div className="picker">

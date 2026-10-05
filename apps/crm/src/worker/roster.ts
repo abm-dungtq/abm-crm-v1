@@ -26,6 +26,10 @@ const ROLE_ALIASES: Record<string, RoleCode> = {
   'truong phong': 'head',
   bgd: 'director', 'ban giam doc': 'director', 'giam doc': 'director',
   admin: 'admin', 'quan tri': 'admin',
+  'hoc vu': 'academic', academic: 'academic',
+  'to chuc': 'academic', 'to chuc (quan ly hoc vien)': 'academic',
+  'giao vien': 'teacher', teacher: 'teacher',
+  'ke toan': 'accountant', accountant: 'accountant',
 };
 export const parseRole = (value: string): RoleCode | null => ROLE_ALIASES[foldText(value)] ?? null;
 
@@ -39,13 +43,13 @@ export function placementError(role: RoleCode, department: string | null, team: 
     if (!department) return 'Trưởng phòng cần Phòng ban';
     if (team) return 'Trưởng phòng để trống Nhóm';
   } else if (department || team) {
-    return 'BGĐ và Admin để trống Phòng ban và Nhóm';
+    return 'BGĐ, Admin, Tổ chức, Giáo viên và Kế toán để trống Phòng ban và Nhóm';
   }
   return null;
 }
 
 /** RFC 4180 records; quoted cells may hold delimiters, quotes ("") and line breaks. */
-function readRecords(text: string, delimiter: string): string[][] {
+export function readRecords(text: string, delimiter: string): string[][] {
   const records: string[][] = [];
   let record: string[] = [];
   let cell = '';
@@ -68,7 +72,7 @@ function readRecords(text: string, delimiter: string): string[][] {
 }
 
 /** Excel saves CSV with `,` or, under Vietnamese regional settings, `;`. */
-function detectDelimiter(headerLine: string) {
+export function detectDelimiter(headerLine: string) {
   const counts = [',', ';', '\t'].map((d) => [d, headerLine.split(d).length] as const);
   return counts.sort((a, b) => b[1] - a[1])[0]![0];
 }

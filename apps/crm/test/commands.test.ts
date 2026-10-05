@@ -1,7 +1,8 @@
-import { env, applyD1Migrations, type D1Migration } from 'cloudflare:test';
+import { env, type D1Migration } from 'cloudflare:test';
 import { beforeEach, describe, expect, test } from 'vitest';
 import seedSql from '../seed/demo.sql?raw';
 import app from '../src/worker/index';
+import { resetDb } from './helpers/reset-db';
 
 declare global {
   namespace Cloudflare {
@@ -15,14 +16,7 @@ declare global {
 }
 
 const db = env.DB;
-const TABLES = ['_guard', 'idempotency_key', 'outbox', 'audit_log', 'approval', 'activity', 'task', 'lead', 'lead_counter',
-  'contact_point', 'account_contact', 'contact', 'account', 'app_user', 'team', 'department', 'organization'];
-
-beforeEach(async () => {
-  await applyD1Migrations(db, env.TEST_MIGRATIONS);
-  await db.batch(TABLES.map((t) => db.prepare(`DELETE FROM ${t}`)));
-  await db.batch(seedSql.split('\n').filter((line) => line.startsWith('INSERT')).map((line) => db.prepare(line)));
-});
+beforeEach(() => resetDb(db, seedSql));
 
 type Json = { ok: boolean; data?: any; error?: { code: string; message: string; fields?: Record<string, string>; details?: any } };
 

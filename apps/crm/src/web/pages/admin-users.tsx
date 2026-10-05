@@ -215,6 +215,9 @@ function RosterImport({ onIssued }: { onIssued: (items: IssuedPassword[]) => voi
   );
 }
 
+/** Roles that sit outside the department and team structure. */
+const NO_PLACEMENT_ROLES: RoleCode[] = ['director', 'admin', 'academic', 'teacher', 'accountant'];
+
 function EditUserDialog({ user, overview, self, onClose }: { user: AdminUser; overview: AdminOverview; self: boolean; onClose: () => void }) {
   const toast = useToast();
   const [form, setForm] = useState({ name: user.name, email: user.email, role: user.role, departmentName: user.departmentName ?? '', teamName: user.teamName ?? '' });
@@ -224,7 +227,7 @@ function EditUserDialog({ user, overview, self, onClose }: { user: AdminUser; ov
   }));
   const errors = fieldErrors(save.error);
   const set = (key: keyof typeof form) => (e: { target: { value: string } }) => setForm((f) => ({ ...f, [key]: e.target.value }));
-  const needsDept = form.role !== 'director' && form.role !== 'admin';
+  const needsDept = !NO_PLACEMENT_ROLES.includes(form.role);
   const needsTeam = form.role === 'sale' || form.role === 'leader';
   const teams = overview.teams.filter((t) => t.departmentName === form.departmentName);
   return (
@@ -239,7 +242,7 @@ function EditUserDialog({ user, overview, self, onClose }: { user: AdminUser; ov
       <Field label="Email" required error={errors.email} hint="Đổi email sẽ bỏ liên kết Lark cũ." htmlFor="u-email"><input id="u-email" type="email" value={form.email} onChange={set('email')} /></Field>
       <Field label="Vai trò" required hint={self ? 'Không tự đổi vai trò của mình.' : undefined} htmlFor="u-role">
         <select id="u-role" value={form.role} disabled={self}
-          onChange={(e) => { const role = e.target.value as RoleCode; setForm((f) => ({ ...f, role, ...(role === 'director' || role === 'admin' ? { departmentName: '', teamName: '' } : role === 'head' ? { teamName: '' } : {}) })); }}>
+          onChange={(e) => { const role = e.target.value as RoleCode; setForm((f) => ({ ...f, role, ...(NO_PLACEMENT_ROLES.includes(role) ? { departmentName: '', teamName: '' } : role === 'head' ? { teamName: '' } : {}) })); }}>
           {ROLES.map((r) => <option key={r.code} value={r.code}>{r.label}</option>)}
         </select>
       </Field>

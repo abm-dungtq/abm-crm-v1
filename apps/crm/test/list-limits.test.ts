@@ -1,20 +1,15 @@
-import { env, applyD1Migrations } from 'cloudflare:test';
+import { env } from 'cloudflare:test';
 import { beforeEach, expect, test } from 'vitest';
 import seedSql from '../seed/demo.sql?raw';
 import app from '../src/worker/index';
 import { listAccounts, listLeads } from '../src/worker/queries';
 import { runCommand } from '../src/worker/commands';
 import type { Actor } from '../src/worker/env';
+import { resetDb } from './helpers/reset-db';
 
 const db = env.DB;
-const tables = ['agent_token', 'user_session', '_guard', 'idempotency_key', 'outbox', 'audit_log', 'approval', 'activity', 'task', 'lead',
-  'lead_counter', 'contact_point', 'account_contact', 'contact', 'account', 'app_user', 'team', 'department', 'organization'];
 const admin: Actor = { id: 'u-admin', role: 'admin', organizationId: 'org-abm', departmentId: null, teamId: null, displayName: 'Admin', kind: 'human' };
-beforeEach(async () => {
-  await applyD1Migrations(db, env.TEST_MIGRATIONS);
-  await db.batch(tables.map((t) => db.prepare(`DELETE FROM ${t}`)));
-  await db.batch(seedSql.split('\n').filter((line) => line.startsWith('INSERT')).map((line) => db.prepare(line)));
-});
+beforeEach(() => resetDb(db, seedSql));
 async function get(path: string, user = 'u-admin') {
   const response = await app.fetch(new Request(`http://crm.test/api${path}`, { headers: { 'X-Demo-User': user } }), { ...env, DEMO_MODE: '1' });
   expect(response.status).toBe(200);

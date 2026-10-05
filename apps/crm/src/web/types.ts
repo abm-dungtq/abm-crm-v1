@@ -72,7 +72,10 @@ export interface TaskItem {
   version: number;
   assignee: { id: string; name: string };
   isNextAction: boolean;
-  lead: { id: string; code: string; stage: string; status: string; version: number; contactName: string; accountName: string | null };
+  lead: {
+    id: string; code: string; stage: string; status: string; version: number;
+    pipeline: string; contactId: string; contactName: string; accountName: string | null;
+  };
   bucket: 'overdue' | 'today' | 'upcoming' | 'done';
 }
 
@@ -194,4 +197,61 @@ export interface Overview {
 export interface OverviewMatrixRow {
   id: string; name: string; departmentId: string;
   cells: { stage: StageCode; count: number; value: number; atRisk: number }[];
+}
+
+// ---------- learner flow (src/worker/learner-queries.ts) ----------
+
+export interface LearnerRow {
+  contactId: string; name: string; phone: string | null; ownerName: string | null; stage: string; stageLabel: string;
+  course: string; source: string; sourceLabel: string; contract: string | null; holdExpiresAt: string | null;
+  version: number; held: boolean; canClaim: boolean;
+}
+export interface LearnerList { items: LearnerRow[]; truncated: boolean }
+
+export interface LearnerContact {
+  id: string; name: string; version: number; held: boolean; phone: string | null; email: string | null;
+  ownerName: string | null; holdExpiresAt: string | null;
+}
+export interface LearnerStep {
+  code: string; label: string; required: boolean; status: 'open' | 'done' | 'skipped'; skipReason: string | null; doneAt: string | null;
+}
+export interface LearnerLead {
+  id: string; code: string; stage: string; stageLabel: string; status: 'active' | 'won' | 'lost'; source: string; sourceLabel: string;
+  needSummary: string; version: number; createdAt: string; closedAt: string | null; lostReason: string | null; lostNote: string | null; wonNote: string | null;
+  contract: { id: string; name: string | null } | null; nextAction: { id: string; title: string; dueAt: string } | null; steps: LearnerStep[];
+}
+export interface LearnerProduct {
+  id: string; version: number; productId: string; name: string; priceVnd: number; attachedAt: string; detachedAt: string | null;
+}
+export interface LearnerConsent { purpose: string; label: string; granted: boolean; note: string | null; recordedAt: string | null }
+export interface LearnerActivity { id: string; lead_id: string; type: string; summary: string; occurredAt: string; actorName: string | null }
+export interface LearnerPermissions { work: boolean; claim: boolean; changeOwner: boolean }
+export type LearnerDetail =
+  | {
+    restricted: true; contact: LearnerContact; permissions: LearnerPermissions;
+    summary: { stage: string; stageLabel: string; source: string; sourceLabel: string } | null;
+  }
+  | {
+    restricted: false; contact: LearnerContact; permissions: LearnerPermissions; leads: LearnerLead[]; products: LearnerProduct[];
+    detachedProducts: LearnerProduct[]; consents: LearnerConsent[]; enrollments: LearnerEnrollment[]; activities: LearnerActivity[]; ownerCandidates: Member[];
+  };
+export interface LearnerEnrollment {
+  id: string; version: number; status: string; leadId: string; leadCode: string; classId: string; className: string; courseName: string;
+}
+
+export interface ProductItem { id: string; name: string; description: string | null; priceVnd: number; active: boolean; version: number }
+
+export interface PartnerRow {
+  id: string; name: string; status: string; startsOn: string | null; endsOn: string | null; accountId: string; accountName: string;
+  version: number; learnerCount: number; stepsTotal: number; stepsDone: number;
+}
+export interface PartnerDetail {
+  contract: { id: string; name: string; status: string; startsOn: string | null; endsOn: string | null; note: string | null; accountId: string; accountName: string; version: number };
+  steps: { id: string; name: string; position: number; doneAt: string | null; version: number }[];
+  learners: { leadId: string; code: string; contactId: string; name: string; phone: string | null; ownerName: string | null; stage: string; stageLabel: string; createdAt: string }[];
+}
+export interface ImportPreview {
+  committed: boolean;
+  create: { line: number; name: string; phone: string | null; email: string | null }[];
+  errors: { line: number | null; message: string }[];
 }

@@ -1,17 +1,17 @@
 ---
 phase: 3
-title: "Học vụ: khóa, lớp online, buổi học, học thử, giữ chỗ, xác nhận, bảo lưu, chuyển lớp"
-status: pending
+title: "Tổ chức: khóa, lớp online, buổi học, học thử, giữ chỗ, xác nhận, bảo lưu, chuyển lớp"
+status: completed
 priority: P1
 effort: "2d"
 dependencies: [2]
 ---
 
-# Phase 03: Học vụ
+# Phase 03: Tổ chức
 
 ## Goal
 
-Học vụ làm được các việc sau theo PRD §7-§8:
+Tổ chức làm được các việc sau theo PRD §7-§8:
 
 - mở khóa (mỗi khóa thuộc một sản phẩm), lớp và buổi học;
 - gán giáo viên cho lớp;
@@ -32,6 +32,8 @@ Mọi lệnh chạy từ `D:\TQD\CRM`.
 - Create: `apps/crm/migrations/0008_academic.sql`
 - Create: `apps/crm/src/worker/academic-commands.ts`, `apps/crm/src/worker/academic-queries.ts`
 - Modify: `apps/crm/src/worker/commands.ts` (đăng ký `academicHandlers`)
+- Modify: `apps/crm/src/worker/guarded-tx.ts` (thêm bảng có version vào `GuardedTable`)
+- Modify: `apps/crm/src/worker/learner-commands.ts` (`loadLearnerLead` nhận `statuses`, export `markStepDone`)
 - Modify: `apps/crm/src/worker/index.ts` (route GET)
 - Modify: `apps/crm/src/worker/learner-queries.ts` (cột "Khóa học" lấy tên khóa từ ghi danh chưa kết thúc)
 - Modify: `packages/contracts/src/index.ts`
@@ -59,7 +61,9 @@ Mọi lệnh chạy từ `D:\TQD\CRM`.
      - `CHECK (status <> 'deferred' OR deferred_until IS NOT NULL)`;
      - index `(class_id, status)` và `(contact_id)`.
   6. `trial_booking`: `id`, `lead_id` (FK lead), `session_id` (FK class_session), `status TEXT NOT NULL DEFAULT 'booked' CHECK (status IN ('booked','done','cancelled'))`.
-  7. Thêm các bảng mới vào `TABLES` của `reset-db.ts`. Đặt bảng con trước bảng cha: `trial_booking`, `enrollment`, `class_session`, `class_teacher`, `class_group`, `course` phải đứng trước `lead`, `product`, `app_user`.
+  7. Bảng `class_teacher` chỉ ghi thêm, không cần các cột version. Các bảng còn lại có version.
+     Thêm `'course' | 'class_group' | 'class_session' | 'enrollment' | 'trial_booking'` vào type `GuardedTable` trong `guarded-tx.ts`.
+  8. Thêm các bảng mới vào `TABLES` của `reset-db.ts`. Đặt bảng con trước bảng cha: `trial_booking`, `enrollment`, `class_session`, `class_teacher`, `class_group`, `course` phải đứng trước `lead`, `product`, `app_user`.
 - Verify: `pnpm -F @abm/crm test` exit 0.
 
 ### Task 3.2: Hợp đồng dùng chung
@@ -77,8 +81,8 @@ Mọi lệnh chạy từ `D:\TQD\CRM`.
      | `setClassTeachers` | `{classId, version, teacherUserIds: id[] (max 10)}` | academic, admin |
      | `addSession` | `{classId, startsAt, durationMinutes, kind: 'regular' \| 'trial', note?}` | academic, admin |
      | `updateSession` | `{sessionId, version, startsAt?, durationMinutes?, note?, status?}` | academic, admin |
-     | `bookTrial` | `{leadId, version, sessionId}` | sale, leader, admin |
-     | `reserveSeat` | `{leadId, version, classId}` | sale, leader, admin |
+     | `bookTrial` | `{leadId, expectedVersion, sessionId}` | sale, leader, admin |
+     | `reserveSeat` | `{leadId, expectedVersion, classId}` | sale, leader, admin |
      | `cancelPendingEnrollment` | `{enrollmentId, version}` | sale, leader, admin |
      | `confirmEnrollment` | `{enrollmentId, version}` | academic, admin |
      | `deferEnrollment` | `{enrollmentId, version, until: isoDate}` | academic, admin |
@@ -88,23 +92,27 @@ Mọi lệnh chạy từ `D:\TQD\CRM`.
 
 - Verify: `pnpm -F @abm/crm typecheck` exit 0.
 
-### Task 3.3: Handler học vụ
+### Task 3.3: Handler tổ chức
 
 - Target: `apps/crm/src/worker/academic-commands.ts`. Export `academicHandlers` rồi gộp vào map `handlers` trong `commands.ts`.
 - Steps:
   1. `upsertCourse`: sản phẩm phải tồn tại. Khóa không có giá riêng.
   2. `upsertClass`: hủy lớp là đổi `status = 'cancelled'`, không xóa gì.
   3. `setClassTeachers`:
-     - mỗi user phải có `role = 'teacher'` và đang hoạt động;
+     - mỗi user phải có `role` là `teacher` hoặc `admin` (Admin cũng dạy được) và đang hoạt động;
      - xóa các dòng `class_teacher` cũ rồi chèn lại;
      - bump version của `class_group` bằng `tx.update` để chống ghi đè đồng thời.
   4. `addSession` / `updateSession`: hủy buổi là đổi `status = 'cancelled'`. Không ai được tạo `kind = 'makeup'` ở đây, vì buổi học bù thuộc phase 04.
+     `starts_at` luôn được chuẩn hóa thành ISO UTC bằng `new Date(x).toISOString()`. Chuỗi không đọc được thì từ chối. Web gửi giờ Việt Nam qua `fromLocalInput`.
   5. `bookTrial`:
+     - đọc lead bằng `loadLearnerLead` (mặc định status `active`), nên không kiểm `status` thêm một lần nữa;
      - lead `learner` có `stage = 'qualified'` và thuộc quyền sửa của actor;
      - buổi có `kind = 'trial'` và đang `scheduled`;
      - tạo `trial_booking`, chuyển stage sang `trial_booked`, ghi activity.
   6. `reserveSeat`:
+     - đọc lead bằng `loadLearnerLead` với `statuses = ['won']`;
      - lead phải `stage = 'won'`, thuộc quyền sửa của actor, và lớp phải `open`;
+     - trong batch, assert lead chưa có ghi danh nào khác ở `pending`, `confirmed`, `studying` hoặc `deferred`. Mỗi lead chỉ có tối đa một ghi danh đang sống. Học viên học thêm khóa thì tạo lead mới;
      - tạo `enrollment` với `status = 'pending'`, `contact_id` lấy từ lead;
      - không có lựa chọn người trả, người trả luôn là học viên.
   7. `cancelPendingEnrollment`: chỉ ghi danh `pending` của lead mà actor là owner, Leader cùng nhóm hoặc Admin. Chuyển sang `cancelled`.
@@ -113,7 +121,7 @@ Mọi lệnh chạy từ `D:\TQD\CRM`.
      - khách phải có đồng ý `enrollment` mới nhất là `granted = 1`, nếu không trả `VALIDATION_FAILED`, "Khách chưa đồng ý mục Quản lý ghi danh";
      - không kiểm sức chứa của lớp;
      - đặt `confirmed`, `confirmed_at`;
-     - bước `placed` của lead chuyển thành `done`.
+     - bước `placed` của lead chuyển thành `done` qua `markStepDone`. Hàm này không lỗi khi bước đã `done` hoặc `skipped`. `winLearnerLead` dùng cùng hàm cho bước `enrolled`.
   9. `deferEnrollment`:
      - từ `confirmed` hoặc `studying`;
      - lưu `status_before_defer`, đặt `deferred_until`, chuyển sang `deferred`;
@@ -121,6 +129,7 @@ Mọi lệnh chạy từ `D:\TQD\CRM`.
   10. `resumeEnrollment`: từ `deferred` quay về `status_before_defer`, rồi xóa `deferred_until` và `status_before_defer`. Hết hạn bảo lưu không tự đổi gì.
   11. `transferEnrollment`:
       - từ `confirmed`, `studying` hoặc `deferred`;
+      - assert lead không còn ghi danh sống nào khác (`pending`, `confirmed`, `studying`, `deferred`), loại trừ chính ghi danh đang chuyển;
       - ghi danh cũ chuyển sang `transferred` và có `ended_at`;
       - tạo ghi danh mới ở lớp đích với `status = 'confirmed'` và `transferred_from_enrollment_id`;
       - **không** tạo hay đổi khoản tiền nào, việc đó thuộc phase 05.
@@ -134,8 +143,10 @@ Mọi lệnh chạy từ `D:\TQD\CRM`.
 - Steps:
   1. `GET /courses`: danh sách khóa kèm các lớp. Mỗi lớp có `studentCount` (đếm `COUNTED_ENROLLMENT` trong SQL) và số buổi.
      - Roles: academic, admin, director. Riêng sale và leader chỉ thấy lớp `open` để giữ chỗ, kèm `id`, `name`, `scheduleText` và tên khóa.
+     - Cả hai scope đều trả `trialSessions` của các buổi học thử đang `scheduled`.
   2. `GET /classes/:id`:
-     - academic và admin: lớp, giáo viên, các buổi, mọi ghi danh (tên học viên, trạng thái, lead code), các trial booking.
+     - academic, admin và director: lớp, giáo viên, `teacherCandidates`, `transferTargets`, các buổi, mọi ghi danh (tên học viên, trạng thái, lead code), các trial booking. Director xem được trang này, cùng nhóm quyền với `GET /courses`.
+     - `teacherCandidates` là user `teacher` hoặc `admin` đang hoạt động. Không có route `GET /teachers`.
      - teacher: trả `FORBIDDEN`. Màn hình của giáo viên thuộc phase 04.
   3. `GET /enrollments/overdue-deferrals`: các ghi danh `deferred` có `deferred_until < now`. Roles: academic, admin.
   4. Trong `learner-queries.ts`, cột `course` đổi thành tên các khóa lấy từ ghi danh có status thuộc `pending`, `confirmed`, `studying`, `deferred`. Nếu không có thì dùng tên sản phẩm đang gắn như phase 02. Bộ lọc `course` khớp đúng chuỗi đang hiện.
@@ -155,7 +166,7 @@ Mọi lệnh chạy từ `D:\TQD\CRM`.
      - một khối "Bảo lưu quá hạn".
   4. `/classes/$classId`:
      - thông tin lớp và link học;
-     - gán giáo viên (chọn nhiều user có `role = 'teacher'`; cần thêm route `GET /team-members?role=teacher` hoặc dùng danh sách user của admin, chọn cách ít sửa nhất);
+     - gán giáo viên (chọn nhiều user từ `teacherCandidates` trong `GET /classes/:id`; user có `role` là `teacher` hoặc `admin`);
      - các buổi: thêm, hủy, sửa ghi chú;
      - ghi danh, mỗi dòng có nút Xác nhận, Bảo lưu (kèm ngày), Học lại, Chuyển lớp, Kết thúc.
   5. `learner-detail.tsx`:
@@ -172,11 +183,14 @@ Mọi lệnh chạy từ `D:\TQD\CRM`.
   2. `confirmEnrollment` khi chưa có đồng ý `enrollment` thì lỗi. Có đồng ý thì OK, `studentCount` là 1 và bước `placed` là `done`.
   3. Hai học viên khác nhau cùng vào một lớp đều được xác nhận, `studentCount` là 2.
   4. `deferEnrollment` khi thiếu `until` thì `VALIDATION_FAILED`. Bảo lưu thì `studentCount` giảm. `resumeEnrollment` thì quay về đúng trạng thái trước đó, thử cả `confirmed` lẫn `studying`.
-  5. `transferEnrollment`: ghi danh cũ là `transferred`, ghi danh mới là `confirmed` ở lớp đích, số khoản tiền không đổi.
+  5. `transferEnrollment`: ghi danh cũ là `transferred`, ghi danh mới là `confirmed` ở lớp đích, số khoản tiền không đổi. Ở phase này chưa có bảng tiền, nên vế "khoản tiền không đổi" là kiểm rỗng (0 = 0). Phase 05 bổ sung kiểm thật.
   6. `cancelPendingEnrollment` do sale khác gọi thì `FORBIDDEN`.
   7. `bookTrial` thì stage thành `trial_booked`.
   8. `teacher` gọi `GET /classes/:id` thì nhận 403. `sale` gọi `confirmEnrollment` thì `FORBIDDEN`.
   9. Ghi danh quá hạn bảo lưu xuất hiện trong `overdue-deferrals`.
+  10. `setClassTeachers` nhận một user `admin` và một user `teacher` thì OK. Truyền một user `sale` thì `VALIDATION_FAILED`.
+  11. `addSession` gửi `"2026-10-10T19:00:00+07:00"` thì DB lưu `"2026-10-10T12:00:00.000Z"`.
+  12. Giữ chỗ lần hai cho cùng lead, khi còn ghi danh `pending`, `confirmed`, `studying` hoặc `deferred`, thì lỗi.
 - Verify: `pnpm -F @abm/crm test` exit 0. Output có `academic.test.ts` và không có `failed`.
 
 ## Failure Protocol

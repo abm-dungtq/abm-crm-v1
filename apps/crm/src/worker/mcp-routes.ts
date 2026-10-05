@@ -4,7 +4,7 @@ import { loadAgentActor } from './actor';
 import { notifyCommitted } from './approval-notify';
 import { sha256 } from './commands';
 import { background, type AppBindings } from './env';
-import { callTool, tools } from './mcp-tools';
+import { callTool, toolsFor } from './mcp-tools';
 
 /**
  * MCP (Streamable HTTP, JSON-RPC) for the chat agent. Each person has their own Bearer token and the
@@ -45,7 +45,7 @@ mcpRoutes.post('/', async (c) => {
     return reply({ protocolVersion: '2025-11-25', capabilities: { tools: {} }, serverInfo: { name: 'abm-crm', version: '1.0.0' } });
   }
   if (rpc.method === 'ping') return reply({});
-  if (rpc.method === 'tools/list') return reply({ tools });
+  if (rpc.method === 'tools/list') return reply({ tools: toolsFor(c.get('actor')) });
   if (rpc.method === 'tools/call') {
     const name = rpc.params?.name;
     const args = rpc.params?.arguments ?? {};

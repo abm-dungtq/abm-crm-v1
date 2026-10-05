@@ -1,22 +1,19 @@
-import { env, applyD1Migrations } from 'cloudflare:test';
+import { env } from 'cloudflare:test';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import seedSql from '../seed/demo.sql?raw';
 import app from '../src/worker/index';
 import { deliverApprovalDm } from '../src/worker/approval-notify';
 import { sha256 } from '../src/worker/commands';
+import { resetDb } from './helpers/reset-db';
 
 const db = env.DB;
 const ORIGIN = 'http://crm.test';
-const tables = ['agent_token', 'user_session', '_guard', 'idempotency_key', 'outbox', 'audit_log', 'approval', 'activity', 'task', 'lead',
-  'lead_counter', 'contact_point', 'account_contact', 'contact', 'account', 'app_user', 'team', 'department', 'organization'];
 const lark = { LARK_APP_ID: 'cli_fake', LARK_APP_SECRET: 'fake-secret-value-123' };
 const testEnv = { ...env, DEMO_MODE: '1', ...lark };
 const tokens: Record<string, string> = {};
 
 beforeEach(async () => {
-  await applyD1Migrations(db, env.TEST_MIGRATIONS);
-  await db.batch(tables.map(t => db.prepare(`DELETE FROM ${t}`)));
-  await db.batch(seedSql.split('\n').filter(l => l.startsWith('INSERT')).map(l => db.prepare(l)));
+  await resetDb(db, seedSql);
   await db.prepare('INSERT INTO agent_kill_switch (id, enabled) VALUES (1, 0) ON CONFLICT(id) DO UPDATE SET enabled = 0').run();
   await db.prepare("UPDATE app_user SET lark_link_status = 'linked', lark_open_id = 'ou_hung' WHERE id = 'u-hung'").run();
   for (const user of ['u-lan', 'u-hung']) {

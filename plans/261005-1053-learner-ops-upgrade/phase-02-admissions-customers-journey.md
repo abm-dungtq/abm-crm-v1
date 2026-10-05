@@ -1,7 +1,7 @@
 ---
 phase: 2
 title: "Tuyển sinh: danh sách khách, hành trình 8 bước, giữ khách 3 tháng, sản phẩm trên khách, hợp đồng đối tác"
-status: pending
+status: completed
 priority: P1
 effort: "3d"
 dependencies: [1]
@@ -54,6 +54,7 @@ Mọi lệnh chạy từ `D:\TQD\CRM`.
      - cột: `id`, `contract_id` (FK partner_contract), `name TEXT NOT NULL`, `position INTEGER NOT NULL`, `done_at TEXT`, `done_by_user_id TEXT`, `created_at`, `updated_at`, `version`, `last_txn_id`.
   4. Tạo index `lead(pipeline, contact_id)` và `partner_contract(account_id, status)`.
   5. Thêm 3 bảng mới vào `TABLES` trong `reset-db.ts`, đặt trước `lead` và `account`.
+  6. Thêm `'lead_step' | 'partner_contract' | 'partner_contract_step'` vào type `GuardedTable` trong `apps/crm/src/worker/guarded-tx.ts`.
 - Verify: `pnpm -F @abm/crm test` exit 0.
 
 ### Task 2.2: Tính hạn giữ khách
@@ -65,7 +66,9 @@ Mọi lệnh chạy từ `D:\TQD\CRM`.
      - Nếu ngày đích không có trong tháng đích thì lấy ngày cuối tháng đích.
      - Kết quả trả về là ISO UTC.
      - Giờ Việt Nam là UTC+7 và không có giờ mùa hè. Có thể cộng 7 giờ, tính trên các trường UTC, rồi trừ lại 7 giờ.
-  2. Export `isHeld(contact: {owner_user_id, hold_expires_at}, hasWonLead: boolean, now: Date): boolean`. Trả về `true` khi khách có owner và một trong hai điều kiện sau đúng: `hasWonLead`, hoặc `hold_expires_at > now`.
+  2. Export `isHeld(contact: {owner_user_id, hold_expires_at}, hasWonLead: boolean, now: Date): boolean`. Trả về `true` khi khách có owner, owner đó vẫn là user `active` có role `sale` hoặc `leader`, và một trong hai điều kiện sau đúng: `hasWonLead`, hoặc `hold_expires_at > now`.
+     - Hàm nhận thêm cờ `owner_eligible` (owner là user `active` role `sale`/`leader`) trong tham số `contact`.
+     - Khi owner đã đổi sang vai khác (ví dụ `academic`) hoặc bị khóa thì hạn giữ vô hiệu và khách rơi vào hồ chung. Export thêm đoạn SQL tương ứng để `view=pool` và kiểm tra trùng dùng đúng một quy tắc.
 - Verify: no verification needed (Task 2.8).
 
 ### Task 2.3: Hợp đồng dùng chung cho tuyển sinh
@@ -90,7 +93,7 @@ Mọi lệnh chạy từ `D:\TQD\CRM`.
      - `addContractStepInput`: `{ contractId, name }`.
      - `toggleContractStepInput`: `{ stepId, version, done: boolean }`.
      - `importContractLearnersInput`: `{ contractId, csv: string (≤512KB), commit: boolean }`.
-  2. Thêm vào `COMMANDS`. Mọi lệnh đều có `expectedVersion` đúng với việc input có `version` hay không.
+  2. Thêm vào `COMMANDS`. Mọi lệnh đều có `expectedVersion` đúng với việc input có `version` hay không. Lệnh nhắm vào lead (`markJourneyStep`, `skipTrial`, `winLearnerLead`, `closeLearnerLead`) đặt tên trường là `expectedVersion`, giống `changeStage`; lệnh nhắm vào contact, customer_product và bước hợp đồng dùng `version`.
 
      | Lệnh | Roles | `agentNeedsApproval` |
      |---|---|---|
@@ -117,7 +120,7 @@ Mọi lệnh chạy từ `D:\TQD\CRM`.
        - Khách đang được người khác giữ (`isHeld` và owner khác actor): trả `fail('FORBIDDEN', 'Khách đang do sale khác giữ')`. Không trả tên sale.
        - Khách ở hồ chung: trả `fail('VALIDATION_FAILED', 'Khách đang ở hồ chung, hãy bấm Nhận trước')`.
        - Khách của chính actor: dùng lại `contact` đó.
-     - Khách mới: tạo `contact` theo mẫu `createLead` (`commands.ts` khoảng dòng 290-300), gán `owner_user_id`, `hold_started_at = now`, `hold_expires_at = holdExpiry(now)`.
+     - Khách mới: tạo `contact` bằng `tx.insertVersioned('contact', { id, organization_id, display_name, owner_user_id, hold_started_at, hold_expires_at })` (`hold_started_at = now`, `hold_expires_at = holdExpiry(now)`), rồi chèn `contact_point` theo mẫu `createLead` (`commands.ts:333-341`). Không dùng `tx.raw` để chèn `contact`. Dòng `contact` mới là dòng neo của lệnh.
      - Khách cũ của chính actor: không đổi hạn giữ.
      - Nguồn `partner`: kiểm `partner_contract.status = 'active'` bằng `tx.assert` hoặc đọc trước rồi `fail`. Gán `lead.partner_contract_id`.
      - Ghi `sourceNote` vào `need_summary` theo dạng `"<need> — Nguồn: <note>"`. Không thêm cột mới.
@@ -157,7 +160,7 @@ Mọi lệnh chạy từ `D:\TQD\CRM`.
      - `toggleContractStep`: đặt hoặc xóa `done_at`.
   10. **`importContractLearners`**
       - Hợp đồng phải đang `active`.
-      - Đọc CSV có header `Họ tên,Số điện thoại,Email,Nhu cầu`. Tái dùng bộ đọc dấu phân cách và `foldText` của `roster.ts` (`parseRosterCsv` dòng 76-100). Tối đa `ROSTER_MAX_ROWS` dòng.
+      - Đọc CSV có header `Họ tên,Số điện thoại,Email,Nhu cầu`. Tái dùng bộ đọc dấu phân cách của `roster.ts` (`parseRosterCsv` từ `roster.ts:79`; `foldText` import từ `@abm/contracts`). Tối đa `ROSTER_MAX_ROWS` dòng.
       - Mỗi dòng đi đúng logic của `createLearnerLead` với `source = 'partner'`. Owner là actor. Next Action mặc định là "Liên hệ học viên đối tác", hạn +1 ngày.
       - Dòng nào trùng số điện thoại với khách đang được người khác giữ hoặc đang ở hồ chung thì báo lỗi ở dòng đó và không tạo.
       - `commit: false` trả bản xem trước gồm `{create, errors}`. `commit: true` ghi tất cả trong **một** `GuardedTx`.
@@ -179,12 +182,12 @@ Mọi lệnh chạy từ `D:\TQD\CRM`.
 - Goal: có API cho PRD §3 và §6.
 - Target: `apps/crm/src/worker/learner-queries.ts`, `apps/crm/src/worker/index.ts`.
 - Steps:
-  1. `GET /learners?view=mine|pool&q=&owner=&stage=&course=`
+  1. `GET /learners` (đọc: sale, leader, admin, director; ghi vẫn không có director)`?view=mine|pool&q=&owner=&stage=&course=`
      - Mỗi khách lấy **lead `learner` mới nhất** bằng `ROW_NUMBER() OVER (PARTITION BY contact_id ORDER BY created_at DESC)`, và khách chưa `archived_at`.
      - Cột trả về: `contactId`, `name`, `phone`, `ownerName` ("Chưa gắn" khi ở hồ chung), `stage` và nhãn chữ, `course`, `source`, `contract` (tên hợp đồng), `holdExpiresAt`, `version`.
      - `course`: phase 03 sẽ thêm tên khóa từ ghi danh chưa kết thúc. Ở phase này chỉ trả tên các sản phẩm đang gắn, nối bằng dấu phẩy.
      - `view=mine` (mặc định cho sale) dùng `customerScope`.
-     - `view=pool` trả khách **không** `isHeld`. Tính trong SQL: `c.hold_expires_at <= ? AND NOT EXISTS (SELECT 1 FROM lead WHERE contact_id = c.id AND pipeline = 'learner' AND stage = 'won')`.
+     - `view=pool` trả khách **không** `isHeld`. Tính trong SQL: `(c.owner_user_id IS NULL OR c.hold_expires_at <= ?) AND NOT EXISTS (SELECT 1 FROM lead WHERE contact_id = c.id AND pipeline = 'learner' AND stage = 'won')`, nên khách chưa có owner nằm trong hồ chung. Điều kiện owner không còn là `sale`/`leader` đang hoạt động cũng đưa khách vào hồ chung (xem Task 2.2).
      - Sale không được lọc theo `owner`. Bỏ qua tham số này khi role là `sale`.
      - Admin thấy mọi khách và lọc được theo sale.
      - `q` khớp tên đã gập dấu bằng `foldText` hoặc khớp số điện thoại chuẩn hóa. Tham khảo `searchMatcher` (`queries.ts` dòng 149).
@@ -192,8 +195,8 @@ Mọi lệnh chạy từ `D:\TQD\CRM`.
   2. `GET /learners/:contactId`: trả hồ sơ, tất cả lead `learner` cùng các bước, sản phẩm đang gắn, sản phẩm đã gỡ, đồng ý mới nhất theo từng mục đích, activity.
      - Áp cùng quy tắc che số điện thoại.
      - Sale khác chỉ xem được khi khách ở hồ chung. Lúc đó trả tên, nguồn và stage, không trả activity.
-  3. `GET /partners` và `GET /partners/:id`: trả hợp đồng, các bước và danh sách học viên của hợp đồng, tức là các lead có `partner_contract_id` bằng id này. Danh sách học viên áp quy tắc che số điện thoại.
-  4. `search` (`queries.ts` dòng 454): đảm bảo khách `learner` của sale khác không lộ số điện thoại. Lọc thêm bằng `customerScope` hoặc che `phone`.
+  3. `GET /partners` và `GET /partners/:id` (đọc: sale, leader, admin, director): trả hợp đồng, các bước và danh sách học viên của hợp đồng, tức là các lead có `partner_contract_id` bằng id này. Danh sách học viên áp quy tắc che số điện thoại.
+  4. `search` (`queries.ts:465`): đảm bảo khách `learner` của sale khác không lộ số điện thoại. Lọc thêm bằng `customerScope` hoặc che `phone`.
 - Verify: no verification needed (Task 2.8).
 
 ### Task 2.7: Màn hình web
@@ -201,7 +204,7 @@ Mọi lệnh chạy từ `D:\TQD\CRM`.
 - Goal: sale làm việc được trên web.
 - Target: các page mới, `router.tsx`, `layout.tsx`. Theo mẫu `leads.tsx`, `lead-new.tsx`, `lead-detail.tsx`. Dùng `useApi`, `api.command` và component trong `components/ui.tsx`.
 - Steps:
-  1. Thêm 2 mục nav, roles `['sale','leader','admin']`:
+  1. Thêm 2 mục nav, roles `['sale','leader','director','admin']` (director chỉ đọc, `customerScope` đã cho BGĐ xem toàn tổ chức):
      - "Học viên" (`/learners`)
      - "Đối tác" (`/partners`)
   2. `/learners`:
@@ -238,6 +241,7 @@ Mọi lệnh chạy từ `D:\TQD\CRM`.
      - `2026-11-30T20:00:00.000Z` (03:00 giờ VN ngày 1/12) ra `2027-02-28T20:00:00.000Z` (03:00 giờ VN ngày 1/3). Ca này kiểm việc cộng tháng theo giờ VN, không theo UTC.
      - `2027-11-30T03:00:00.000Z` ra `2028-02-29T03:00:00.000Z` (năm nhuận).
   2. Admissions:
+     - Đổi vai owner sang `academic` thì khách xuất hiện trong `view=pool` và sale khác `claimCustomer` được.
      - Sale A tạo khách, sale B tạo trùng số thì nhận `FORBIDDEN`.
      - Sale B gọi `GET /learners/:id` thì `phone` là `null`.
      - Đặt `hold_expires_at` về quá khứ bằng SQL trực tiếp. Lúc này `view=pool` của B thấy khách. B `claimCustomer` thì OK, lead đổi owner sang B.
@@ -250,6 +254,9 @@ Mọi lệnh chạy từ `D:\TQD\CRM`.
      - `changeStage` trên lead `learner` thì `VALIDATION_FAILED`.
      - Import CSV 3 dòng, một dòng trùng khách đang giữ: xem trước báo 1 lỗi. Commit tạo 2 lead.
      - Gỡ sản phẩm rồi gắn lại: có 2 dòng `customer_product`, chỉ 1 dòng đang gắn.
+     - Sale B gọi `attachProduct` cho khách đang do A giữ thì nhận `FORBIDDEN`.
+     - `GET /learners?view=pool` của B, khi khách còn hạn giữ: khách không có trong danh sách. `GET /learners` của Leader nhóm khác: không thấy khách, hoặc thấy với `phone` null.
+     - Leader nhóm KD1 gọi `changeCustomerOwner` để chuyển khách của nhóm KD2 thì `FORBIDDEN`. Admin chuyển khách thì OK, và `hold_expires_at` mới bằng `holdExpiry` của thời điểm chuyển, cho phép lệch dưới 5 giây.
 - Verify: `pnpm -F @abm/crm test` exit 0. Output có cả hai file test mới và không có `failed`.
 
 ## Failure Protocol

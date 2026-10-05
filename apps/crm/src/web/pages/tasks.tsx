@@ -7,6 +7,13 @@ import { Badge, Empty, ErrorState, Loading, StageBadge } from '../components/ui'
 import { fmtDateTime, fmtDue } from '../format';
 import type { TaskItem } from '../types';
 
+function taskLeadCode(t: TaskItem) {
+  if (t.lead.pipeline === 'learner') {
+    return <Link to="/learners/$contactId" params={{ contactId: t.lead.contactId }}>{t.lead.code}</Link>;
+  }
+  return <Link to="/leads/$leadId" params={{ leadId: t.lead.id }}>{t.lead.code}</Link>;
+}
+
 const GROUPS = [
   { id: 'overdue', label: 'Quá hạn', tone: 'danger' },
   { id: 'today', label: 'Hôm nay', tone: 'warn' },
@@ -47,7 +54,7 @@ export function TasksPage() {
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div className="row-wrap"><span style={{ fontWeight: 500 }}>{t.title}</span>{t.isNextAction && <Badge tone="accent">Next Action</Badge>}</div>
                         <div className="small muted">
-                          <Link to="/leads/$leadId" params={{ leadId: t.lead.id }}>{t.lead.code}</Link> · {t.lead.contactName}{t.lead.accountName ? ` · ${t.lead.accountName}` : ''}
+                          {taskLeadCode(t)} · {t.lead.contactName}{t.lead.accountName ? ` · ${t.lead.accountName}` : ''}
                           {actor.role !== 'sale' && ` · ${t.assignee.name}`}
                         </div>
                       </div>
@@ -69,7 +76,7 @@ export function TasksPage() {
             {q.data.map((t) => (
               <li key={t.id}>
                 <div style={{ fontWeight: 500 }}>{t.title}</div>
-                <div className="small muted"><Link to="/leads/$leadId" params={{ leadId: t.lead.id }}>{t.lead.code}</Link> · xong {fmtDateTime(t.completedAt)}{t.outcome ? ` · ${t.outcome}` : ''}</div>
+                <div className="small muted">{taskLeadCode(t)} · xong {fmtDateTime(t.completedAt)}{t.outcome ? ` · ${t.outcome}` : ''}</div>
               </li>
             ))}
           </ul>
