@@ -37,12 +37,31 @@ Docs dùng chữ “numeric sender ID” theo nhóm Telegram; Lark dùng `ou_...
 | 6.0 | PASS | Lệnh grep nguyên văn dưới Git Bash trả `1`, exit 0; kiểm lại sau cập nhật báo cáo. |
 | 6.1 | PASS (bằng chứng dispatch trước) | Health HTTP 200, body `{"status":"ok","protocol":3}`; thời điểm bên dưới. Không gọi lại GoClaw trong dispatch LOCAL ONLY. |
 | 6.2 | PASS | Lệnh nguyên văn dưới Git Bash exit 0, `Tests 8 passed (8)`, không có `failed`; typecheck exit 0. |
-| 6.3 | PENDING-HUMAN | Chưa chạy Verify remote 401; cần user duyệt tài nguyên Cloudflare. |
-| 6.4 | PENDING-HUMAN | Chưa có Verify dashboard và ảnh; cần backup, user thao tác. |
+| 6.3 | PASS (trừ ADMIN_TOKEN do user đặt) | 2026-10-04 12:05, user duyệt. Xem mục Live run bên dưới. |
+| 6.4 | IN-PROGRESS | Backup GoClaw xong; chờ user tạo nhóm CRM-PoC và cấu hình. |
 | 6.5 | PENDING-HUMAN | Chưa chạy query remote và 5 kịch bản Lark thật. |
 | 6.6 | PENDING-HUMAN (có điều kiện) | Chỉ chạy khi 6.5 fail hoặc không có đường Lark; chưa có payload tin cậy hay 5 PASS. |
 | 6.7 | PENDING-HUMAN | Chưa có 3 PASS live; cần user duyệt kill switch và chọn downtime. |
 | 6.8 | PASS (Verify tài liệu); dọn dẹp PENDING-HUMAN | Marker ADR-PROPOSED đúng một dòng, báo cáo tồn tại. Không nhận cơ chế accepted; coordinator sở hữu commit. |
+
+## Live run 2026-10-04
+
+User duyệt Task 6.3 và tự tạo nhóm CRM-PoC cho 6.4/6.5.
+
+- Kiểm lại trước live: GoClaw health 200 `{"status":"ok","protocol":3}`; HEAD `549c81fd…` không đổi; test PoC 8/8, typecheck sạch.
+- D1 `abm-crm-poc-identity` tạo mới, kiểm rỗng (chỉ `_cf_KV`), ghi ID vào `wrangler.jsonc`, áp migration `0001_init.sql`.
+- Worker: https://abm-crm-poc-identity.ngulongyquan.workers.dev (version `1d0d2f0a`).
+- `scripts/issue-tokens.mjs` chạy một lần, ghi `.tokens.local` (đã ignore, không mở/in). Ba hash nạp qua `seed-poc.local.sql` cùng user thử A/B (email `@example.test`) và nhóm `CRM-PoC` (department `poc-sales`). Remote có 3 credential A, B, CRM-PoC, `revoked=0`.
+- Verify: `POST /mcp` không token → 401; `GET /health` → 200; `POST /admin/kill-switch` → 401 (chưa có `ADMIN_TOKEN`, fail closed).
+- 14:21: user tạo nhóm Lark test mới, thêm bot và nhắn trong nhóm. GoClaw (kiểm chỉ đọc qua API và `logs\gateway.log`) ghi nhận contact nhóm `oc_e9424f03…` (instance `abm-lark`) và người gửi `ou_0b7b5…`. Phiên được lập theo nhóm (`agent:tqd:abm-lark:group:<chat_id>`, user `group:abm-lark:<chat_id>`), tức mặc định GoClaw coi cả nhóm là một người. Instance `abm-lark` hiện gắn agent `tqd` (cùng agent với Telegram), `group_policy: open`, `require_mention: true`. Chưa có MCP CRM, chưa merge contact.
+- 14:25–14:30, user đồng ý 5 bước (Task 6.4):
+  1. Backup `D:\Goclaw\backups\goclaw-db-before-crm-lark-agent-20261004-142549.dump` (707 952 byte, pg_dump exit 0), `config-before-crm-lark-agent-20261004-142549.json`, và cấu hình instance `abm-lark-instance-before-crm-lark-agent-20261004-142549.json` (agent cũ `tqd`, `group_policy: open`).
+  2. Agent `crm-sales-poc` (id `01a105ce-7600-…`, predefined, `deepseek-flash`, tool `datetime`).
+  3. MCP server `abm-crm-poc` (id `01a105ce-94e7-70d7-9ffe-a472a71dcdfe`), `streamable-http` tới `<PoC Worker>/mcp`, `settings.require_user_credentials: true`; grant cho `crm-sales-poc` với `tool_allow: [whoami, add_activity]`.
+  4. Instance `abm-lark` chuyển sang `crm-sales-poc`. Telegram `tqd` giữ nguyên. Thử `group_policy: allowlist` + `group_allow_from: [oc_…]` thất bại về thiết kế: với Feishu, allowlist so **sender** (`ou_…`), không so chat ID (`bot_policy.go` `checkGroupPolicy`), nên mọi tin nhóm sẽ bị chặn. Đã đổi sang `group_policy: pairing`: nhóm lạ nhận mã ghép, chỉ nhóm được duyệt (`goclaw pairing approve <code>`, cần `GOCLAW_GATEWAY_TOKEN` trong env) mới chạy.
+  5. Merge contact: `ou_0b7b5…` (user, Admin Trịnh Quang Dũng) → tenant user `crm-poc-a`; contact nhóm `oc_e9424…` → `crm-poc-group`. Token đặt bằng `scripts/connect-goclaw-users.mjs` do user chạy (script không in token). Admin là subject A: user quyết định Admin được ghi dữ liệu qua GoClaw để test.
+- 14:35, kịch bản 1 lần đầu: bot trả lời "không có lệnh whoami"; log `tools_provided=1` (chỉ `datetime`). Nguyên nhân đã đọc trong source: tool MCP per-user được nạp theo `resolveActorUserID` (`internal/agent/loop_mcp_user.go`), trong nhóm trả **sender open_id thô** (`ou_…`), không dùng `CredentialUserID` của contact merge. Nhắn riêng thì dùng `UserID` đã thay bằng `user_id` tenant (`crm-poc-a`). Vì vậy credential phải đặt theo cả hai khóa: `crm-poc-a` (DM) và `ou_0b7b5…` (nhóm). Đã đặt thêm khóa `ou_…` cho A lúc 14:40. Hệ quả: trong nhóm, credential nhóm `crm-poc-group` không bao giờ được dùng; người chưa có credential theo `ou_` sẽ không thấy tool CRM (từ chối, không mạo danh).
+- Backup GoClaw trước 6.4: `D:\Goclaw\backups\goclaw-db-before-crm-poc-20261004-120758.dump` (704 456 byte, pg_dump exit 0) và `config-before-crm-poc-20261004-120758.json`.
 
 ## Build GoClaw và patch
 
@@ -132,7 +151,7 @@ Mọi bước dưới đây chưa chạy. Trước mỗi thay đổi remote/GoCl
 
 | Kịch bản | Kỳ vọng | Kết quả live |
 | --- | --- | --- |
-| A @bot nhóm gọi whoami | subject user A | PENDING-HUMAN |
+| A @bot nhóm gọi whoami | subject user A | PASS 14:37: log `mcp.pool.user.connected … user:ou_0b7b5… tools=2`, `tool call … mcp_abm_crm_poc__whoami`; bot trả lời `user / A / poc-a@example.test` |
 | B @bot nhóm gọi whoami | subject user B | PENDING-HUMAN |
 | C chưa liên kết @bot gọi whoami | group CRM-PoC hoặc từ chối, không A/B | PENDING-HUMAN |
 | B ghi lead L1 và giả acting_user A | activity actor B, audit initiating_user B | PENDING-HUMAN |

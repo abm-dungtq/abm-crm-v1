@@ -1,0 +1,1 @@
+- [ABM CRM settled decisions](project-abm-crm-settled-decisions.md) — fixed user decisions (2026-10-03), GoClaw instance facts, GoClaw MCP has no per-user identity injection

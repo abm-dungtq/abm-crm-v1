@@ -79,7 +79,7 @@ Claude không tự gửi tin lên Lark và không bao giờ in token, secret hay
 
   3. Áp migration: `npx wrangler d1 migrations apply abm-crm-eval --remote`.
   4. Chạy lại hai lệnh đếm ở bước 2. Số phải bằng trước (dòng outbox cũ vẫn `pending`, không bị gửi).
-  5. Deploy: `pnpm -F @abm/crm deploy`.
+  5. Deploy: `pnpm -F @abm/crm run deploy` (không dùng `pnpm deploy`, đó là lệnh có sẵn của pnpm).
 - Success criteria:
   - `GET https://abm-crm-eval.ngulongyquan.workers.dev/api/health` trả 200;
   - `POST /api/mcp` không Bearer trả 401;
@@ -228,3 +228,9 @@ If `kongming` cannot be spawned in this environment, STOP and report the same fa
 - Dữ liệu: D1 Time Travel về bookmark trước migrate, hoặc nhập file backup ở Task 5.2.
 - GoClaw: khôi phục từ backup ở Task 5.4, hoặc gỡ grant `abm-crm-main`.
 - Khẩn cấp: Admin bật kill switch trên web.
+
+## Tiến độ thực hiện (2026-10-04)
+
+- 5.2 xong lúc 16:03–16:05: secret Lark đã nạp; backup `exports/abm-crm-eval-before-0004-20261004-1603.sql` (226 175 byte, 3 dòng approval); 0004 áp remote; approval 3 → 3, outbox 2 `pending` → 2 `pending`; index `approval_status`, `approval_lead_kind_status` còn; deploy version `e7d7cf35`; health 200, `/api/mcp` không Bearer 401, có Origin 403. Kill switch đang tắt (bot chưa ghi được).
+- 5.4 phần GoClaw xong lúc 16:06: backup `D:\Goclaw\backups\goclaw-db-before-crm-main-mcp-20261004-160645.dump` (759 118 byte, pg_dump exit 0) và `config-before-crm-main-mcp-20261004-160645.json`; MCP server `abm-crm-main` id `01a1062a-ce8f-77b8-a16d-d69a39b2a6f5`; grant cho `crm-sales-poc` đủ 11 tool. Grant `abm-crm-poc` vẫn giữ, chờ user quyết.
+- Chưa chạy script cấp chìa khóa: CRM remote chưa có ai liên kết Lark (mọi `app_user` đang `unlinked`).

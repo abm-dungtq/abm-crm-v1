@@ -1,0 +1,3 @@
+INSERT INTO user (id, email) VALUES ('A', 'poc-a@example.test'), ('B', 'poc-b@example.test');
+INSERT INTO lark_group_binding (id, department) VALUES ('CRM-PoC', 'poc-sales');
+INSERT INTO mcp_credential (token_hash, subject_type, subject_id) VALUES ('89873da06a8625476fd6c9a5baf06c3284b8f45fd2a4371ba72aa40503421810','user','A'), ('b73178e7e3ccacdc831c5474ed8fe308b37b4daa97172b9673dde8ac6d119efa','user','B'), ('520bd8c5e3e68d6c5f7061bad663381069892f02f1c11ba862ce2c4c47bdab5a','group','CRM-PoC');

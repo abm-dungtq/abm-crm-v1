@@ -6,7 +6,7 @@
     "binding": "DB",
     "database_name": "abm-crm-poc-identity",
     // Replace only with the ID returned by the user-approved d1 create command.
-    "database_id": "00000000-0000-0000-0000-000000000000",
+    "database_id": "95a6697e-e450-481e-8e83-2ff6caed47d1",
     "migrations_dir": "migrations"
   }]
 }
