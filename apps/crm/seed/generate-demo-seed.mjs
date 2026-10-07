@@ -2,8 +2,41 @@
 // phone numbers and .example emails). Times are SQL expressions relative to the moment the
 // seed runs, so SLA states (on time / warning / breach) are meaningful right after seeding.
 // Usage: node seed/generate-demo-seed.mjs
+//        node seed/generate-demo-seed.mjs --demo-eval   (writes seed/b2b-demo.sql; does not touch demo.sql)
 import { writeFileSync } from 'node:fs';
 import { addWorkingMinutes, workingMinutesBetween } from '../../../packages/contracts/src/working-time.ts';
+
+const demoEval = process.argv.includes('--demo-eval');
+const SKIP_TABLES = new Set(['organization', 'department', 'team', 'app_user']);
+const USER_SLOT = {
+  'u-admin': 'slot-admin-1',
+  'u-bgd': 'slot-head-1',
+  'u-head': 'slot-head-1',
+  'u-hung': 'slot-leader-1',
+  'u-lan': 'slot-sale-1',
+  'u-long': 'slot-sale-2',
+  'u-mai': 'slot-leader-2',
+  'u-huy': 'slot-sale-3',
+};
+const KEEP_ID = new Set(['org-abm', 'dep-kd', 'team-kd1', 'team-kd2']);
+
+function remapId(value) {
+  if (!demoEval || typeof value !== 'string') return value;
+  if (USER_SLOT[value]) return USER_SLOT[value];
+  if (KEEP_ID.has(value)) return value;
+  if (/^(?:lead|ct|acc|ac|task|aud|apv)-\d/.test(value) || /^cp-[pe]-/.test(value) || /^act-/.test(value)) return `demo-${value}`;
+  return value;
+}
+
+function remapRow(row) {
+  const next = {};
+  for (const [key, value] of Object.entries(row)) {
+    if (key === 'payload_json' && typeof value === 'string') {
+      next[key] = value.replaceAll('u-long', USER_SLOT['u-long']).replaceAll('u-lan', USER_SLOT['u-lan']);
+    } else next[key] = remapId(value);
+  }
+  return next;
+}
 
 const ts = (hours) => `strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '${hours >= 0 ? '+' : ''}${hours} hours')`;
 // Working-hour offsets (first-contact SLA) are absolute instants computed now, so regenerate right before seeding.
@@ -20,8 +53,10 @@ const wh = (hours) => {
 const q = (v) => (v === null || v === undefined ? 'NULL' : typeof v === 'number' ? String(v) : (v.startsWith?.('strftime(') || /^'\d{4}-/.test(v)) ? v : `'${String(v).replaceAll("'", "''")}'`);
 const out = [];
 const insert = (table, row) => {
-  const cols = Object.keys(row);
-  out.push(`INSERT INTO ${table} (${cols.join(', ')}) VALUES (${cols.map((c) => q(row[c])).join(', ')});`);
+  if (demoEval && SKIP_TABLES.has(table)) return;
+  const written = demoEval ? remapRow(row) : row;
+  const cols = Object.keys(written);
+  out.push(`INSERT INTO ${table} (${cols.join(', ')}) VALUES (${cols.map((c) => q(written[c])).join(', ')});`);
 };
 const stamp = (h = -720) => ({ created_at: ts(h), updated_at: ts(h) });
 
@@ -45,6 +80,8 @@ for (const [id, name, role, dep, team] of users) {
     email: `${id.slice(2)}@demo.abm.example`, role, ...stamp() });
 }
 const teamOf = Object.fromEntries(users.map(([id, , , , team]) => [id, team]));
+// Live eval has one sale on kd1 and two sales on kd2. The users array above stays the demo.sql roster.
+if (demoEval) teamOf['u-long'] = 'team-kd2';
 
 // [code, contact, title, company, tax, industry, city, source, need, owner, stage, hoursInStage, value, extra]
 const leads = [
@@ -83,7 +120,7 @@ for (const [contact, title, company, tax, industry, city, source, need, owner, s
   const createdH = Math.min(hoursInStage, -1) - (stage === 'new' ? 0 : 24 * 3);
   if (company) insert('account', { id: accountId, organization_id: 'org-abm', name: company, tax_code: tax, industry, city, ...stamp(createdH) });
   insert('contact', { id: contactId, organization_id: 'org-abm', display_name: contact, job_title: title, ...stamp(createdH) });
-  if (company) out.push(`INSERT INTO account_contact (id, account_id, contact_id, role, is_primary, created_at) VALUES ('ac-${n}', '${accountId}', '${contactId}', 'Người liên hệ chính', 1, ${ts(createdH)});`);
+  if (company) out.push(`INSERT INTO account_contact (id, account_id, contact_id, role, is_primary, created_at) VALUES ('${remapId(`ac-${n}`)}', '${remapId(accountId)}', '${remapId(contactId)}', 'Người liên hệ chính', 1, ${ts(createdH)});`);
   const phone = `0900${String(100000 + n).slice(-6)}`;
   insert('contact_point', { id: `cp-p-${n}`, contact_id: contactId, type: 'phone', value: phone, normalized_value: phone, created_at: ts(createdH) });
   const email = `lienhe${n}@khachhang-demo.example`;
@@ -146,8 +183,15 @@ for (const a of approvals) {
   insert('approval', { id: a.id, kind: a.kind, lead_id: leadRefs[a.lead].id, target_version: 1, payload_json: JSON.stringify(a.payload),
     reason: a.reason, status: 'pending', requested_by_user_id: a.by, requested_by_kind: a.kindBy, created_at: ts(a.h), updated_at: ts(a.h) });
 }
-insert('lead_counter', { organization_id: 'org-abm', next_value: n + 1 });
+if (demoEval) {
+  out.push(`INSERT INTO lead_counter (organization_id, next_value) VALUES ('org-abm', ${n + 1}) ON CONFLICT(organization_id) DO UPDATE SET next_value=excluded.next_value;`);
+} else {
+  insert('lead_counter', { organization_id: 'org-abm', next_value: n + 1 });
+}
 
-const header = '-- Generated by seed/generate-demo-seed.mjs. Synthetic data only; do not edit by hand.\n';
-writeFileSync(new URL('./demo.sql', import.meta.url), header + out.join('\n') + '\n');
-console.log(`demo.sql: ${n} leads, ${out.length} statements`);
+const header = demoEval
+  ? `-- generated-at: ${new Date().toISOString()}\n-- Generated by seed/generate-demo-seed.mjs --demo-eval. Synthetic data only; do not edit by hand.\n-- No organization, department, team, or app_user rows. Staff ids are slot tokens swapped at load.\n`
+  : '-- Generated by seed/generate-demo-seed.mjs. Synthetic data only; do not edit by hand.\n';
+const fileName = demoEval ? 'b2b-demo.sql' : 'demo.sql';
+writeFileSync(new URL(`./${fileName}`, import.meta.url), header + out.join('\n') + '\n');
+console.log(`${fileName}: ${n} leads, ${out.length} statements`);

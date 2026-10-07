@@ -7,7 +7,7 @@ export default defineConfig(async () => ({
     remoteBindings: false,
     miniflare: {
       // Tests default to the evaluation identity path; password-mode tests opt in per request.
-      bindings: { TEST_MIGRATIONS: await readD1Migrations('./migrations'), AUTH_MODE: '' },
+      bindings: { TEST_MIGRATIONS: await readD1Migrations('./migrations'), AUTH_MODE: '', DEMO_EXPORT: process.env.DEMO_EXPORT ?? '' },
     },
   })],
   test: { include: ['test/**/*.test.ts'] },
