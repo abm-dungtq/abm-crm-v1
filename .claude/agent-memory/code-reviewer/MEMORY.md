@@ -1,0 +1,1 @@
+- [Running tests in this env](env-running-tests.md) — Bash needs node on PATH for vitest; node_modules reads are hook-blocked; node:sqlite for offline seed sims
