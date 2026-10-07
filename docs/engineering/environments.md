@@ -21,3 +21,14 @@ Tên logical theo `abm-crm-<env>`; tài nguyên nhiều loại thêm suffix: `ab
 Chạy local (`wrangler dev`) mặc định ở chế độ mật khẩu: chạy `pnpm db:migrate:local`, `pnpm db:seed:local`, rồi `node scripts/bootstrap-admin.mjs --local --email admin@demo.abm.example` (cwd `apps/crm`) để có mật khẩu tạm Admin trong `apps/crm/.admin-bootstrap.local`. Muốn màn hình chọn vai trò demo thì tạo `apps/crm/.dev.vars` (đã ignore) với hai dòng `AUTH_MODE=` và `DEMO_MODE=1`.
 
 Kiểm env/binding/destination trước deploy, migration, export/restore. Login/tạo tài nguyên remote và thay đổi GoClaw là bước user-only theo execution guide. Xem [deploy](deployment-baseline.md), [security](../security/security-baseline.md) và [backup](../operations/backup-restore-plan.md).
+
+## Dữ liệu mẫu cho eval
+
+Toàn bộ dữ liệu mẫu là dữ liệu giả, nằm trong `apps/crm/seed/`:
+
+- `b2b-demo.sql`: 22 lead B2B mẫu. `learner-demo.sql`: 24 học viên, hợp đồng đối tác, lớp, buổi học, điểm danh, học phí.
+- `import-200-learners-sample.csv`: file nhập thử 200 học viên giả.
+- `load-eval-demo.mjs`: nạp mẫu lên eval (mặc định chạy thử, `--check` kiểm, `--apply` ghi). Cần file ánh xạ vị trí giữ chỗ sang id nhân viên thật, đặt ngoài repo, và `--backup-file` ngoài repo. File SQL chỉ hợp lệ trong 60 phút sau khi tạo.
+- `cleanup-demo.sql`: xóa toàn bộ dữ liệu mẫu (id bắt đầu `demo-`).
+
+Tạo lại hai file SQL và hướng dẫn chi tiết: `plans/reports/grok-261007-sample-data-impl.md`. `seed/demo.sql` là dữ liệu của test, không sửa.
