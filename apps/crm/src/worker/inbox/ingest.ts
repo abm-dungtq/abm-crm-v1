@@ -1,0 +1,150 @@
+import type { BridgeEvent } from '@abm/contracts';
+import { isConstraintFailure } from '../guarded-tx';
+import { ATTACHMENT_ONLY_TEXT, appendStaffContext, markMessageSent, scheduleCompletion } from './conversation-flow';
+
+/**
+ * Applies events pushed by the Zalo bridge sidecar. Each event is handled on its own: a failure or an
+ * unknown account counts as rejected and never fails the batch, so the sidecar does not resend it forever.
+ * Message text is never logged.
+ */
+
+type MessageEvent = Extract<BridgeEvent, { type: 'message' }>;
+type AccountStatusEvent = Extract<BridgeEvent, { type: 'account_status' }>;
+type QrEvent = Extract<BridgeEvent, { type: 'qr' }>;
+type GroupListEvent = Extract<BridgeEvent, { type: 'group_list' }>;
+
+/** A fromSelf event without command id matches a system message sent within this window. */
+const ECHO_WINDOW_MS = 120_000;
+/** Outgoing messages are at most this long, so a longer echo is compared by its leading part. */
+const ECHO_MATCH_CHARS = 2000;
+
+export interface IngestResult { accepted: number; rejected: number }
+
+interface AccountRow { id: string; organization_id: string }
+interface ConversationRef { id: string; mode: 'ai' | 'human' | 'paused' }
+
+const findZaloAccount = (db: D1Database, externalId: string) =>
+  db.prepare("SELECT id, organization_id FROM channel_account WHERE channel = 'zalo' AND external_id = ?").bind(externalId).first<AccountRow>();
+
+const upsertConversation = (db: D1Database, account: AccountRow, threadId: string, kind: 'direct' | 'group', displayName: string | null, now: string) =>
+  db.prepare(`INSERT INTO conversation (id, organization_id, channel_account_id, kind, external_thread_id, display_name, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(channel_account_id, external_thread_id) DO UPDATE SET kind = excluded.kind,
+      display_name = COALESCE(excluded.display_name, conversation.display_name), updated_at = excluded.updated_at
+    RETURNING id, mode`).bind(crypto.randomUUID(), account.organization_id, account.id, kind, threadId, displayName, now, now);
+
+/** Rule 4: true when a fromSelf event is the channel's echo of a message the system sent; that message is marked sent. */
+async function applyEcho(db: D1Database, conversationId: string, event: MessageEvent, now: Date) {
+  if (event.commandId) {
+    const sent = await db.prepare(`SELECT m.id FROM channel_command cc
+      JOIN message m ON m.id = json_extract(cc.payload_json, '$.messageId')
+      WHERE cc.id = ? AND m.conversation_id = ?`).bind(event.commandId, conversationId).first<{ id: string }>();
+    if (sent) {
+      await markMessageSent(db, sent.id, event.msgId);
+      return true;
+    }
+  }
+  // An empty text would be contained in every body.
+  if (event.text.length === 0) return false;
+  const needle = Array.from(event.text).slice(0, ECHO_MATCH_CHARS).join('');
+  const since = new Date(now.getTime() - ECHO_WINDOW_MS).toISOString();
+  const match = await db.prepare(`SELECT id FROM message
+    WHERE conversation_id = ? AND direction = 'out' AND status IN ('pending', 'sent') AND created_at >= ? AND instr(body, ?) > 0
+    ORDER BY created_at DESC LIMIT 1`).bind(conversationId, since, needle).first<{ id: string }>();
+  if (!match) return false;
+  await markMessageSent(db, match.id, event.msgId);
+  return true;
+}
+
+async function ingestMessage(db: D1Database, event: MessageEvent, now: Date) {
+  const account = await findZaloAccount(db, event.accountExternalId);
+  if (!account) return false;
+  const nowIso = now.toISOString();
+  // A direct thread is named after the customer; our own messages and group members do not rename it.
+  const name = !event.fromSelf && event.threadKind === 'direct' && event.senderName.trim() ? event.senderName.trim() : null;
+  const conv = await upsertConversation(db, account, event.threadId, event.threadKind, name, nowIso).first<ConversationRef>();
+  if (!conv) throw new Error('conversation upsert returned no row');
+  if (event.fromSelf && await applyEcho(db, conv.id, event, now)) return true;
+
+  const messageId = crypto.randomUUID();
+  const inserted = await db.prepare(`INSERT INTO message
+      (id, conversation_id, direction, sender_kind, sender_external_id, external_msg_id, body, attachments_json, status, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(conversation_id, external_msg_id) DO NOTHING`)
+    .bind(messageId, conv.id, event.fromSelf ? 'out' : 'in', event.fromSelf ? 'staff_phone' : 'customer', event.senderExternalId,
+      event.msgId, event.text, event.attachments?.length ? JSON.stringify(event.attachments) : null,
+      event.fromSelf ? 'sent' : 'received', nowIso)
+    .run();
+  if (inserted.meta.changes === 0) return true;
+  const text = event.text || ATTACHMENT_ONLY_TEXT;
+
+  if (event.fromSelf) {
+    // Someone answered from the shared phone: people take over; the assignee stays as it is.
+    await db.batch([
+      db.prepare(`UPDATE conversation SET mode = 'human', last_staff_reply_at = ?, last_message_at = ?, updated_at = ? WHERE id = ?`)
+        .bind(nowIso, nowIso, nowIso, conv.id),
+      appendStaffContext(db, conv.id, `Nhân viên: ${text}`, nowIso),
+    ]);
+    return true;
+  }
+
+  const updates = [db.prepare('UPDATE conversation SET last_inbound_at = ?, last_message_at = ?, updated_at = ? WHERE id = ?')
+    .bind(nowIso, nowIso, nowIso, conv.id)];
+  if (conv.mode !== 'ai') updates.push(appendStaffContext(db, conv.id, `Khách: ${text}`, nowIso));
+  await db.batch(updates);
+  if (conv.mode === 'ai') await scheduleCompletion(db, conv.id, messageId, event.text, now);
+  return true;
+}
+
+async function ingestAccountStatus(db: D1Database, event: AccountStatusEvent, now: string) {
+  const connected = event.status === 'connected';
+  try {
+    const res = await db.prepare(`UPDATE channel_account SET status = ?, last_seen_at = ?, updated_at = ?,
+        external_id = CASE WHEN ? = 1 THEN ? ELSE external_id END,
+        qr_image = CASE WHEN ? = 1 THEN NULL ELSE qr_image END,
+        qr_expires_at = CASE WHEN ? = 1 THEN NULL ELSE qr_expires_at END
+      WHERE id = ?`)
+      .bind(event.status, now, now, connected ? 1 : 0, event.accountExternalId ?? null, connected ? 1 : 0, connected ? 1 : 0, event.accountId)
+      .run();
+    return res.meta.changes === 1;
+  } catch (error) {
+    if (!isConstraintFailure(error)) throw error;
+    // The Zalo number already belongs to another channel account; this one cannot take it.
+    await db.prepare("UPDATE channel_account SET status = 'error', last_seen_at = ?, updated_at = ? WHERE id = ?")
+      .bind(now, now, event.accountId).run();
+    return false;
+  }
+}
+
+async function ingestQr(db: D1Database, event: QrEvent, now: string) {
+  const res = await db.prepare(`UPDATE channel_account SET qr_image = ?, qr_expires_at = ?, status = 'qr_pending', last_seen_at = ?, updated_at = ?
+    WHERE id = ?`).bind(event.imageDataUrl, event.expiresAt, now, now, event.accountId).run();
+  return res.meta.changes === 1;
+}
+
+async function ingestGroupList(db: D1Database, event: GroupListEvent, now: string) {
+  const account = await findZaloAccount(db, event.accountExternalId);
+  if (!account) return false;
+  if (event.groups.length) {
+    await db.batch(event.groups.map((g) => upsertConversation(db, account, g.threadId, 'group', g.name.trim() || null, now)));
+  }
+  return true;
+}
+
+export async function ingestEvents(db: D1Database, events: BridgeEvent[]): Promise<IngestResult> {
+  const result: IngestResult = { accepted: 0, rejected: 0 };
+  for (const event of events) {
+    const now = new Date();
+    try {
+      const ok = event.type === 'message' ? await ingestMessage(db, event, now)
+        : event.type === 'account_status' ? await ingestAccountStatus(db, event, now.toISOString())
+        : event.type === 'qr' ? await ingestQr(db, event, now.toISOString())
+        : await ingestGroupList(db, event, now.toISOString());
+      result[ok ? 'accepted' : 'rejected'] += 1;
+    } catch (error) {
+      console.error('bridge_event_error', event.type, error instanceof Error ? error.message : 'unknown');
+      result.rejected += 1;
+    }
+  }
+  return result;
+}

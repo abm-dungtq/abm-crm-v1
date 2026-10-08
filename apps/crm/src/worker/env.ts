@@ -19,6 +19,8 @@ export interface Env {
   FB_VERIFY_TOKEN?: string;
   /** JSON object mapping Facebook page id to its page access token. */
   FB_PAGE_TOKENS?: string;
+  /** Public base URL of the CRM used in links sent outside the web app; defaults to the request origin. */
+  APP_URL?: string;
 }
 
 /** Authenticated principal. Always resolved server-side; never taken from a request body. */

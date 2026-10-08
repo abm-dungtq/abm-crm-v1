@@ -1,7 +1,7 @@
 ---
 phase: 3
 title: "API sidecar và luồng hội thoại trong Worker"
-status: pending
+status: completed
 priority: P1
 effort: "2d"
 dependencies: [2]
