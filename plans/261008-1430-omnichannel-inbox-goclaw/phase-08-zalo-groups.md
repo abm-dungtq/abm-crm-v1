@@ -1,7 +1,7 @@
 ---
 phase: 8
 title: "Nhóm Zalo: tóm tắt và tin định kỳ"
-status: pending
+status: completed
 priority: P2
 effort: "2d"
 dependencies: [4, 6]

@@ -18,8 +18,11 @@ const LIST_POLL_MS = 5000;
 /** Page size of GET /inbox/conversations. */
 const CONVERSATION_PAGE = 50;
 
-/** Roles the Worker lets assign a conversation to anyone; a sale only claims an unassigned one. */
-const MANAGER_ROLES: readonly string[] = ['leader', 'head', 'director', 'admin'];
+/**
+ * Manager roles on the Worker: they assign a conversation to anyone (a sale only claims an unassigned one),
+ * approve group schedules and let an opted-out group receive recurring posts again.
+ */
+export const MANAGER_ROLES: readonly string[] = ['leader', 'head', 'director', 'admin'];
 
 type AssigneeTab = 'mine' | 'none' | 'all';
 const ASSIGNEE_TABS: [AssigneeTab, string][] = [['mine', 'Của tôi'], ['none', 'Chưa giao'], ['all', 'Tất cả']];
