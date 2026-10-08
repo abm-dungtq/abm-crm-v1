@@ -44,12 +44,14 @@ async function applyEcho(db: D1Database, conversationId: string, event: MessageE
       return true;
     }
   }
-  // An empty text would be contained in every body.
+  // An empty text would be contained in every body. The text must be whole lines of the sent body, so a short
+  // staff reply such as "ok" is not taken for an echo of a bot message that merely contains it.
   if (event.text.length === 0) return false;
   const needle = Array.from(event.text).slice(0, ECHO_MATCH_CHARS).join('');
   const since = new Date(now.getTime() - ECHO_WINDOW_MS).toISOString();
   const match = await db.prepare(`SELECT id FROM message
-    WHERE conversation_id = ? AND direction = 'out' AND status IN ('pending', 'sent') AND created_at >= ? AND instr(body, ?) > 0
+    WHERE conversation_id = ? AND direction = 'out' AND status IN ('pending', 'sent') AND created_at >= ?
+      AND instr(char(10) || body || char(10), char(10) || ? || char(10)) > 0
     ORDER BY created_at DESC LIMIT 1`).bind(conversationId, since, needle).first<{ id: string }>();
   if (!match) return false;
   await markMessageSent(db, match.id, event.msgId);

@@ -67,9 +67,12 @@ export const markMessageSent = (db: D1Database, messageId: string, externalMsgId
 /** GoClaw session of a conversation: `<channel>:<account external id>:<thread id>`. */
 const goclawUserId = (conv: ConversationRow) => `${conv.channel}:${conv.account_external_id ?? conv.channel_account_id}:${conv.external_thread_id}`;
 
-/** Rule 1: the bot replies only in a direct conversation in `ai` mode of an enabled account while the customer bot is on. */
+/**
+ * Rule 1: the bot replies only in a direct conversation in `ai` mode of an enabled account while the customer bot is on.
+ * An account without an agent has no bot to reply with.
+ */
 const botMayReply = (conv: ConversationRow) =>
-  conv.bot_switch === 0 && conv.bot_enabled === 1 && conv.kind === 'direct' && conv.mode === 'ai';
+  conv.agent_key !== null && conv.bot_switch === 0 && conv.bot_enabled === 1 && conv.kind === 'direct' && conv.mode === 'ai';
 
 /**
  * Queues the bot's reply to a customer message: extends the pending reply of the conversation with this

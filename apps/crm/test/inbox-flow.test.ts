@@ -125,6 +125,16 @@ test('the echo of a message the bot just sent is not stored again and keeps ai m
   expect(await db.prepare("SELECT external_msg_id FROM message WHERE id = 'm-bot'").first()).toEqual({ external_msg_id: 'zm-echo' });
 });
 
+test('a short staff reply contained in a recent bot message is not taken for its echo', async () => {
+  await ingest(message());
+  const conv = await conversation();
+  await db.prepare(`INSERT INTO message (id, conversation_id, direction, sender_kind, body, status, created_at)
+    VALUES ('m-bot', ?, 'out', 'bot', 'Xin chào bạn, ok nhé', 'sent', ?)`).bind(conv.id, new Date(Date.now() - 30_000).toISOString()).run();
+  await ingest(message({ fromSelf: true, senderExternalId: 'zalo-acc-1', text: 'ok', msgId: 'zm-ok' }));
+  expect((await conversation()).mode).toBe('human');
+  expect((await messages(conv.id)).at(-1)).toMatchObject({ sender_kind: 'staff_phone', body: 'ok' });
+});
+
 test('an empty fromSelf text never matches an earlier message as its echo', async () => {
   await ingest(message());
   const conv = await conversation();
