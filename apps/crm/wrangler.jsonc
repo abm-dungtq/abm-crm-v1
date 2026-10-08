@@ -12,7 +12,9 @@
   "vars": {
     // Email + password sign-in (docs/adr/adr-006-password-login.md). The demo user picker
     // (DEMO_MODE=1) is for tests and local runs only and is off whenever AUTH_MODE is set.
-    "AUTH_MODE": "password"
+    "AUTH_MODE": "password",
+    // Base of links in inbox Lark notices; cron runs have no request origin to fall back on.
+    "APP_URL": "https://abm-crm-eval.ngulongyquan.workers.dev"
   },
   "d1_databases": [
     {
