@@ -12,6 +12,11 @@ Cả ba agent dùng provider/model `deepseek-flash`. Agent `crm-extractor` và `
 
 Thay đổi cấu hình GoClaw (tạo agent, sửa prompt, đổi model) cần user đồng ý trước, theo cổng đồng ý trong [plan Inbox](../../plans/261008-1430-omnichannel-inbox-goclaw/plan.md).
 
+## API key của sidecar và giới hạn tốc độ
+
+- **Scope `operator.read` + `operator.write`, KHÔNG gắn owner.** Sidecar gọi `POST /v1/chat/completions` (POST cần vai trò operator; `operator.write` cho vai trò đó) và đặt `X-GoClaw-User-Id` riêng cho từng hội thoại. Một API key có `owner_id` khiến GoClaw bỏ qua header này và luôn dùng owner làm user, nên mọi khách sẽ chung một phiên (lẫn ngữ cảnh giữa các khách). Khi tạo key, để trống owner.
+- **Giới hạn tốc độ.** `gateway.rate_limit_rpm` mặc định 20 request/phút cho mỗi bearer token, burst 5, áp cho endpoint chat completions. Vượt giới hạn, GoClaw trả 429; sidecar báo lần chạy đó lỗi và Worker chạy lại sau 2 phút (backoff `2^attempts` phút), nên khách chờ lâu và có thể bị chuyển cho nhân viên. Trước khi mở pilot, nâng `gateway.rate_limit_rpm` (ví dụ 120). Giá trị này áp cho mọi token, không riêng key sidecar.
+
 ## 1. Agent khách hàng
 
 Vai trò: tư vấn viên và chăm sóc khách hàng của ABM trên Zalo/Fanpage.

@@ -64,8 +64,9 @@ Không in token, secret, mã QR, cookie Zalo hay nội dung các file `*.local*`
 - Steps: hỏi đồng ý; backup DB GoClaw theo `D:\Goclaw\docs\goclaw-system-overview.md` mục 6; bằng Web UI GoClaw hoặc API admin:
   1. Tạo agent khách hàng (ví dụ `sale-tu-van`) và agent `crm-extractor`, `group-summarizer` theo `docs/integrations/goclaw-inbox-agents.md`, provider/model `deepseek-flash`; hai agent sau không có tool.
   2. Thêm provider embedding OpenAI và đặt system config `embedding.provider`, `embedding.model = text-embedding-3-small`.
-  3. Tạo API key ứng dụng mới cho sidecar (scope `operator.read`, `operator.write`); user lưu vào `apps/zalo-bridge/.env` là `GOCLAW_API_KEY`.
+  3. Tạo API key ứng dụng mới cho sidecar (scope `operator.read`, `operator.write`, **không gắn owner**: key có owner ghi đè `X-GoClaw-User-Id` và mọi khách dùng chung một phiên); user lưu vào `apps/zalo-bridge/.env` là `GOCLAW_API_KEY`.
   4. Đảm bảo kênh `zalo_personal` và `facebook` native trong GoClaw đều **tắt**.
+  5. Đặt hoặc kiểm tra system config `gateway.rate_limit_rpm` (mặc định 20/phút mỗi token, burst 5) đủ cho sidecar, ví dụ 120; ghi lại giá trị trước và sau. Đây là thay đổi cấu hình GoClaw, nằm trong lần đồng ý của task này.
 - Verify: gọi thử từ máy Windows `POST http://127.0.0.1:18790/v1/chat/completions` với `model = goclaw:crm-extractor` và một transcript mẫu không có dữ liệu thật → HTTP 200 và nội dung parse được JSON.
 
 ### Task 10.5 — Sidecar trên Windows (Đợt A)
