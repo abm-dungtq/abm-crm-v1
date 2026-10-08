@@ -60,3 +60,9 @@ User đồng ý trong chat ("cook xong thì push lên cloudflare") cho backup, m
 3. **Task 10.5:** user điền `apps/zalo-bridge/.env`; cài Scheduled Task (cần đồng ý).
 4. **Task 10.6:** thêm 2 số Zalo pilot, quét QR (cần đồng ý).
 5. **Task 10.7:** chạy 6 kịch bản thật.
+
+## Ghi chú sau rà soát
+- Cron mỗi phút hiện không làm gì: các bảng inbox đều rỗng, `/api/bridge/*` trả 401 khi chưa có `BRIDGE_SECRET`, nên không có lệnh nào được tạo và không gọi Lark.
+- Mỗi lần `wrangler secret put` tạo ra một version Worker mới. Sau Task 10.2 cần ghi lại version id mới; mốc rollback `be2f8e11` vẫn dùng được.
+- `LARK_INBOX_CHAT_ID` là điều kiện bắt buộc trước khi quét QR ở Task 10.6.
+- Task 10.4 không phụ thuộc secret của CRM nên có thể chạy song song với Task 10.2. Không đổi `rate_limit_rpm` (việc này khởi động lại GoClaw) khi luồng 1457 đang test.

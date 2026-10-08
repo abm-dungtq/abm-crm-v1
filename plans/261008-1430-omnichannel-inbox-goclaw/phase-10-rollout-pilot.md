@@ -1,7 +1,7 @@
 ---
 phase: 10
 title: "Triển khai eval và pilot"
-status: pending
+status: in-progress
 priority: P1
 effort: "1d + 2 tuần pilot"
 dependencies: [2, 3, 4, 5, 6, 7, 8, 9]
@@ -80,6 +80,7 @@ Không in token, secret, mã QR, cookie Zalo hay nội dung các file `*.local*`
 
 ### Task 10.6 — Kết nối 2 số pilot (Đợt A)
 
+- Precondition: `secret list` đã có `LARK_INBOX_CHAT_ID`. Nếu thiếu, lệnh `send_lark` thử lại 5 lần (khoảng 62 phút) rồi chuyển `failed`, và thông báo handoff bị mất.
 - Steps: admin thêm 2 số trong trang Tài khoản kênh, gắn agent khách hàng; hỏi đồng ý; quét QR bằng điện thoại giữ số; dặn nhân viên không đăng nhập Zalo PC/Web trên hai số này.
 - Verify: `SELECT display_name, status FROM channel_account` trên remote: hai dòng `connected`.
 
