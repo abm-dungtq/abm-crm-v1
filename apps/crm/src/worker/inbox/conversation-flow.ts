@@ -17,6 +17,9 @@ export const STAFF_TEXT_MAX = 2000;
 /** Text that stands in for a message carrying only attachments. */
 export const ATTACHMENT_ONLY_TEXT = '[Tệp đính kèm]';
 export const CANCELLED_REPLY_PREFIX = '[Bot trả lời bị huỷ vì đã chuyển người] ';
+export const BOT_OFF_REPLY_PREFIX = '[Bot trả lời bị huỷ vì bot đang tắt] ';
+/** Error of a queued bot message dropped because the customer bot or the account's bot was turned off. */
+export const BOT_OFF = 'BOT_OFF';
 
 const HANDOFF_MARKER = /^\[HANDOFF:\s*(.+?)\]\s*$/m;
 const HANDOFF_MARKER_ALL = new RegExp(HANDOFF_MARKER.source, 'gm');
@@ -174,8 +177,16 @@ async function requestExtraction(db: D1Database, conversationId: string) {
 }
 
 /**
- * Applies GoClaw's reply: strips handoff marker lines, sends the remaining text while the conversation is
- * still in `ai` mode (otherwise keeps it as a cancelled system note), then hands off when a marker was present.
+ * SQL condition (on a message `m` and its account `a`) that holds when a queued bot message may no longer go out:
+ * the customer bot switch is on or the account's bot is off. Staff messages are never held back.
+ */
+export const BOT_SEND_BLOCKED_SQL = `m.sender_kind = 'bot'
+  AND (a.bot_enabled = 0 OR COALESCE((SELECT enabled FROM customer_bot_switch WHERE id = 1), 0) = 1)`;
+
+/**
+ * Applies GoClaw's reply: strips handoff marker lines and sends the remaining text while the bot may still reply
+ * (rule 1, re-checked now because the switch or the mode can change while GoClaw thinks). Otherwise the text is
+ * kept as a cancelled system note and nothing is sent. A marker hands off only after a reply that was allowed.
  */
 export async function applyCompletionResult(db: D1Database, env: Pick<Env, 'APP_URL'>, conversationId: string, replyText: string, origin?: string): Promise<FlowOutcome> {
   const conv = await loadConversation(db, conversationId);
@@ -183,10 +194,11 @@ export async function applyCompletionResult(db: D1Database, env: Pick<Env, 'APP_
   const marker = HANDOFF_MARKER.exec(replyText);
   const text = replyText.replace(HANDOFF_MARKER_ALL, '').trim();
   const now = new Date().toISOString();
-  if (conv.mode !== 'ai') {
+  if (!botMayReply(conv)) {
     if (text) {
+      const prefix = conv.mode !== 'ai' ? CANCELLED_REPLY_PREFIX : BOT_OFF_REPLY_PREFIX;
       await db.prepare(`INSERT INTO message (id, conversation_id, direction, sender_kind, body, status, created_at)
-        VALUES (?, ?, 'out', 'system', ?, 'failed', ?)`).bind(crypto.randomUUID(), conv.id, CANCELLED_REPLY_PREFIX + text, now).run();
+        VALUES (?, ?, 'out', 'system', ?, 'failed', ?)`).bind(crypto.randomUUID(), conv.id, prefix + text, now).run();
     }
     return { workerCommandQueued: false };
   }

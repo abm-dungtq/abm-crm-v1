@@ -245,6 +245,21 @@ test('a retry after a failed part sends only the parts Messenger has not accepte
   expect((await messages(conv.id)).find((m) => m.id === bot.id)).toMatchObject({ status: 'sent', external_msg_id: 'm_out_1' });
 });
 
+test('a queued bot reply is not sent to Messenger once the customer bot is off; a staff reply still is', async () => {
+  const conv = await customerConversation();
+  const calls = fakeGraph();
+  await applyCompletionResult(db, testEnv, conv.id, 'Xin chào');
+  await db.prepare('UPDATE customer_bot_switch SET enabled = 1 WHERE id = 1').run();
+  const staff = await web('u-lan', 'POST', `/inbox/conversations/${conv.id}/messages`, { text: 'Em Lan đây ạ' });
+  expect(staff.status).toBe(200);
+  await processWorkerCommands(testEnv);
+  expect(calls.map((c) => c.body.message.text)).toEqual(['Em Lan đây ạ']);
+  const sends = await commands('send_messenger');
+  const botSend = sends.find((c) => c.payload.text === 'Xin chào');
+  expect(botSend).toMatchObject({ status: 'failed', result: { error: 'BOT_OFF' } });
+  expect((await messages(conv.id)).find((m) => m.sender_kind === 'bot')).toMatchObject({ status: 'failed' });
+});
+
 test('a Graph error fails the attempt with the Graph code and never records the token', async () => {
   const conv = await customerConversation();
   const errors = vi.spyOn(console, 'error');

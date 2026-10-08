@@ -200,6 +200,26 @@ test('a reply that arrives after people took over is kept as a cancelled note an
   expect((await messages(conv.id)).at(-1)).toMatchObject({ sender_kind: 'system', body: '[Bot trả lời bị huỷ vì đã chuyển người] Học phí là 5 triệu ạ' });
 });
 
+test('a reply that arrives after the customer bot or the account bot was turned off is not sent', async () => {
+  await ingest(message());
+  const conv = await conversation();
+  expect(await commands('run_completion')).toHaveLength(1);
+  const outgoing = async () => (await messages(conv.id)).filter((m) => m.direction === 'out');
+
+  await db.prepare('UPDATE customer_bot_switch SET enabled = 1 WHERE id = 1').run();
+  await applyCompletionResult(db, { APP_URL }, conv.id, 'Học phí là 5 triệu ạ\n[HANDOFF: khách hỏi giá]');
+  expect(await commands('send_zalo')).toHaveLength(0);
+  expect((await outgoing()).filter((m) => m.sender_kind === 'bot')).toHaveLength(0);
+  expect(await outgoing()).toEqual([expect.objectContaining({ sender_kind: 'system', status: 'failed', body: '[Bot trả lời bị huỷ vì bot đang tắt] Học phí là 5 triệu ạ' })]);
+  expect(await conversation()).toMatchObject({ mode: 'ai' });
+
+  await db.prepare('UPDATE customer_bot_switch SET enabled = 0 WHERE id = 1').run();
+  await db.prepare("UPDATE channel_account SET bot_enabled = 0 WHERE id = 'ca-1'").run();
+  await applyCompletionResult(db, { APP_URL }, conv.id, 'Học phí là 5 triệu ạ');
+  expect(await commands('send_zalo')).toHaveLength(0);
+  expect((await outgoing()).filter((m) => m.sender_kind === 'bot')).toHaveLength(0);
+});
+
 test('after returning to ai the next bot turn starts with what staff discussed', async () => {
   await ingest(message());
   const conv = await conversation();

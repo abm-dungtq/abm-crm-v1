@@ -4,8 +4,8 @@ import { bridgeCommandResultSchema, bridgeEventsBodySchema } from '@abm/contract
 import type { z } from 'zod';
 import { background } from '../env';
 import { bridgeAuth, type BridgeBindings } from './bridge-auth';
-import { applyCompletionResult, markMessageSent } from './conversation-flow';
-import { MAX_COMMAND_ATTEMPTS, claimCommands, completeCommand, failCommand, type ClaimedCommand } from './dispatcher';
+import { BOT_OFF, BOT_SEND_BLOCKED_SQL, applyCompletionResult, markMessageSent } from './conversation-flow';
+import { MAX_COMMAND_ATTEMPTS, claimCommands, completeCommand, dropBotSend, failCommand, type ClaimedCommand } from './dispatcher';
 import { applyGroupSummaryResult } from './group-summaries';
 import { ingestEvents } from './ingest';
 import { applyExtractionResult } from './intake';
@@ -53,17 +53,29 @@ async function failSend(db: D1Database, command: { id: string; kind: string; pay
   return moved;
 }
 
-/** Claims due bridge commands; sends of a paused account are failed instead of handed out. */
+/**
+ * Claims due bridge commands. A bot message is dropped for good while the customer bot switch is on or the account's
+ * bot is off (a late bot reply must not go out when the bot comes back); other sends of a paused account are failed
+ * and retried by backoff. Neither is handed out.
+ */
 async function claimDeliverable(db: D1Database): Promise<ClaimedCommand[]> {
   const claimed = await claimCommands(db, 'bridge', CLAIM_LIMIT);
-  const accountIds = [...new Set(claimed.filter((c) => SEND_KINDS.has(c.kind) && c.channelAccountId).map((c) => c.channelAccountId!))];
-  if (!accountIds.length) return claimed;
+  const sends = claimed.filter((c) => SEND_KINDS.has(c.kind) && c.channelAccountId);
+  if (!sends.length) return claimed;
+  const accountIds = [...new Set(sends.map((c) => c.channelAccountId!))];
   const paused = await db.prepare(`SELECT id FROM channel_account WHERE send_paused = 1 AND id IN (${accountIds.map(() => '?').join(', ')})`)
     .bind(...accountIds).all<{ id: string }>();
   const pausedIds = new Set(paused.results.map((r) => r.id));
+  const blocked = await db.prepare(`SELECT cc.id FROM channel_command cc
+      JOIN message m ON m.id = json_extract(cc.payload_json, '$.messageId') JOIN channel_account a ON a.id = cc.channel_account_id
+    WHERE cc.id IN (SELECT value FROM json_each(?)) AND ${BOT_SEND_BLOCKED_SQL}`)
+    .bind(JSON.stringify(sends.map((c) => c.id))).all<{ id: string }>();
+  const blockedIds = new Set(blocked.results.map((r) => r.id));
   const deliverable: ClaimedCommand[] = [];
   for (const command of claimed) {
-    if (SEND_KINDS.has(command.kind) && command.channelAccountId && pausedIds.has(command.channelAccountId)) {
+    if (blockedIds.has(command.id)) {
+      await dropBotSend(db, command, BOT_OFF);
+    } else if (SEND_KINDS.has(command.kind) && command.channelAccountId && pausedIds.has(command.channelAccountId)) {
       await failSend(db, command, command.attempts, 'ACCOUNT_PAUSED');
     } else {
       deliverable.push(command);

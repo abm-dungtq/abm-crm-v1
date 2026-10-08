@@ -156,6 +156,23 @@ export async function cancelCommand(db: D1Database, id: string, error: string): 
 }
 
 /**
+ * Gives up a claimed send for good without retry and marks its message failed; used for a bot message that may no
+ * longer go out. False when the claim no longer owns the command.
+ */
+export async function dropBotSend(db: D1Database, command: Pick<ClaimedCommand, 'id' | 'attempts' | 'payload'>, error: string): Promise<boolean> {
+  const res = await db.prepare(`UPDATE channel_command SET status = 'failed', lease_expires_at = NULL, result_json = ?, updated_at = ?
+    WHERE id = ? AND status = 'claimed' AND attempts = ?`)
+    .bind(JSON.stringify({ error }), new Date().toISOString(), command.id, command.attempts)
+    .run();
+  if (res.meta.changes !== 1) return false;
+  const messageId = (command.payload as { messageId?: unknown } | null)?.messageId;
+  if (typeof messageId === 'string') {
+    await db.prepare("UPDATE message SET status = 'failed' WHERE id = ? AND status = 'pending'").bind(messageId).run();
+  }
+  return true;
+}
+
+/**
  * Outgoing customer messages one channel account has sent, is sending or has waiting to send since
  * `dayStartIso` (start of the current day in Vietnam time, as an ISO instant). A claimed or done send counts
  * by claim time, a waiting one by creation time, so sends queued while the bridge is offline still use up the cap.

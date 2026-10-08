@@ -1,6 +1,6 @@
 import type { Env } from '../env';
-import { markMessageSent } from './conversation-flow';
-import { MAX_COMMAND_ATTEMPTS, cancelCommand, completeCommand, failCommand, type ClaimedCommand } from './dispatcher';
+import { BOT_OFF, BOT_SEND_BLOCKED_SQL, markMessageSent } from './conversation-flow';
+import { MAX_COMMAND_ATTEMPTS, cancelCommand, completeCommand, dropBotSend, failCommand, type ClaimedCommand } from './dispatcher';
 
 /**
  * Sends `send_messenger` commands through the Graph Send API from the Worker (ADR-010). Messenger only lets a
@@ -148,7 +148,7 @@ async function recordProgress(db: D1Database, command: ClaimedCommand, progress:
 
 interface SendRow {
   status: string; sender_kind: string; body: string; conversation_id: string; external_thread_id: string;
-  last_inbound_at: string | null; channel: string; page_id: string | null; send_paused: number;
+  last_inbound_at: string | null; channel: string; page_id: string | null; send_paused: number; bot_blocked: number;
 }
 
 /**
@@ -160,7 +160,7 @@ export async function sendMessengerCommand(env: MessengerSendEnv, command: Claim
   const messageId = (command.payload as { messageId?: unknown } | null)?.messageId;
   if (typeof messageId !== 'string' || !messageId) return failSend(db, command, null, 'INVALID_PAYLOAD');
   const row = await db.prepare(`SELECT m.status, m.sender_kind, m.body, m.conversation_id, c.external_thread_id, c.last_inbound_at,
-      a.channel, a.external_id AS page_id, a.send_paused
+      a.channel, a.external_id AS page_id, a.send_paused, (${BOT_SEND_BLOCKED_SQL}) AS bot_blocked
     FROM message m JOIN conversation c ON c.id = m.conversation_id JOIN channel_account a ON a.id = c.channel_account_id
     WHERE m.id = ? AND m.direction = 'out'`).bind(messageId).first<SendRow>();
   if (!row || row.channel !== 'facebook' || !row.page_id) return failSend(db, command, messageId, 'INVALID_PAYLOAD');
@@ -171,6 +171,11 @@ export async function sendMessengerCommand(env: MessengerSendEnv, command: Claim
   const unsentParts = progress !== null && progress.sentChunks < parts.length;
   if (row.status === 'failed' || (row.status === 'sent' && !unsentParts)) {
     await completeCommand(db, command.id, command.attempts, { sent: row.status === 'sent' });
+    return;
+  }
+  // A bot message no longer goes out once the bot is off, not even later when it is back on.
+  if (row.bot_blocked === 1) {
+    await dropBotSend(db, command, BOT_OFF);
     return;
   }
   if (row.send_paused === 1) return failSend(db, command, messageId, 'ACCOUNT_PAUSED');

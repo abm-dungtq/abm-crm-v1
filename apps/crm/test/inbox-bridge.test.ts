@@ -185,6 +185,37 @@ test('a send for a paused account is not handed out', async () => {
   expect(JSON.parse(row!.result_json)).toEqual({ error: 'ACCOUNT_PAUSED' });
 });
 
+test('a queued bot send is dropped once the customer bot or the account bot is off; staff sends still go out', async () => {
+  await bridge('/events', { body: { events: [messageEvent()] } });
+  const conv = (await db.prepare('SELECT id FROM conversation').first<{ id: string }>())!;
+  const now = new Date().toISOString();
+  await db.prepare(`INSERT INTO message (id, conversation_id, direction, sender_kind, sent_by_user_id, body, status, created_at)
+    VALUES ('m-bot', ?1, 'out', 'bot', NULL, 'Chào bạn', 'pending', ?2), ('m-staff', ?1, 'out', 'staff_web', 'u-lan', 'Em Lan đây', 'pending', ?2),
+      ('m-bot-2', ?1, 'out', 'bot', NULL, 'Học phí 5 triệu', 'pending', ?2)`).bind(conv.id, now).run();
+  await db.prepare('DELETE FROM channel_command').run();
+  const send = (messageId: string) =>
+    enqueueCommand(db, { kind: 'send_zalo', target: 'bridge', channelAccountId: 'ca-1', conversationId: conv.id, payload: { messageId, text: 'x' } });
+  const bot = await send('m-bot');
+  const staff = await send('m-staff');
+
+  await db.prepare('UPDATE customer_bot_switch SET enabled = 1 WHERE id = 1').run();
+  const res = await bridge('/commands?wait=0');
+  expect(res.json.data.map((c: { id: string }) => c.id)).toEqual([staff]);
+  const row = await db.prepare('SELECT status, result_json FROM channel_command WHERE id = ?').bind(bot).first<{ status: string; result_json: string }>();
+  expect(row!.status).toBe('failed');
+  expect(JSON.parse(row!.result_json)).toEqual({ error: 'BOT_OFF' });
+  expect(await db.prepare("SELECT status FROM message WHERE id = 'm-bot'").first()).toEqual({ status: 'failed' });
+
+  // Turning the switch back off does not revive it; the account's own bot switch blocks the same way.
+  await db.prepare('UPDATE customer_bot_switch SET enabled = 0 WHERE id = 1').run();
+  await db.prepare("UPDATE channel_account SET bot_enabled = 0 WHERE id = 'ca-1'").run();
+  const bot2 = await send('m-bot-2');
+  expect((await bridge('/commands?wait=0')).json.data).toEqual([]);
+  expect(await db.prepare('SELECT status FROM channel_command WHERE id = ?').bind(bot).first()).toEqual({ status: 'failed' });
+  expect(await db.prepare('SELECT status FROM channel_command WHERE id = ?').bind(bot2).first()).toEqual({ status: 'failed' });
+  expect(await db.prepare("SELECT status FROM message WHERE id = 'm-bot-2'").first()).toEqual({ status: 'failed' });
+});
+
 test('a send result marks the message sent with its Zalo id', async () => {
   await bridge('/events', { body: { events: [messageEvent()] } });
   const conv = (await db.prepare('SELECT id FROM conversation').first<{ id: string }>())!;
