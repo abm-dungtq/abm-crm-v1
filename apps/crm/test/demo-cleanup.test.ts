@@ -222,6 +222,42 @@ test('rows outside the demo chain stay, and free text is not a delete key', asyn
   expect(await db.prepare('SELECT next_value FROM fee_counter').first()).toMatchObject({ next_value: 51 });
 }, 120_000);
 
+test('an inbox conversation linked to a demo customer is unlinked and kept, and its intakes are removed', async () => {
+  await loadSample();
+  const lead = await db.prepare(`SELECT id, contact_id FROM lead WHERE id LIKE 'demo-%' LIMIT 1`).first<{ id: string; contact_id: string }>();
+  const otherContact = await db.prepare(`SELECT id FROM contact WHERE id LIKE 'demo-%' AND id <> ? LIMIT 1`)
+    .bind(lead?.contact_id ?? '').first<{ id: string }>();
+  expect(lead && otherContact).toBeTruthy();
+  const classifiedIntake = '88888888-8888-4888-8888-888888888881';
+  const pendingIntake = '88888888-8888-4888-8888-888888888882';
+  await db.batch([
+    db.prepare(`INSERT INTO channel_account (id, organization_id, channel, external_id, display_name, created_at, updated_at)
+      VALUES ('ca-keep', 'org-abm', 'zalo', 'zalo-acc-keep', 'Số tư vấn', ?, ?)`).bind(STAMP, STAMP),
+    db.prepare(`INSERT INTO conversation (id, organization_id, channel_account_id, kind, external_thread_id, contact_id, created_at, updated_at)
+      VALUES ('conv-keep', 'org-abm', 'ca-keep', 'direct', 'cust-keep', ?, ?, ?)`).bind(lead!.contact_id, STAMP, STAMP),
+    db.prepare(`INSERT INTO conversation (id, organization_id, channel_account_id, kind, external_thread_id, contact_id, created_at, updated_at)
+      VALUES ('conv-keep-2', 'org-abm', 'ca-keep', 'direct', 'cust-keep-2', ?, ?, ?)`).bind(otherContact!.id, STAMP, STAMP),
+    db.prepare(`INSERT INTO message (id, conversation_id, direction, sender_kind, body, status, created_at)
+      VALUES ('msg-keep', 'conv-keep', 'in', 'customer', 'Chào bạn', 'received', ?)`).bind(STAMP),
+    db.prepare(`INSERT INTO lead_intake (id, organization_id, conversation_id, contact_id, fields_json, status, lead_id, classified_by_user_id,
+        classified_at, created_at, updated_at)
+      VALUES (?, 'org-abm', 'conv-keep', ?, '{}', 'classified', ?, 'u-sale-1', ?, ?, ?)`).bind(classifiedIntake, lead!.contact_id, lead!.id, STAMP, STAMP, STAMP),
+    db.prepare(`INSERT INTO lead_intake (id, organization_id, conversation_id, contact_id, fields_json, status, created_at, updated_at)
+      VALUES (?, 'org-abm', 'conv-keep-2', ?, '{}', 'pending', ?, ?)`).bind(pendingIntake, otherContact!.id, STAMP, STAMP),
+    db.prepare(`INSERT INTO audit_log (id, actor_user_id, actor_kind, command, entity, entity_id, created_at)
+      VALUES ('99999999-9999-4999-8999-999999999991', 'u-sale-1', 'human', 'inbox.classifyIntake', 'lead_intake', ?, ?)`).bind(classifiedIntake, STAMP),
+    db.prepare(`INSERT INTO audit_log (id, actor_user_id, actor_kind, command, entity, entity_id, created_at)
+      VALUES ('99999999-9999-4999-8999-999999999992', 'u-sale-1', 'human', 'inbox.linkIntakeContact', 'lead_intake', ?, ?)`).bind(pendingIntake, STAMP),
+  ]);
+  await runCleanup();
+  await assertOnlyOrgStructure();
+  expect(await db.prepare('SELECT id, contact_id FROM conversation ORDER BY id').all().then((r) => r.results)).toEqual([
+    { id: 'conv-keep', contact_id: null }, { id: 'conv-keep-2', contact_id: null },
+  ]);
+  expect(await countOf('message')).toBe(1);
+  expect(await countOf('lead_intake')).toBe(0);
+}, 120_000);
+
 async function sampleTargetCounts() {
   const tables: Record<string, number> = {};
   for (const table of BUSINESS_EMPTY_TABLES) tables[table] = await countOf(table);

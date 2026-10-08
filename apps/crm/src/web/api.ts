@@ -1,6 +1,12 @@
 import { useRef } from 'react';
 import { useMutation, useQuery, useQueryClient, type UseQueryOptions } from '@tanstack/react-query';
-import type { ApiError, CommandName } from '@abm/contracts';
+import type { ApiError, CommandName, ConversationMode } from '@abm/contracts';
+import type {
+  AssignResult, ChannelAccount, ChannelAccountUpdate, ClassifyIntakeResult, ConversationFilter, CustomerBotSwitch, GroupSchedule,
+  GroupScheduleInput, InboxConversation, InboxMessage, InboxSettings, InboxSettingsUpdate, IntakeField, IntakePipeline, IntakeStatus,
+  IntakeValues, LeadIntake, RosterMember, SendMessageResult, SetModeResult, ZaloGroup, ZaloGroupUpdate,
+} from './types';
+import { conversationsPath } from './inbox-format';
 
 const USER_KEY = 'abm-crm-demo-user';
 
@@ -50,6 +56,7 @@ export const api = {
   post: <T>(path: string, body: unknown = {}) => request<T>(path, { method: 'POST', body: JSON.stringify(body) }),
   patch: <T>(path: string, body: unknown) => request<T>(path, { method: 'PATCH', body: JSON.stringify(body) }),
   put: <T>(path: string, body: unknown) => request<T>(path, { method: 'PUT', body: JSON.stringify(body) }),
+  delete: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
   command: <T>(name: CommandName, input: unknown, idempotencyKey: string) =>
     request<T>(`/commands/${name}`, { method: 'POST', body: JSON.stringify(input), headers: { 'Idempotency-Key': idempotencyKey } }),
 };
@@ -91,3 +98,69 @@ export function useCommand<I, T = unknown>(name: CommandName) {
     },
   });
 }
+
+// ---------- omnichannel inbox ----------
+const enc = encodeURIComponent;
+
+export const listConversations = (filter: ConversationFilter = {}) => api.get<InboxConversation[]>(conversationsPath(filter));
+export const getConversation = (id: string) => api.get<InboxConversation>(`/inbox/conversations/${enc(id)}`);
+/** Latest page oldest first, or with `after` only the messages created after that instant. */
+export const listMessages = (id: string, after?: string) =>
+  api.get<InboxMessage[]>(`/inbox/conversations/${enc(id)}/messages${after ? `?after=${enc(after)}` : ''}`);
+/** `clientMessageId` identifies one composed message; resending it after a lost response never sends twice. */
+export const sendMessage = (id: string, text: string, clientMessageId: string) =>
+  api.post<SendMessageResult>(`/inbox/conversations/${enc(id)}/messages`, { text, clientMessageId });
+export const setMode = (id: string, mode: ConversationMode) => api.post<SetModeResult>(`/inbox/conversations/${enc(id)}/mode`, { mode });
+export const listAccounts = () => api.get<ChannelAccount[]>('/inbox/accounts');
+/** A Facebook Page is added with `channel: 'facebook'` and its page id as `externalId`; without `channel` a Zalo number is added. */
+export const createAccount = (input: { displayName: string; agentKey: string; channel?: 'zalo' | 'facebook'; externalId?: string }) =>
+  api.post<ChannelAccount>('/inbox/accounts', input);
+export const updateAccount = (id: string, input: ChannelAccountUpdate) => api.patch<ChannelAccount>(`/inbox/accounts/${enc(id)}`, input);
+export const connectAccount = (id: string) => api.post<{ commandId: string }>(`/inbox/accounts/${enc(id)}/connect`);
+export const disconnectAccount = (id: string) => api.post<{ commandId: string }>(`/inbox/accounts/${enc(id)}/disconnect`);
+export const getCustomerBotSwitch = () => api.get<CustomerBotSwitch>('/inbox/customer-bot-switch');
+export const setCustomerBotSwitch = (enabled: boolean) => api.put<CustomerBotSwitch>('/inbox/customer-bot-switch', { enabled });
+
+// ---------- inbox assignment ----------
+export const assignConversation = (id: string, userId: string) =>
+  api.post<AssignResult>(`/inbox/conversations/${enc(id)}/assign`, { userId });
+export const getInboxSettings = () => api.get<InboxSettings>('/inbox/settings');
+export const updateInboxSettings = (input: InboxSettingsUpdate) => api.put<InboxSettings>('/inbox/settings', input);
+export const listRoster = () => api.get<RosterMember[]>('/inbox/roster');
+export const setOnDuty = (userId: string, onDuty: boolean) => api.put<{ userId: string; onDuty: boolean }>('/inbox/roster', { userId, onDuty });
+
+// ---------- lead intake ----------
+export const listIntakes = (filter: { status?: IntakeStatus; conversationId?: string } = {}) => {
+  const params = new URLSearchParams();
+  if (filter.status) params.set('status', filter.status);
+  if (filter.conversationId) params.set('conversationId', filter.conversationId);
+  const query = params.toString();
+  return api.get<LeadIntake[]>(`/inbox/intakes${query ? `?${query}` : ''}`);
+};
+/** `input` is the createLead / createLearnerLead form; the server sets `source` from the channel. */
+export const classifyIntake = (id: string, pipeline: IntakePipeline, input: Record<string, unknown>) =>
+  api.post<ClassifyIntakeResult>(`/inbox/intakes/${enc(id)}/classify`, { pipeline, input });
+export const discardIntake = (id: string) => api.post<{ intakeId: string }>(`/inbox/intakes/${enc(id)}/discard`);
+export const confirmIntakeField = (id: string, field: IntakeField) =>
+  api.post<{ intakeId: string; fields: IntakeValues }>(`/inbox/intakes/${enc(id)}/confirm-field`, { field });
+export const linkIntakeContact = (id: string, contactId: string) =>
+  api.post<{ intakeId: string; contactId: string }>(`/inbox/intakes/${enc(id)}/link-contact`, { contactId });
+/** "Cập nhật CRM": queues an extraction of a direct conversation now. */
+export const requestExtraction = (conversationId: string) =>
+  api.post<{ commandId: string }>(`/inbox/conversations/${enc(conversationId)}/extract`);
+
+// ---------- Zalo groups and recurring posts ----------
+/** Groups of the organization, optionally of one channel account. */
+export const listGroups = (account?: string) => api.get<ZaloGroup[]>(`/inbox/groups${account ? `?account=${enc(account)}` : ''}`);
+export const updateGroup = (id: string, input: ZaloGroupUpdate) => api.patch<ZaloGroup>(`/inbox/groups/${enc(id)}`, input);
+/** Schedules of the organization, newest first, optionally of one group. */
+export const listGroupSchedules = (conversationId?: string) =>
+  api.get<GroupSchedule[]>(`/inbox/group-schedules${conversationId ? `?conversationId=${enc(conversationId)}` : ''}`);
+export const createGroupSchedule = (input: GroupScheduleInput & { conversationId: string }) =>
+  api.post<GroupSchedule>('/inbox/group-schedules', input);
+export const updateGroupSchedule = (id: string, input: Partial<GroupScheduleInput>) =>
+  api.patch<GroupSchedule>(`/inbox/group-schedules/${enc(id)}`, input);
+export const deleteGroupSchedule = (id: string) => api.delete<{ id: string }>(`/inbox/group-schedules/${enc(id)}`);
+export type GroupScheduleAction = 'submit' | 'approve' | 'pause';
+export const moveGroupSchedule = (id: string, action: GroupScheduleAction) =>
+  api.post<GroupSchedule>(`/inbox/group-schedules/${enc(id)}/${action}`);

@@ -2,6 +2,8 @@ import { applyD1Migrations, env } from 'cloudflare:test';
 
 /** Child tables first, parents last, so deletes never trip a foreign key. */
 export const TABLES = [
+  'channel_command', 'message', 'lead_intake', 'group_schedule', 'inbox_roster', 'conversation', 'channel_account',
+  'customer_bot_switch', 'inbox_setting',
   'privacy_request',
   'payment_allocation', 'payment', 'charge',
   'attendance', 'trial_booking', 'enrollment', 'class_session', 'class_teacher', 'class_group', 'course',
@@ -16,5 +18,7 @@ export const TABLES = [
 export async function resetDb(db: D1Database, seedSql: string) {
   await applyD1Migrations(db, env.TEST_MIGRATIONS);
   await db.batch(TABLES.map((t) => db.prepare(`DELETE FROM ${t}`)));
+  await db.prepare('INSERT OR IGNORE INTO customer_bot_switch (id, enabled) VALUES (1, 0)').run();
+  await db.prepare("INSERT OR IGNORE INTO inbox_setting (id, assign_mode, sla_minutes) VALUES (1, 'manual', 15)").run();
   await db.batch(seedSql.split('\n').filter((line) => line.startsWith('INSERT')).map((line) => db.prepare(line)));
 }

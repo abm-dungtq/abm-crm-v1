@@ -32,10 +32,19 @@ async function tenantToken(env: LarkEnv) {
   return auth.tenant_access_token;
 }
 
+async function sendMessage(env: LarkEnv, receiveIdType: 'open_id' | 'chat_id', receiveId: string, text: string) {
+  await larkPost(`${LARK_BASE}/im/v1/messages?receive_id_type=${receiveIdType}`,
+    { receive_id: receiveId, msg_type: 'text', content: JSON.stringify({ text }) }, await tenantToken(env));
+}
+
 /** Sends a plain-text direct message from the bot app to one user. */
 export async function sendText(env: LarkEnv, openId: string, text: string) {
-  await larkPost(`${LARK_BASE}/im/v1/messages?receive_id_type=open_id`,
-    { receive_id: openId, msg_type: 'text', content: JSON.stringify({ text }) }, await tenantToken(env));
+  await sendMessage(env, 'open_id', openId, text);
+}
+
+/** Sends a plain-text message from the bot app to a group chat the bot belongs to. */
+export async function sendToChat(env: LarkEnv, chatId: string, text: string) {
+  await sendMessage(env, 'chat_id', chatId, text);
 }
 
 /** Maps each email (lower-cased) to its open_id, or null when Lark has no such user. */

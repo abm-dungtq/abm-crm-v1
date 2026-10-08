@@ -3,6 +3,10 @@ import { COMMANDS, SEARCH_MAX_LENGTH, type ApiResult, type CommandName } from '@
 import { isDemoMode, requireActor } from './actor';
 import { adminRoutes } from './admin-routes';
 import { notifyCommitted } from './approval-notify';
+import { bridgeRoutes } from './inbox/bridge-routes';
+import { facebookWebhookRoutes } from './inbox/facebook-webhook';
+import { inboxRoutes } from './inbox/inbox-routes';
+import { runScheduled } from './inbox/scheduled';
 import { mcpRoutes } from './mcp-routes';
 import { canSeeOverview, overviewData } from './overview';
 import { publicAuth, sessionAuth } from './auth-routes';
@@ -14,7 +18,7 @@ import { chargeGuide, contactLedger, listCharges, listUnallocatedPayments, orgBa
 import { canReadLearners, learnerDetail, listLearners, listPartners, partnerDetail } from './learner-queries';
 import { learnerReports } from './learner-reports';
 import { listPrivacyRequests } from './privacy';
-import type { AppBindings } from './env';
+import type { AppBindings, Env } from './env';
 import {
   accountDetail, adminOverview, canReadAudit, dashboard, leadDetail, listAccounts, listApprovals,
   listAudit, listLeads, leadPage, accountPage, listProducts, listTasks, search, teamMembers, canReadProducts,
@@ -35,6 +39,10 @@ app.onError((error, c) => {
 app.get('/health', (c) => c.json({ ok: true }));
 // The chat agent authenticates with its own Bearer token, so it is mounted before the browser origin and session checks.
 app.route('/mcp', mcpRoutes);
+// The Zalo bridge sidecar signs each request with HMAC, so it is mounted before the browser origin and session checks.
+app.route('/bridge', bridgeRoutes);
+// Meta signs Messenger webhooks with the app secret, so they are mounted before the browser origin and session checks.
+app.route('/channels/facebook', facebookWebhookRoutes);
 app.use('*', originGuard);
 app.route('/auth', publicAuth);
 
@@ -61,6 +69,8 @@ app.use('*', async (c, next) => {
   if ((c.req.query('q')?.length ?? 0) > SEARCH_MAX_LENGTH) return c.json(tooLong, 422);
   await next();
 });
+// Mounted after the keyword length check so inbox search is bounded too.
+app.route('/inbox', inboxRoutes);
 
 app.get('/me', (c) => c.json(data({ ...c.get('actor'), mustChangePassword: c.get('mustChangePassword') })));
 app.get('/dashboard', async (c) => c.json(data(await dashboard(c.env.DB, c.get('actor')))));
@@ -204,4 +214,7 @@ app.post('/commands/:name', async (c) => {
 
 app.all('*', (c) => c.json(notFound, 404));
 
-export default app;
+export default {
+  fetch: app.fetch,
+  scheduled: (event: ScheduledController, env: Env, ctx: ExecutionContext) => ctx.waitUntil(runScheduled(env, event.cron)),
+};

@@ -1,4 +1,4 @@
-import type { RoleCode, StageCode } from '@abm/contracts';
+import type { ChannelAccountStatus, ChannelKind, ConversationMode, RoleCode, SenderKind, StageCode } from '@abm/contracts';
 
 // Response shapes of src/worker/queries.ts (kept separate so the browser build never pulls Worker types).
 
@@ -254,4 +254,183 @@ export interface ImportPreview {
   committed: boolean;
   create: { line: number; name: string; phone: string | null; email: string | null }[];
   errors: { line: number | null; message: string }[];
+}
+
+// ---------- omnichannel inbox (src/worker/inbox/inbox-routes.ts) ----------
+export interface InboxConversation {
+  id: string;
+  channelAccountId: string;
+  accountName: string;
+  channel: ChannelKind;
+  kind: 'direct' | 'group';
+  externalThreadId: string;
+  contactId: string | null;
+  displayName: string | null;
+  mode: ConversationMode;
+  assigneeUserId: string | null;
+  assigneeName: string | null;
+  assignedAt: string | null;
+  handoffReason: string | null;
+  lastMessageAt: string | null;
+  lastInboundAt: string | null;
+  lastStaffReplyAt: string | null;
+  slaDueAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  lastMessageBody: string | null;
+  lastMessageSenderKind: SenderKind | null;
+  lastMessageCreatedAt: string | null;
+}
+
+/** Server-side filters of GET /inbox/conversations; `assignee` is a user id or `none` for unassigned. */
+export interface ConversationFilter {
+  mode?: ConversationMode;
+  kind?: 'direct' | 'group';
+  assignee?: string;
+  account?: string;
+  q?: string;
+  before?: string;
+}
+
+export type InboxMessageStatus = 'received' | 'pending' | 'sent' | 'failed';
+export interface InboxMessage {
+  id: string;
+  direction: 'in' | 'out';
+  senderKind: SenderKind;
+  senderExternalId: string | null;
+  sentByUserId: string | null;
+  sentByName: string | null;
+  externalMsgId: string | null;
+  body: string;
+  /** JSON array of { url, name?, mimeType? }, or null. */
+  attachmentsJson: string | null;
+  status: InboxMessageStatus;
+  createdAt: string;
+}
+
+export interface SendMessageResult { messageId: string; mode: ConversationMode; assigneeUserId: string | null }
+export interface SetModeResult { mode: ConversationMode; assigneeUserId: string | null }
+
+export interface ChannelAccount {
+  id: string;
+  channel: ChannelKind;
+  externalId: string | null;
+  displayName: string;
+  agentKey: string | null;
+  botEnabled: boolean;
+  sendPaused: boolean;
+  dailySendCap: number;
+  quietStart: string | null;
+  quietEnd: string | null;
+  status: ChannelAccountStatus;
+  /** Login QR as a data URL; only Admin receives it. */
+  qrImage: string | null;
+  qrExpiresAt: string | null;
+  lastSeenAt: string | null;
+  /** Error code the bridge last reported while the account is in error; only Admin receives it. */
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface ChannelAccountUpdate {
+  botEnabled?: boolean;
+  sendPaused?: boolean;
+  dailySendCap?: number;
+  quietStart?: string | null;
+  quietEnd?: string | null;
+  agentKey?: string;
+}
+
+/** `enabled` true means the customer-facing bot is switched OFF everywhere. */
+export interface CustomerBotSwitch { enabled: boolean; updatedAt: string | null }
+
+// ---------- inbox assignment (src/worker/inbox/assignment.ts) ----------
+export type AssignMode = 'manual' | 'round_robin';
+/** `scheduledSendsEnabled` is the organization-wide switch for recurring group posts (off until the pilot ends). */
+export interface InboxSettings {
+  assignMode: AssignMode;
+  slaMinutes: number;
+  scheduledSendsEnabled: boolean;
+  updatedByUserId: string | null;
+  updatedAt: string | null;
+}
+/** `scheduledSendsEnabled` is admin-only on the Worker. */
+export interface InboxSettingsUpdate { assignMode?: AssignMode; slaMinutes?: number; scheduledSendsEnabled?: boolean }
+/** Active inbox staff; `roundRobin` marks the roles that can be put on duty. */
+export interface RosterMember {
+  userId: string;
+  displayName: string;
+  role: RoleCode;
+  onDuty: boolean;
+  lastAssignedAt: string | null;
+  roundRobin: boolean;
+}
+export interface AssignResult { assigneeUserId: string; assigneeName: string }
+
+// ---------- lead intake (src/worker/inbox/intake.ts) ----------
+export const INTAKE_FIELDS = ['name', 'phone', 'email', 'need', 'interest', 'note'] as const;
+export type IntakeField = (typeof INTAKE_FIELDS)[number];
+export type IntakeValues = Partial<Record<IntakeField, string>>;
+export type IntakeStatus = 'pending' | 'classified' | 'discarded';
+export type IntakePipeline = 'b2b' | 'learner';
+export interface LeadIntake {
+  id: string;
+  conversationId: string;
+  conversationName: string | null;
+  externalThreadId: string;
+  channel: ChannelKind;
+  accountName: string;
+  contactId: string | null;
+  /** Current values. */
+  fields: IntakeValues;
+  /** Differing values from a later extraction, waiting for a staff member to accept them. */
+  proposed: IntakeValues;
+  status: IntakeStatus;
+  leadId: string | null;
+  classifiedByUserId: string | null;
+  classifiedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface ClassifyIntakeResult { intakeId: string; leadId: string; contactId: string }
+
+// ---------- Zalo groups and recurring posts (src/worker/inbox/group-schedules.ts) ----------
+/** A Zalo group conversation; `id` is the conversation id. */
+export interface ZaloGroup {
+  id: string;
+  channelAccountId: string;
+  accountName: string;
+  accountStatus: ChannelAccountStatus;
+  sendPaused: boolean;
+  externalThreadId: string;
+  displayName: string | null;
+  summaryEnabled: boolean;
+  scheduledOptOut: boolean;
+  lastMessageAt: string | null;
+  activeSchedules: number;
+}
+export interface ZaloGroupUpdate { summaryEnabled?: boolean; scheduledOptOut?: boolean }
+
+export type GroupScheduleStatus = 'draft' | 'pending_approval' | 'active' | 'paused';
+export type ScheduleSkipReason = 'feature_off' | 'bot_switch_on' | 'account_unavailable' | 'group_opted_out' | 'quiet_hours' | 'daily_cap';
+/** `weekdaysMask`: bit 0 = Monday … bit 6 = Sunday; `timeOfDay` is HH:MM Vietnam time. */
+export interface GroupScheduleInput { templateText: string; weekdaysMask: number; timeOfDay: string }
+export interface GroupSchedule extends GroupScheduleInput {
+  id: string;
+  conversationId: string;
+  conversationName: string | null;
+  externalThreadId: string;
+  channelAccountId: string;
+  accountName: string;
+  status: GroupScheduleStatus;
+  createdByUserId: string | null;
+  createdByName: string | null;
+  approvedByUserId: string | null;
+  approvedByName: string | null;
+  approvedAt: string | null;
+  nextRunAt: string | null;
+  lastRunAt: string | null;
+  lastSkipReason: ScheduleSkipReason | null;
+  createdAt: string;
+  updatedAt: string;
 }

@@ -14,3 +14,7 @@ coverage/
 exports/
 .tokens.local
 .admin-bootstrap.local
+apps/zalo-bridge/.sessions/
+apps/zalo-bridge/logs/
+apps/zalo-bridge/.env
+!apps/zalo-bridge/.env.example
