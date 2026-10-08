@@ -110,7 +110,11 @@ Không in token, secret, mã QR, cookie Zalo hay nội dung các file `*.local*`
 ### Task 10.11 — Tài liệu
 
 - Steps: viết `docs/guides/inbox-operations.md`; cập nhật `docs/README.md`; cập nhật hai tài liệu GoClaw ở mục Files; chuyển ADR liên quan sang `accepted` nếu còn `proposed`.
-- Verify: `grep -c "inbox-operations" docs/README.md` ≥ 1.
+- `docs/guides/inbox-operations.md` phải ghi rõ (chỉ tên, không ghi giá trị):
+  - URL webhook Messenger: `/api/channels/facebook/webhook` (đặt sau domain của Worker khi đăng ký webhook với Meta).
+  - Secret của Worker cho Messenger: `FB_APP_SECRET`, `FB_VERIFY_TOKEN`, `FB_PAGE_TOKENS` (JSON page id → page token).
+  - Biến môi trường của bridge (`apps/zalo-bridge/.env.example`): bắt buộc `CRM_BASE_URL`, `BRIDGE_SECRET`, `GOCLAW_API_KEY`; tùy chọn `GOCLAW_BASE_URL`, `SEND_MIN_DELAY_MS`, `SEND_MAX_DELAY_MS`, `POLL_WAIT_SECONDS`.
+- Verify: `grep -c "inbox-operations" docs/README.md` ≥ 1; `grep -cF "<tên>" docs/guides/inbox-operations.md` ≥ 1 cho từng tên ở trên (URL webhook, ba secret FB, bảy biến bridge).
 
 ## Rollback
 
