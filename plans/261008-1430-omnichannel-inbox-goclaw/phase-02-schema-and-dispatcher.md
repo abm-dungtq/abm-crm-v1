@@ -1,7 +1,7 @@
 ---
 phase: 2
 title: "Schema, contracts, dispatcher lease"
-status: pending
+status: completed
 priority: P1
 effort: "2d"
 dependencies: [1]

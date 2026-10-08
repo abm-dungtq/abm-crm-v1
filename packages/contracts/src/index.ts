@@ -722,4 +722,81 @@ export const agentKillSwitchInput = z.object({ enabled: z.boolean() });
 // A retry list stays small: D1 caps bound parameters per query.
 export const larkLinkInput = z.object({ userIds: z.array(id).min(1).max(50).optional() });
 
+// Omnichannel inbox (ADR-008, ADR-009, ADR-010): shared by the Worker, the web app and the Zalo bridge sidecar.
+export const CONVERSATION_MODES = ['ai', 'human', 'paused'] as const;
+export type ConversationMode = (typeof CONVERSATION_MODES)[number];
+export const SENDER_KINDS = ['customer', 'bot', 'staff_web', 'staff_phone', 'system'] as const;
+export type SenderKind = (typeof SENDER_KINDS)[number];
+export const CHANNEL_KINDS = ['zalo', 'facebook'] as const;
+export type ChannelKind = (typeof CHANNEL_KINDS)[number];
+export const COMMAND_KINDS = ['send_zalo', 'send_messenger', 'run_completion', 'send_lark', 'zalo_login', 'zalo_logout'] as const;
+export type CommandKind = (typeof COMMAND_KINDS)[number];
+export const CHANNEL_ACCOUNT_STATUSES = ['disconnected', 'qr_pending', 'connected', 'error'] as const;
+export type ChannelAccountStatus = (typeof CHANNEL_ACCOUNT_STATUSES)[number];
+export const BRIDGE_EVENTS_MAX = 100;
+
+const externalRef = z.string().min(1).max(128);
+const isoInstant = z.iso.datetime({ offset: true });
+const bridgeAttachment = z.object({
+  url: z.string().url().max(2000),
+  name: z.string().max(255).optional(),
+  mimeType: z.string().max(120).optional(),
+});
+
+const bridgeMessageEvent = z.object({
+  type: z.literal('message'),
+  accountExternalId: externalRef,
+  threadId: externalRef,
+  threadKind: z.enum(['direct', 'group']),
+  msgId: externalRef,
+  fromSelf: z.boolean(),
+  senderExternalId: externalRef,
+  senderName: z.string().max(200),
+  text: z.string().max(20_000),
+  attachments: z.array(bridgeAttachment).max(20).optional(),
+  sentAt: isoInstant,
+  /** Id of the send_zalo command that produced this message, when the bridge itself sent it. */
+  commandId: id.optional(),
+});
+const bridgeAccountStatusEvent = z.object({
+  type: z.literal('account_status'),
+  accountId: id,
+  /** Zalo uid of the number; required once the account is connected. */
+  accountExternalId: externalRef.optional(),
+  status: z.enum(CHANNEL_ACCOUNT_STATUSES),
+  lastError: z.string().max(2000).optional(),
+}).refine((event) => event.status !== 'connected' || event.accountExternalId !== undefined, {
+  message: 'accountExternalId is required when status is connected',
+  path: ['accountExternalId'],
+});
+const bridgeQrEvent = z.object({
+  type: z.literal('qr'),
+  accountId: id,
+  imageDataUrl: z.string().startsWith('data:image/').max(500_000),
+  expiresAt: isoInstant,
+});
+const bridgeGroupListEvent = z.object({
+  type: z.literal('group_list'),
+  accountExternalId: externalRef,
+  groups: z.array(z.object({ threadId: externalRef, name: z.string().max(200) })).max(1000),
+});
+
+export const bridgeEventSchema = z.discriminatedUnion('type', [
+  bridgeMessageEvent, bridgeAccountStatusEvent, bridgeQrEvent, bridgeGroupListEvent,
+]);
+export type BridgeEvent = z.infer<typeof bridgeEventSchema>;
+/** Body of POST /api/bridge/events. */
+export const bridgeEventsBodySchema = z.object({ events: z.array(bridgeEventSchema).max(BRIDGE_EVENTS_MAX) });
+export type BridgeEventsBody = z.infer<typeof bridgeEventsBodySchema>;
+
+/** Body of POST /api/bridge/commands/:id/result; attempts identifies the lease the result belongs to. */
+export const bridgeCommandResultSchema = z.object({
+  attempts: z.number().int().positive(),
+  ok: z.boolean(),
+  externalMsgId: externalRef.optional(),
+  text: z.string().max(20_000).optional(),
+  error: z.string().max(2000).optional(),
+});
+export type BridgeCommandResult = z.infer<typeof bridgeCommandResultSchema>;
+
 export * from './working-time';
