@@ -38,8 +38,8 @@ CREATE TABLE conversation (
   assignee_user_id TEXT REFERENCES app_user(id),
   assigned_at TEXT,
   handoff_reason TEXT,
-  -- 1 while staff messages exchanged in human mode still have to be passed to the bot on its next turn.
-  staff_context_pending INTEGER NOT NULL DEFAULT 0 CHECK (staff_context_pending IN (0, 1)),
+  -- Staff/customer exchange from human or paused mode (last 1500 chars), prefixed to the bot's next turn, then cleared.
+  staff_context_pending TEXT,
   ai_lock_until TEXT,
   last_message_at TEXT,
   last_inbound_at TEXT,
