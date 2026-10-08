@@ -19,6 +19,8 @@ export const SCOPE_LABEL: Record<RoleCode, string> = {
 const B2B_ROLES: RoleCode[] = ['sale', 'leader', 'head', 'director', 'admin'];
 /** Admissions screens: Sale, Leader and Admin work them; BGĐ reads them. */
 const LEARNER_ROLES: RoleCode[] = ['sale', 'leader', 'director', 'admin'];
+/** Zalo and Fanpage conversations: every role the Worker's inbox API admits. */
+const INBOX_ROLES: RoleCode[] = ['sale', 'leader', 'head', 'director', 'admin'];
 
 interface NavItem { to: string; label: string; icon: IconName; roles?: RoleCode[]; badge?: number; badgeLabel?: string }
 
@@ -42,6 +44,7 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
     { to: '/', label: 'Tổng quan', icon: 'home', roles: B2B_ROLES },
     { to: '/pipeline', label: 'Pipeline', icon: 'board', roles: B2B_ROLES },
     { to: '/overview', label: 'Toàn cảnh', icon: 'trophy', roles: ['admin', 'director'] },
+    { to: '/inbox', label: 'Inbox', icon: 'message', roles: INBOX_ROLES },
     { to: '/leads', label: 'Lead', icon: 'leads', roles: B2B_ROLES },
     { to: '/customers', label: 'Khách hàng 360', icon: 'building', roles: B2B_ROLES },
     { to: '/learners', label: 'Học viên', icon: 'leads', roles: LEARNER_ROLES },
@@ -57,6 +60,7 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
     { to: '/audit', label: 'Nhật ký audit', icon: 'audit', roles: ['leader', 'head', 'director', 'admin'] },
     { to: '/privacy', label: 'Dữ liệu cá nhân', icon: 'audit', roles: ['admin'] },
     { to: '/admin/users', label: 'Người dùng', icon: 'leads', roles: ['admin'] },
+    { to: '/channel-accounts', label: 'Tài khoản kênh', icon: 'phone', roles: ['admin'] },
     { to: '/admin', label: 'Cấu hình', icon: 'settings', roles: ['admin'] },
   ];
   const passwordMode = currentAuthMode() === 'password';

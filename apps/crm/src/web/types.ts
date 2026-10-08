@@ -1,4 +1,4 @@
-import type { RoleCode, StageCode } from '@abm/contracts';
+import type { ChannelAccountStatus, ChannelKind, ConversationMode, RoleCode, SenderKind, StageCode } from '@abm/contracts';
 
 // Response shapes of src/worker/queries.ts (kept separate so the browser build never pulls Worker types).
 
@@ -255,3 +255,89 @@ export interface ImportPreview {
   create: { line: number; name: string; phone: string | null; email: string | null }[];
   errors: { line: number | null; message: string }[];
 }
+
+// ---------- omnichannel inbox (src/worker/inbox/inbox-routes.ts) ----------
+export interface InboxConversation {
+  id: string;
+  channelAccountId: string;
+  accountName: string;
+  channel: ChannelKind;
+  kind: 'direct' | 'group';
+  externalThreadId: string;
+  contactId: string | null;
+  displayName: string | null;
+  mode: ConversationMode;
+  assigneeUserId: string | null;
+  assigneeName: string | null;
+  assignedAt: string | null;
+  handoffReason: string | null;
+  lastMessageAt: string | null;
+  lastInboundAt: string | null;
+  lastStaffReplyAt: string | null;
+  slaDueAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  lastMessageBody: string | null;
+  lastMessageSenderKind: SenderKind | null;
+  lastMessageCreatedAt: string | null;
+}
+
+/** Server-side filters of GET /inbox/conversations; `assignee` is a user id or `none` for unassigned. */
+export interface ConversationFilter {
+  mode?: ConversationMode;
+  kind?: 'direct' | 'group';
+  assignee?: string;
+  account?: string;
+  q?: string;
+  before?: string;
+}
+
+export type InboxMessageStatus = 'received' | 'pending' | 'sent' | 'failed';
+export interface InboxMessage {
+  id: string;
+  direction: 'in' | 'out';
+  senderKind: SenderKind;
+  senderExternalId: string | null;
+  sentByUserId: string | null;
+  sentByName: string | null;
+  externalMsgId: string | null;
+  body: string;
+  /** JSON array of { url, name?, mimeType? }, or null. */
+  attachmentsJson: string | null;
+  status: InboxMessageStatus;
+  createdAt: string;
+}
+
+export interface SendMessageResult { messageId: string; mode: ConversationMode; assigneeUserId: string | null }
+export interface SetModeResult { mode: ConversationMode; assigneeUserId: string | null }
+
+export interface ChannelAccount {
+  id: string;
+  channel: ChannelKind;
+  externalId: string | null;
+  displayName: string;
+  agentKey: string | null;
+  botEnabled: boolean;
+  sendPaused: boolean;
+  dailySendCap: number;
+  quietStart: string | null;
+  quietEnd: string | null;
+  status: ChannelAccountStatus;
+  /** Login QR as a data URL; only Admin receives it. */
+  qrImage: string | null;
+  qrExpiresAt: string | null;
+  lastSeenAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface ChannelAccountUpdate {
+  botEnabled?: boolean;
+  sendPaused?: boolean;
+  dailySendCap?: number;
+  quietStart?: string | null;
+  quietEnd?: string | null;
+  agentKey?: string;
+}
+
+/** `enabled` true means the customer-facing bot is switched OFF everywhere. */
+export interface CustomerBotSwitch { enabled: boolean; updatedAt: string | null }

@@ -1,7 +1,7 @@
 ---
 phase: 5
 title: "Giao diện Inbox và tài khoản kênh"
-status: pending
+status: completed
 priority: P1
 effort: "2d"
 dependencies: [3]
