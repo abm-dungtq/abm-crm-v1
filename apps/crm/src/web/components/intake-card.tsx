@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { COMMANDS } from '@abm/contracts';
 import { useActor } from '../actor-context';
 import { ApiFailure, classifyIntake, confirmIntakeField, discardIntake, linkIntakeContact, listIntakes, requestExtraction, useApi } from '../api';
-import { DuplicateMatches, duplicateMatches } from '../pages/lead-new';
+import { DuplicateMatches, duplicateMatches, type DuplicateMatch } from '../pages/lead-new';
 import { useOwnerOptions } from '../pages/learners';
 import {
   INTAKE_FIELDS, type ClassifyIntakeResult, type InboxConversation, type IntakeField, type IntakePipeline, type LeadIntake, type LearnerList,
@@ -179,7 +179,7 @@ function ClassifyDialog({ intake, pipeline, fallbackName, onClose }: {
   if (linking) {
     return (
       <Modal open title="Gắn vào khách có sẵn" onClose={onClose} footer={<button className="btn" onClick={() => setLinking(false)}>Quay lại form</button>}>
-        <ContactLinker intakeId={intake.id} initialQuery={form.phone || form.contactName} onDone={onClose} />
+        <ContactLinker intakeId={intake.id} matches={duplicates ?? []} initialQuery={form.phone || form.contactName} onDone={onClose} />
       </Modal>
     );
   }
@@ -259,8 +259,25 @@ function OwnerField({ id, value, onChange, error }: { id: string; value: string;
   );
 }
 
-/** Finds a customer in the actor's scope (name or phone) and links the intake's conversation to it. */
-function ContactLinker({ intakeId, initialQuery, onDone }: { intakeId: string; initialQuery: string; onDone: () => void }) {
+/** Customers named by duplicate matches (only those in the actor's scope carry a contact), one entry per customer. */
+function duplicateCustomers(matches: DuplicateMatch[]) {
+  const byId = new Map<string, { contactId: string; name: string; leads: string[] }>();
+  for (const m of matches) {
+    if (!m.contactId) continue;
+    const entry = byId.get(m.contactId) ?? { contactId: m.contactId, name: m.contactName ?? 'Khách', leads: [] };
+    if (m.code && !entry.leads.includes(m.code)) entry.leads.push(m.code);
+    byId.set(m.contactId, entry);
+  }
+  return [...byId.values()];
+}
+
+/**
+ * Links the intake's conversation to an existing customer: first the customers the duplicate check matched, then a
+ * search (name or phone) over the customers in the actor's scope.
+ */
+function ContactLinker({ intakeId, matches, initialQuery, onDone }: {
+  intakeId: string; matches: DuplicateMatch[]; initialQuery: string; onDone: () => void;
+}) {
   const actor = useActor();
   const toast = useToast();
   const refresh = useInboxRefresh();
@@ -275,8 +292,26 @@ function ContactLinker({ intakeId, initialQuery, onDone }: { intakeId: string; i
   });
   if (!allowed) return <Alert tone="warn">Vai trò hiện tại không gắn được khách có sẵn. Nhờ Sale phụ trách khách hoặc Admin.</Alert>;
   const items = results.data?.items ?? [];
+  const matched = duplicateCustomers(matches);
   return (
     <div className="stack">
+      {matched.length > 0 && (
+        <div className="stack-sm">
+          <div className="field-label">Khách trùng với thông tin này</div>
+          <ul className="intake-contacts">
+            {matched.map((c) => (
+              <li key={c.contactId} className="row">
+                <div className="truncate" style={{ flex: 1 }}>
+                  <div className="truncate" style={{ fontWeight: 600 }}>{c.name}</div>
+                  {c.leads.length > 0 && <div className="small muted truncate">Lead: {c.leads.join(', ')}</div>}
+                </div>
+                <button className="btn btn-sm btn-primary" disabled={link.isPending} onClick={() => link.mutate(c.contactId)}
+                  aria-label={`Gắn vào ${c.name}`}>Gắn</button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       <Field label="Tìm khách" hint="Tên hoặc số điện thoại, trong các khách thuộc phạm vi của bạn." htmlFor={`link-${intakeId}`}>
         <input id={`link-${intakeId}`} type="search" value={q} onChange={(e) => setQ(e.target.value)} autoComplete="off" />
       </Field>

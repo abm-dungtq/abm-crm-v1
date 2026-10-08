@@ -195,6 +195,34 @@ test('a suspected duplicate is returned to staff; only their explicit confirmati
   expect((await intakes())[0].status).toBe('classified');
 });
 
+test('a duplicate names the matched customer only when it is in the actor customer scope, so staff can link to it', async () => {
+  const { intake } = await intakeFrom({ name: 'Chị Hoa', phone: '0900100001' });
+  const input = { contactName: 'Chị Hoa', phone: '0900100001', needSummary: 'Hỏi khoá học', nextAction: nextAction() };
+  const classify = (user: string) => web(user, 'POST', `/inbox/intakes/${intake.id}/classify`, { pipeline: 'b2b', input });
+
+  // The matched lead L-0001 is Lan's, but its customer belongs to Huy: the lead is described, the customer is not.
+  await db.prepare("UPDATE contact SET owner_user_id = 'u-huy' WHERE id = 'ct-1'").run();
+  const foreign = await classify('u-lan');
+  expect(foreign.json.error.code).toBe('DUPLICATE_SUSPECTED');
+  expect(foreign.json.error.details).toEqual([{ field: 'phone', code: 'L-0001', stage: expect.any(String), owner: 'Đỗ Ngọc Lan' }]);
+  expect(JSON.stringify(foreign.json)).not.toContain('ct-1');
+  const huy = await classify('u-huy');
+  expect(huy.json.error.details).toEqual([expect.objectContaining({ code: null, contactId: 'ct-1', contactName: 'Trần Thị Mai Anh' })]);
+
+  // An archived customer cannot be linked, so it is not offered either.
+  await db.prepare("UPDATE contact SET owner_user_id = 'u-lan', archived_at = ? WHERE id = 'ct-1'").bind(STAMP).run();
+  expect((await classify('u-lan')).json.error.details[0]).not.toHaveProperty('contactId');
+
+  await db.prepare("UPDATE contact SET archived_at = NULL WHERE id = 'ct-1'").run();
+  const own = await classify('u-lan');
+  expect(own.json.error.details).toEqual([
+    { field: 'phone', code: 'L-0001', stage: expect.any(String), owner: 'Đỗ Ngọc Lan', contactId: 'ct-1', contactName: 'Trần Thị Mai Anh' },
+  ]);
+  const linked = await web('u-lan', 'POST', `/inbox/intakes/${intake.id}/link-contact`, { contactId: own.json.error.details[0].contactId });
+  expect(linked.status).toBe(200);
+  expect((await intakes())[0]).toMatchObject({ status: 'classified', lead_id: null, contact_id: 'ct-1' });
+});
+
 test('a learner classification without a next action is rejected and the intake stays pending', async () => {
   const { intake } = await intakeFrom({ name: 'Chị Hoa', phone: '0912345678' });
   const res = await web('u-lan', 'POST', `/inbox/intakes/${intake.id}/classify`, {

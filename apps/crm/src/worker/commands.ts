@@ -277,6 +277,15 @@ async function recordConsent({ db, actor, input, tx }: Ctx<RecordConsentInput>) 
   return ok({ id });
 }
 
+/** Names of the given contacts the actor may work on (active, in customerScope), by contact id. */
+async function linkableContacts(db: D1Database, actor: Actor, contactIds: string[]): Promise<Map<string, string>> {
+  const scope = customerScope(actor);
+  const rows = await db.prepare(`SELECT c.id, c.display_name AS name FROM contact c
+    WHERE c.id IN (SELECT value FROM json_each(?)) AND c.organization_id = ? AND c.archived_at IS NULL AND ${scope.sql}`)
+    .bind(JSON.stringify([...new Set(contactIds)]), actor.organizationId, ...scope.binds).all<{ id: string; name: string }>();
+  return new Map(rows.results.map((r) => [r.id, r.name]));
+}
+
 async function createLead({ db, actor, input, tx }: Ctx<CreateLeadInput>) {
   const phone = input.phone ? normalizePhone(input.phone) : null;
   const email = input.email ? normalizeEmail(input.email) : null;
@@ -290,19 +299,19 @@ async function createLead({ db, actor, input, tx }: Ctx<CreateLeadInput>) {
       .results.filter((a) => foldText(a.name) === companyKey).map((a) => a.id)
     : [];
   const matches = (await db.prepare(`
-    SELECT 'phone' AS field, l.id, l.code, l.stage, u.display_name AS owner FROM contact_point cp
+    SELECT 'phone' AS field, l.id, l.code, l.stage, u.display_name AS owner, l.contact_id AS contactId FROM contact_point cp
       JOIN lead l ON l.contact_id = cp.contact_id LEFT JOIN app_user u ON u.id = l.owner_user_id
       WHERE cp.type = 'phone' AND cp.normalized_value = ?1 AND l.organization_id = ?5
-    UNION SELECT 'email', l.id, l.code, l.stage, u.display_name FROM contact_point cp
+    UNION SELECT 'email', l.id, l.code, l.stage, u.display_name, l.contact_id FROM contact_point cp
       JOIN lead l ON l.contact_id = cp.contact_id LEFT JOIN app_user u ON u.id = l.owner_user_id
       WHERE cp.type = 'email' AND cp.normalized_value = ?2 AND l.organization_id = ?5
-    UNION SELECT 'tax_code', l.id, l.code, l.stage, u.display_name FROM account a
+    UNION SELECT 'tax_code', l.id, l.code, l.stage, u.display_name, l.contact_id FROM account a
       JOIN lead l ON l.account_id = a.id LEFT JOIN app_user u ON u.id = l.owner_user_id
       WHERE a.tax_code = ?3 AND l.organization_id = ?5
-    UNION SELECT 'company', l.id, l.code, l.stage, u.display_name FROM lead l LEFT JOIN app_user u ON u.id = l.owner_user_id
+    UNION SELECT 'company', l.id, l.code, l.stage, u.display_name, l.contact_id FROM lead l LEFT JOIN app_user u ON u.id = l.owner_user_id
       WHERE l.account_id IN (SELECT value FROM json_each(?4)) AND l.organization_id = ?5
     LIMIT 10`).bind(phone, email, taxCode, JSON.stringify(sameName), actor.organizationId)
-    .all<{ field: string; id: string; code: string; stage: string; owner: string | null }>()).results;
+    .all<{ field: string; id: string; code: string; stage: string; owner: string | null; contactId: string }>()).results;
 
   // Only leads inside the actor's scope are described (here and in the audit); others are acknowledged without detail.
   const scope = leadScope(actor);
@@ -311,10 +320,16 @@ async function createLead({ db, actor, input, tx }: Ctx<CreateLeadInput>) {
       .bind(JSON.stringify(matches.map((m) => m.id)), ...scope.binds).all<{ id: string }>()).results.map((r) => r.id))
     : new Set<string>();
   if (matches.length && !input.confirmNotDuplicate) {
+    // The matched customer is named only when the actor may work on it (customerScope), so staff can link to it.
+    const contacts = await linkableContacts(db, actor, matches.map((m) => m.contactId));
     return fail('DUPLICATE_SUSPECTED', 'Có thể trùng với lead đã có. Kiểm tra trước khi tạo.', {
-      details: matches.map((m) => visible.has(m.id)
-        ? { field: m.field, code: m.code, stage: stageLabel(m.stage), owner: m.owner ?? 'Hàng chờ' }
-        : { field: m.field, code: null, stage: null, owner: null, note: 'Đã có trong hệ thống, ngoài phạm vi của bạn' }),
+      details: matches.map((m) => {
+        const contact = contacts.get(m.contactId);
+        const customer = contact ? { contactId: m.contactId, contactName: contact } : {};
+        return visible.has(m.id)
+          ? { field: m.field, code: m.code, stage: stageLabel(m.stage), owner: m.owner ?? 'Hàng chờ', ...customer }
+          : { field: m.field, code: null, stage: null, owner: null, note: 'Đã có trong hệ thống, ngoài phạm vi của bạn', ...customer };
+      }),
     });
   }
 

@@ -6,8 +6,13 @@ import { ApiFailure, useCommand } from '../api';
 import { NextActionFields, emptyNextAction, nextActionPayload } from '../components/lead-actions';
 import { Alert, Field, FormError, fieldErrors, useToast } from '../components/ui';
 
-/** Matches outside the viewer's scope come back without code, stage or owner. */
-export interface DuplicateMatch { field: string; code: string | null; stage: string | null; owner: string | null }
+/**
+ * Matches outside the viewer's scope come back without code, stage or owner. `contactId` and `contactName` name the
+ * matched customer only when the viewer may work on it (the customer scope), so it can be linked directly.
+ */
+export interface DuplicateMatch {
+  field: string; code: string | null; stage: string | null; owner: string | null; contactId?: string; contactName?: string;
+}
 const FIELD_LABEL: Record<string, string> = { phone: 'Số điện thoại', email: 'Email', tax_code: 'Mã số thuế', company: 'Tên công ty' };
 
 /** Matches of a DUPLICATE_SUSPECTED error, or null for any other error. */
