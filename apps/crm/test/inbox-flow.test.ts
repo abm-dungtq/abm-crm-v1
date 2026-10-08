@@ -250,6 +250,40 @@ test('staff writing in ai mode take over and become the assignee', async () => {
   expect((await web('u-lan', 'POST', `/inbox/conversations/${conv.id}/messages`, { text: 'x'.repeat(2001) })).status).toBe(422);
 });
 
+test('resending a staff message with the same client id queues it once and returns the first message', async () => {
+  await ingest(message());
+  const conv = await conversation();
+  const path = `/inbox/conversations/${conv.id}/messages`;
+  const clientMessageId = crypto.randomUUID();
+  const first = await web('u-lan', 'POST', path, { text: 'Chào chị, em là Lan', clientMessageId });
+  expect(first.status).toBe(200);
+  const retry = await web('u-lan', 'POST', path, { text: ' Chào chị, em là Lan ', clientMessageId });
+  expect(retry.status).toBe(200);
+  expect(retry.json.data).toEqual(first.json.data);
+
+  const outgoing = (await messages(conv.id)).filter((m) => m.direction === 'out');
+  expect(outgoing.map((m) => m.id)).toEqual([first.json.data.messageId]);
+  const sends = await commands('send_zalo');
+  expect(sends).toHaveLength(1);
+  expect(sends[0]).toMatchObject({ dedupe_key: `send:${conv.id}:${clientMessageId}` });
+  expect(sends[0].payload.messageId).toBe(first.json.data.messageId);
+  expect(await db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE command = 'inbox.staffSend'").first()).toEqual({ n: 1 });
+  expect((await conversation()).staff_context_pending).toBe('Nhân viên: Chào chị, em là Lan');
+
+  // The same id for other text, or from another person, is refused and queues nothing.
+  const otherText = await web('u-lan', 'POST', path, { text: 'Tin khác', clientMessageId });
+  expect(otherText.status).toBe(409);
+  expect(otherText.json.error.code).toBe('IDEMPOTENCY_CONFLICT');
+  expect((await web('u-long', 'POST', path, { text: 'Chào chị, em là Lan', clientMessageId })).status).toBe(409);
+  expect((await web('u-lan', 'POST', path, { text: 'Tin khác', clientMessageId: 'bad id!' })).status).toBe(422);
+  expect(await commands('send_zalo')).toHaveLength(1);
+  expect((await messages(conv.id)).filter((m) => m.direction === 'out')).toHaveLength(1);
+
+  // A new id is a new message.
+  expect((await web('u-lan', 'POST', path, { text: 'Chào chị, em là Lan', clientMessageId: crypto.randomUUID() })).status).toBe(200);
+  expect(await commands('send_zalo')).toHaveLength(2);
+});
+
 test('taking over an unassigned conversation assigns it to the person who clicked', async () => {
   await ingest(message());
   const conv = await conversation();

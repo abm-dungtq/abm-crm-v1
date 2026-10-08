@@ -1,7 +1,7 @@
 import type { ConversationMode } from '@abm/contracts';
 import type { Actor, Env } from '../env';
 import { autoAssignOnHandoff, linkBase, slaDueSql } from './assignment';
-import { enqueueCommand, type CommandTarget } from './dispatcher';
+import { commandInsertStatement, enqueueCommand, type CommandTarget } from './dispatcher';
 import { enqueueExtraction } from './intake';
 
 /**
@@ -106,18 +106,34 @@ export async function scheduleCompletion(db: D1Database, conversationId: string,
   return true;
 }
 
-/** Inserts an outgoing message and the command that sends it; returns the command target. */
-async function queueOutgoing(db: D1Database, conv: ConversationRow, message: { id: string; senderKind: 'bot' | 'staff_web'; userId: string | null; text: string }, now: string) {
-  await db.prepare(`INSERT INTO message (id, conversation_id, direction, sender_kind, sent_by_user_id, body, status, created_at)
-    VALUES (?, ?, 'out', ?, ?, ?, 'pending', ?)`).bind(message.id, conv.id, message.senderKind, message.userId, message.text, now).run();
+interface OutgoingMessage { id: string; senderKind: 'bot' | 'staff_web'; userId: string | null; text: string }
+
+/**
+ * Inserts an outgoing message and the command that sends it in one batch. The command's dedupe key defaults to
+ * the message id; with a caller's key, a second call with that key inserts nothing and returns the message the
+ * first call queued (`replayed`).
+ */
+async function queueOutgoing(db: D1Database, conv: ConversationRow, message: OutgoingMessage, now: string, dedupeKey = `send:${message.id}`):
+  Promise<{ target: CommandTarget; messageId: string; replayed: boolean }> {
   // Messenger is sent by the Worker itself; Zalo by the bridge sidecar (ADR-010).
   const target: CommandTarget = conv.channel === 'facebook' ? 'worker' : 'bridge';
-  await enqueueCommand(db, {
+  const command = commandInsertStatement(db, {
     kind: conv.channel === 'facebook' ? 'send_messenger' : 'send_zalo', target, channelAccountId: conv.channel_account_id,
-    conversationId: conv.id, dedupeKey: `send:${message.id}`,
+    conversationId: conv.id, dedupeKey,
     payload: { messageId: message.id, threadId: conv.external_thread_id, threadKind: conv.kind, text: message.text },
   });
-  return target;
+  // The message is written only together with its command, so a replayed key never leaves an orphan message.
+  const [inserted] = await db.batch([
+    db.prepare(`INSERT INTO message (id, conversation_id, direction, sender_kind, sent_by_user_id, body, status, created_at)
+      SELECT ?, ?, 'out', ?, ?, ?, 'pending', ? WHERE NOT EXISTS (SELECT 1 FROM channel_command WHERE dedupe_key = ?)`)
+      .bind(message.id, conv.id, message.senderKind, message.userId, message.text, now, dedupeKey),
+    command.statement,
+  ]);
+  if (inserted!.meta.changes === 1) return { target, messageId: message.id, replayed: false };
+  const existing = await db.prepare("SELECT json_extract(payload_json, '$.messageId') AS messageId FROM channel_command WHERE dedupe_key = ?")
+    .bind(dedupeKey).first<{ messageId: string | null }>();
+  if (!existing?.messageId) throw new Error('send command dedupe conflict without a message');
+  return { target, messageId: existing.messageId, replayed: true };
 }
 
 export interface FlowOutcome {
@@ -176,7 +192,7 @@ export async function applyCompletionResult(db: D1Database, env: Pick<Env, 'APP_
   }
   let workerCommandQueued = false;
   if (text) {
-    const target = await queueOutgoing(db, conv, { id: crypto.randomUUID(), senderKind: 'bot', userId: null, text }, now);
+    const { target } = await queueOutgoing(db, conv, { id: crypto.randomUUID(), senderKind: 'bot', userId: null, text }, now);
     await db.prepare('UPDATE conversation SET last_message_at = ?, updated_at = ? WHERE id = ?').bind(now, now, conv.id).run();
     workerCommandQueued = target === 'worker';
   }
@@ -193,17 +209,34 @@ async function loadForActor(db: D1Database, actor: Actor, conversationId: string
   return conv && conv.organization_id === actor.organizationId ? conv : null;
 }
 
+/** Result of a staff send; `conflict` means the client message id was already used for a different message. */
+export type StaffSendOutcome =
+  | { conflict: false; messageId: string; mode: ConversationMode; assigneeUserId: string | null; workerCommandQueued: boolean }
+  | { conflict: true };
+
 /**
  * A staff member writes from the web: the message is queued for sending, recorded in the pending staff
  * context, and an `ai` conversation switches to `human`, assigned to the sender when nobody has it.
+ * A `clientMessageId` makes the send idempotent: repeating it (a retry after a lost response) returns the
+ * message already queued and changes nothing; reusing it for other text or by another person is a conflict.
  * Null when the conversation is not in the actor's organization.
  */
-export async function staffSend(db: D1Database, actor: Actor, conversationId: string, text: string) {
+export async function staffSend(db: D1Database, actor: Actor, conversationId: string, text: string, clientMessageId?: string):
+  Promise<StaffSendOutcome | null> {
   const conv = await loadForActor(db, actor, conversationId);
   if (!conv) return null;
   const now = new Date().toISOString();
-  const messageId = crypto.randomUUID();
-  const target = await queueOutgoing(db, conv, { id: messageId, senderKind: 'staff_web', userId: actor.id, text }, now);
+  const dedupeKey = clientMessageId ? `send:${conv.id}:${clientMessageId}` : undefined;
+  const queued = await queueOutgoing(db, conv, { id: crypto.randomUUID(), senderKind: 'staff_web', userId: actor.id, text }, now, dedupeKey);
+  const workerCommandQueued = queued.target === 'worker';
+  if (queued.replayed) {
+    const previous = await db.prepare(`SELECT body, sent_by_user_id FROM message
+      WHERE id = ? AND conversation_id = ? AND direction = 'out' AND sender_kind = 'staff_web'`)
+      .bind(queued.messageId, conv.id).first<{ body: string; sent_by_user_id: string | null }>();
+    if (!previous || previous.body !== text || previous.sent_by_user_id !== actor.id) return { conflict: true };
+    return { conflict: false, messageId: queued.messageId, mode: conv.mode, assigneeUserId: conv.assignee_user_id, workerCommandQueued };
+  }
+  const { messageId } = queued;
   const mode: ConversationMode = conv.mode === 'ai' ? 'human' : conv.mode;
   const assignee = conv.assignee_user_id ?? (conv.mode === 'ai' ? actor.id : null);
   await db.batch([
@@ -215,7 +248,7 @@ export async function staffSend(db: D1Database, actor: Actor, conversationId: st
     auditStatement(db, actor, 'inbox.staffSend', conv.id, { mode: conv.mode, assigneeUserId: conv.assignee_user_id },
       { mode, assigneeUserId: assignee, messageId }, now),
   ]);
-  return { messageId, mode, assigneeUserId: assignee, workerCommandQueued: target === 'worker' };
+  return { conflict: false, messageId, mode, assigneeUserId: assignee, workerCommandQueued };
 }
 
 /**

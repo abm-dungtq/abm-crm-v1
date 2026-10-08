@@ -49,19 +49,28 @@ interface CommandRow {
   lease_expires_at: string;
 }
 
-/** Inserts a command, or returns the id of the existing command with the same dedupe key. */
-export async function enqueueCommand(db: D1Database, input: EnqueueCommandInput): Promise<string> {
+/**
+ * The INSERT of a new command, for callers that must place it in their own batch. A row with the same
+ * dedupe key already present makes it change nothing.
+ */
+export function commandInsertStatement(db: D1Database, input: EnqueueCommandInput): { id: string; statement: D1PreparedStatement } {
   const now = new Date().toISOString();
   const runAt = (input.runAt ?? new Date()).toISOString();
-  const dedupeKey = input.dedupeKey ?? null;
   const id = crypto.randomUUID();
-  const inserted = await db.prepare(`INSERT INTO channel_command
+  const statement = db.prepare(`INSERT INTO channel_command
       (id, kind, target, channel_account_id, conversation_id, payload_json, next_run_at, dedupe_key, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(dedupe_key) DO NOTHING`)
     .bind(id, input.kind, input.target, input.channelAccountId ?? null, input.conversationId ?? null,
-      JSON.stringify(input.payload ?? null), runAt, dedupeKey, now, now)
-    .run();
+      JSON.stringify(input.payload ?? null), runAt, input.dedupeKey ?? null, now, now);
+  return { id, statement };
+}
+
+/** Inserts a command, or returns the id of the existing command with the same dedupe key. */
+export async function enqueueCommand(db: D1Database, input: EnqueueCommandInput): Promise<string> {
+  const dedupeKey = input.dedupeKey ?? null;
+  const { id, statement } = commandInsertStatement(db, input);
+  const inserted = await statement.run();
   if (inserted.meta.changes === 1) return id;
   if (dedupeKey === null) throw new Error('channel_command insert changed no row');
   const existing = await db.prepare('SELECT id FROM channel_command WHERE dedupe_key = ?').bind(dedupeKey).first<{ id: string }>();

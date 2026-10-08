@@ -125,16 +125,22 @@ function MessageBubble({ message: m }: { message: InboxMessage }) {
 function Composer({ conversationId }: { conversationId: string }) {
   const client = useQueryClient();
   const [text, setText] = useState('');
-  const send = useMutation<SendMessageResult, ApiFailure, string>({
-    mutationFn: (body) => sendMessage(conversationId, body),
-    onSuccess: () => setText(''),
+  /** Id of the message being composed; a retry of the same text reuses it, so the server sends it once. */
+  const pending = useRef<{ text: string; id: string } | null>(null);
+  const send = useMutation<SendMessageResult, ApiFailure, { text: string; id: string }>({
+    mutationFn: (message) => sendMessage(conversationId, message.text, message.id),
+    onSuccess: () => {
+      pending.current = null;
+      setText('');
+    },
     // Refresh at once either way: a request whose response was lost may still have queued the message.
     onSettled: () => client.invalidateQueries({ queryKey: ['inbox'] }),
   });
   const trimmed = text.trim();
   const submit = () => {
     if (!trimmed || trimmed.length > STAFF_TEXT_MAX || send.isPending) return;
-    send.mutate(trimmed);
+    if (pending.current?.text !== trimmed) pending.current = { text: trimmed, id: crypto.randomUUID() };
+    send.mutate(pending.current);
   };
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     // Vietnamese IMEs confirm a word with Enter; only a plain Enter outside composition sends.

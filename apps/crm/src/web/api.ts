@@ -117,7 +117,9 @@ export const getConversation = (id: string) => api.get<InboxConversation>(`/inbo
 /** Latest page oldest first, or with `after` only the messages created after that instant. */
 export const listMessages = (id: string, after?: string) =>
   api.get<InboxMessage[]>(`/inbox/conversations/${enc(id)}/messages${after ? `?after=${enc(after)}` : ''}`);
-export const sendMessage = (id: string, text: string) => api.post<SendMessageResult>(`/inbox/conversations/${enc(id)}/messages`, { text });
+/** `clientMessageId` identifies one composed message; resending it after a lost response never sends twice. */
+export const sendMessage = (id: string, text: string, clientMessageId: string) =>
+  api.post<SendMessageResult>(`/inbox/conversations/${enc(id)}/messages`, { text, clientMessageId });
 export const setMode = (id: string, mode: ConversationMode) => api.post<SetModeResult>(`/inbox/conversations/${enc(id)}/mode`, { mode });
 export const listAccounts = () => api.get<ChannelAccount[]>('/inbox/accounts');
 /** A Facebook Page is added with `channel: 'facebook'` and its page id as `externalId`; without `channel` a Zalo number is added. */
