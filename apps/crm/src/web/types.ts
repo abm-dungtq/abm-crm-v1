@@ -341,3 +341,45 @@ export interface ChannelAccountUpdate {
 
 /** `enabled` true means the customer-facing bot is switched OFF everywhere. */
 export interface CustomerBotSwitch { enabled: boolean; updatedAt: string | null }
+
+// ---------- inbox assignment (src/worker/inbox/assignment.ts) ----------
+export type AssignMode = 'manual' | 'round_robin';
+export interface InboxSettings { assignMode: AssignMode; slaMinutes: number; updatedByUserId: string | null; updatedAt: string | null }
+export interface InboxSettingsUpdate { assignMode?: AssignMode; slaMinutes?: number }
+/** Active inbox staff; `roundRobin` marks the roles that can be put on duty. */
+export interface RosterMember {
+  userId: string;
+  displayName: string;
+  role: RoleCode;
+  onDuty: boolean;
+  lastAssignedAt: string | null;
+  roundRobin: boolean;
+}
+export interface AssignResult { assigneeUserId: string; assigneeName: string }
+
+// ---------- lead intake (src/worker/inbox/intake.ts) ----------
+export const INTAKE_FIELDS = ['name', 'phone', 'email', 'need', 'interest', 'note'] as const;
+export type IntakeField = (typeof INTAKE_FIELDS)[number];
+export type IntakeValues = Partial<Record<IntakeField, string>>;
+export type IntakeStatus = 'pending' | 'classified' | 'discarded';
+export type IntakePipeline = 'b2b' | 'learner';
+export interface LeadIntake {
+  id: string;
+  conversationId: string;
+  conversationName: string | null;
+  externalThreadId: string;
+  channel: ChannelKind;
+  accountName: string;
+  contactId: string | null;
+  /** Current values. */
+  fields: IntakeValues;
+  /** Differing values from a later extraction, waiting for a staff member to accept them. */
+  proposed: IntakeValues;
+  status: IntakeStatus;
+  leadId: string | null;
+  classifiedByUserId: string | null;
+  classifiedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface ClassifyIntakeResult { intakeId: string; leadId: string; contactId: string }

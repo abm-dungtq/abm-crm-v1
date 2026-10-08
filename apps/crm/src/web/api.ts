@@ -2,7 +2,9 @@ import { useRef } from 'react';
 import { useMutation, useQuery, useQueryClient, type UseQueryOptions } from '@tanstack/react-query';
 import type { ApiError, CommandName, ConversationMode } from '@abm/contracts';
 import type {
-  ChannelAccount, ChannelAccountUpdate, ConversationFilter, CustomerBotSwitch, InboxConversation, InboxMessage, SendMessageResult, SetModeResult,
+  AssignResult, ChannelAccount, ChannelAccountUpdate, ClassifyIntakeResult, ConversationFilter, CustomerBotSwitch, InboxConversation,
+  InboxMessage, InboxSettings, InboxSettingsUpdate, IntakeField, IntakePipeline, IntakeStatus, IntakeValues, LeadIntake, RosterMember,
+  SendMessageResult, SetModeResult,
 } from './types';
 
 const USER_KEY = 'abm-crm-demo-user';
@@ -123,3 +125,31 @@ export const connectAccount = (id: string) => api.post<{ commandId: string }>(`/
 export const disconnectAccount = (id: string) => api.post<{ commandId: string }>(`/inbox/accounts/${enc(id)}/disconnect`);
 export const getCustomerBotSwitch = () => api.get<CustomerBotSwitch>('/inbox/customer-bot-switch');
 export const setCustomerBotSwitch = (enabled: boolean) => api.put<CustomerBotSwitch>('/inbox/customer-bot-switch', { enabled });
+
+// ---------- inbox assignment ----------
+export const assignConversation = (id: string, userId: string) =>
+  api.post<AssignResult>(`/inbox/conversations/${enc(id)}/assign`, { userId });
+export const getInboxSettings = () => api.get<InboxSettings>('/inbox/settings');
+export const updateInboxSettings = (input: InboxSettingsUpdate) => api.put<InboxSettings>('/inbox/settings', input);
+export const listRoster = () => api.get<RosterMember[]>('/inbox/roster');
+export const setOnDuty = (userId: string, onDuty: boolean) => api.put<{ userId: string; onDuty: boolean }>('/inbox/roster', { userId, onDuty });
+
+// ---------- lead intake ----------
+export const listIntakes = (filter: { status?: IntakeStatus; conversationId?: string } = {}) => {
+  const params = new URLSearchParams();
+  if (filter.status) params.set('status', filter.status);
+  if (filter.conversationId) params.set('conversationId', filter.conversationId);
+  const query = params.toString();
+  return api.get<LeadIntake[]>(`/inbox/intakes${query ? `?${query}` : ''}`);
+};
+/** `input` is the createLead / createLearnerLead form; the server sets `source` from the channel. */
+export const classifyIntake = (id: string, pipeline: IntakePipeline, input: Record<string, unknown>) =>
+  api.post<ClassifyIntakeResult>(`/inbox/intakes/${enc(id)}/classify`, { pipeline, input });
+export const discardIntake = (id: string) => api.post<{ intakeId: string }>(`/inbox/intakes/${enc(id)}/discard`);
+export const confirmIntakeField = (id: string, field: IntakeField) =>
+  api.post<{ intakeId: string; fields: IntakeValues }>(`/inbox/intakes/${enc(id)}/confirm-field`, { field });
+export const linkIntakeContact = (id: string, contactId: string) =>
+  api.post<{ intakeId: string; contactId: string }>(`/inbox/intakes/${enc(id)}/link-contact`, { contactId });
+/** "Cập nhật CRM": queues an extraction of a direct conversation now. */
+export const requestExtraction = (conversationId: string) =>
+  api.post<{ commandId: string }>(`/inbox/conversations/${enc(conversationId)}/extract`);

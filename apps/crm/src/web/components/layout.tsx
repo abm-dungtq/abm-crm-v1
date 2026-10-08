@@ -45,6 +45,7 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
     { to: '/pipeline', label: 'Pipeline', icon: 'board', roles: B2B_ROLES },
     { to: '/overview', label: 'Toàn cảnh', icon: 'trophy', roles: ['admin', 'director'] },
     { to: '/inbox', label: 'Inbox', icon: 'message', roles: INBOX_ROLES },
+    { to: '/intakes', label: 'Lead chờ phân loại', icon: 'bot', roles: INBOX_ROLES },
     { to: '/leads', label: 'Lead', icon: 'leads', roles: B2B_ROLES },
     { to: '/customers', label: 'Khách hàng 360', icon: 'building', roles: B2B_ROLES },
     { to: '/learners', label: 'Học viên', icon: 'leads', roles: LEARNER_ROLES },

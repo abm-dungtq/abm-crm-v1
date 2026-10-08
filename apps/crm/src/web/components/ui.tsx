@@ -182,3 +182,10 @@ export function Kpi({ label, value, note, tone, to, search }: { label: string; v
     ? <Link className="card kpi" to={to as '/'} search={search as never} data-tone={tone}>{body}</Link>
     : <div className="card kpi" data-tone={tone}>{body}</div>;
 }
+
+/** `value` once it has stopped changing for `ms`. */
+export function useDebounced<T>(value: T, ms: number) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => { const t = setTimeout(() => setDebounced(value), ms); return () => clearTimeout(t); }, [value, ms]);
+  return debounced;
+}
