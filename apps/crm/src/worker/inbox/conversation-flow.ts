@@ -146,25 +146,74 @@ export interface FlowOutcome {
 
 /**
  * Hands the conversation to people: `human` mode, the reason, and a Lark notice to the inbox group.
- * `origin` is the request origin, used for the link when APP_URL is unset.
+ * `origin` is the request origin, used for the link when APP_URL is unset. With `onlyFromAi` nothing happens unless
+ * the conversation is still in `ai` mode at that moment, so concurrent or repeated callers hand off once.
  */
-export async function handoff(db: D1Database, env: Pick<Env, 'APP_URL'>, conversationId: string, reason: string, origin?: string): Promise<FlowOutcome> {
+export async function handoff(db: D1Database, env: Pick<Env, 'APP_URL'>, conversationId: string, reason: string, origin?: string,
+  options: { onlyFromAi?: boolean } = {}): Promise<FlowOutcome> {
   const conv = await loadConversation(db, conversationId);
   if (!conv) return { workerCommandQueued: false };
   const nowDate = new Date();
   const now = nowDate.toISOString();
   const base = linkBase(env.APP_URL, origin);
-  await db.batch([
-    db.prepare(`UPDATE conversation SET mode = 'human', handoff_reason = ?, sla_due_at = ${slaDueSql()}, updated_at = ? WHERE id = ?`)
-      .bind(reason, now, now, conv.id),
-    auditStatement(db, null, 'inbox.handoff', conv.id, { mode: conv.mode }, { mode: 'human', reason }, now),
-  ]);
+  const update = db.prepare(`UPDATE conversation SET mode = 'human', handoff_reason = ?, sla_due_at = ${slaDueSql()}, updated_at = ?
+    WHERE id = ?${options.onlyFromAi ? " AND mode = 'ai'" : ''}`).bind(reason, now, now, conv.id);
+  const audit = auditStatement(db, null, 'inbox.handoff', conv.id, { mode: conv.mode }, { mode: 'human', reason }, now);
+  if (options.onlyFromAi) {
+    if ((await update.run()).meta.changes !== 1) return { workerCommandQueued: false };
+    await audit.run();
+  } else {
+    await db.batch([update, audit]);
+  }
   const assignment = await autoAssignOnHandoff(db, conv.id, base, nowDate);
   const noOneOnDuty = assignment.status === 'no_one_on_duty' ? ' – chưa có người trực' : '';
   const text = `Handoff: ${conv.display_name ?? conv.external_thread_id} (${conv.account_name}) – ${reason}${noOneOnDuty} – ${base}/inbox/${conv.id}`;
   await enqueueCommand(db, { kind: 'send_lark', target: 'worker', conversationId: conv.id, payload: { text } });
   await requestExtraction(db, conv.id);
   return { workerCommandQueued: true };
+}
+
+/** Handoff reason when the bot could not produce a reply. */
+export const BOT_SILENT_REASON = 'Bot không trả lời được';
+
+/** The bot's reply was given up: people take over unless they already have the conversation. Hands off once. */
+export const handOffSilentBot = (db: D1Database, env: Pick<Env, 'APP_URL'>, conversationId: string, origin?: string) =>
+  handoff(db, env, conversationId, BOT_SILENT_REASON, origin, { onlyFromAi: true });
+
+/** A reply still pending or running this long after it was queued means the bridge or GoClaw is not answering. */
+export const STALE_REPLY_MS = 10 * 60_000;
+const STALE_REPLY_BATCH = 50;
+
+/**
+ * Gives up bot replies queued more than 10 minutes ago that have not run (the sidecar is offline) or not finished,
+ * and hands each affected conversation to people once. A late result of a given-up reply is ignored, since only a
+ * claimed command accepts one. Returns the number of replies given up.
+ */
+export async function abandonStaleReplies(db: D1Database, env: Pick<Env, 'APP_URL'>, now = new Date()): Promise<number> {
+  const nowIso = now.toISOString();
+  const cutoff = new Date(now.getTime() - STALE_REPLY_MS).toISOString();
+  // A pending reply that new customer messages keep pushing back is not due yet and is left alone.
+  const stale = await db.prepare(`SELECT id, conversation_id FROM channel_command
+    WHERE kind = 'run_completion' AND json_extract(payload_json, '$.purpose') = 'reply' AND created_at < ?1
+      AND ((status = 'pending' AND next_run_at <= ?2) OR status = 'claimed')
+    ORDER BY created_at LIMIT ?3`).bind(cutoff, nowIso, STALE_REPLY_BATCH).all<{ id: string; conversation_id: string | null }>();
+  const conversations = new Set<string>();
+  let abandoned = 0;
+  for (const row of stale.results) {
+    const res = await db.prepare(`UPDATE channel_command SET status = 'failed', lease_expires_at = NULL, result_json = ?, updated_at = ?
+      WHERE id = ? AND status IN ('pending', 'claimed')`).bind(JSON.stringify({ error: 'REPLY_TIMEOUT' }), nowIso, row.id).run();
+    if (res.meta.changes !== 1) continue;
+    abandoned += 1;
+    if (row.conversation_id) conversations.add(row.conversation_id);
+  }
+  for (const conversationId of conversations) {
+    try {
+      await handOffSilentBot(db, env, conversationId);
+    } catch (error) {
+      console.error('stale_reply_handoff_error', error instanceof Error ? error.message : 'unknown');
+    }
+  }
+  return abandoned;
 }
 
 /** Asks the CRM extractor to read the conversation; a failure is logged and never blocks the mode change. */

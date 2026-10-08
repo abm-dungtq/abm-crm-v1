@@ -216,6 +216,35 @@ test('a queued bot send is dropped once the customer bot or the account bot is o
   expect(await db.prepare("SELECT status FROM message WHERE id = 'm-bot-2'").first()).toEqual({ status: 'failed' });
 });
 
+test('a bot reply that fails its last attempt hands the conversation to people once', async () => {
+  await bridge('/events', { body: { events: [messageEvent()] } });
+  const conv = (await db.prepare('SELECT id FROM conversation').first<{ id: string }>())!;
+  const [reply] = (await db.prepare("SELECT id FROM channel_command WHERE kind = 'run_completion'").all<{ id: string }>()).results;
+  const fail = async (id: string, attempts: number) => {
+    await db.prepare("UPDATE channel_command SET status = 'claimed', attempts = ?, lease_expires_at = ? WHERE id = ?")
+      .bind(attempts, new Date(Date.now() + 60_000).toISOString(), id).run();
+    return bridge(`/commands/${id}/result`, { body: { attempts, ok: false, error: 'GOCLAW_HTTP_500' } });
+  };
+  const handoffs = () => count("SELECT COUNT(*) AS n FROM channel_command WHERE kind = 'send_lark' AND payload_json LIKE '%Handoff:%'");
+
+  // An attempt that will be retried changes nothing.
+  expect((await fail(reply!.id, 2)).json.data).toEqual({ ignored: false });
+  expect(await db.prepare('SELECT mode FROM conversation WHERE id = ?').bind(conv.id).first()).toEqual({ mode: 'ai' });
+  expect(await handoffs()).toBe(0);
+
+  expect((await fail(reply!.id, 5)).json.data).toEqual({ ignored: false });
+  expect(await db.prepare('SELECT status FROM channel_command WHERE id = ?').bind(reply!.id).first()).toEqual({ status: 'failed' });
+  expect(await db.prepare('SELECT mode, handoff_reason FROM conversation WHERE id = ?').bind(conv.id).first())
+    .toEqual({ mode: 'human', handoff_reason: 'Bot không trả lời được' });
+  expect(await handoffs()).toBe(1);
+
+  // A second reply of the same conversation failing for good does not hand off again.
+  const second = await enqueueCommand(db, { kind: 'run_completion', target: 'bridge', channelAccountId: 'ca-1', conversationId: conv.id,
+    payload: { agentKey: 'sales-bot', userId: 'u', text: 'x', conversationId: conv.id, purpose: 'reply' } });
+  await fail(second, 5);
+  expect(await handoffs()).toBe(1);
+});
+
 test('a send result marks the message sent with its Zalo id', async () => {
   await bridge('/events', { body: { events: [messageEvent()] } });
   const conv = (await db.prepare('SELECT id FROM conversation').first<{ id: string }>())!;

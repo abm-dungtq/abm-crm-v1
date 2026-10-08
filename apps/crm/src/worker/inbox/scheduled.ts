@@ -1,6 +1,6 @@
 import type { Env } from '../env';
 import { linkBase, slaDueSql } from './assignment';
-import { sweepStuckOutgoing } from './conversation-flow';
+import { abandonStaleReplies, sweepStuckOutgoing } from './conversation-flow';
 import { enqueueCommand } from './dispatcher';
 import { runDueSchedules } from './group-schedules';
 import { enqueueDailyGroupSummaries } from './group-summaries';
@@ -72,6 +72,8 @@ export async function runScheduled(env: ScheduledEnv, cron: string, now = new Da
     return;
   }
   if (cron !== EVERY_MINUTE_CRON) return;
+  // Before the Worker's commands, so the Lark notice of a handoff goes out in the same minute.
+  await step('stale_replies', () => abandonStaleReplies(env.DB, env, now));
   await step('worker_commands', () => processWorkerCommands(env));
   await step('sla', () => checkSla(env.DB, now, env.APP_URL));
   await step('stuck_outgoing', () => sweepStuckOutgoing(env.DB, now));

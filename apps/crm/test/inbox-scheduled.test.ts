@@ -73,6 +73,43 @@ test('conversations not in human mode or without a deadline are not reminded', a
   expect(await reminders()).toHaveLength(0);
 });
 
+test('a bot reply the bridge has not answered for 10 minutes is given up and people take over once', async () => {
+  const sent = fakeLark();
+  await db.prepare("UPDATE conversation SET mode = 'ai', assignee_user_id = NULL WHERE id = 'conv-1'").run();
+  const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
+  const reply = async (key: string, createdMinutesAgo: number, status: 'pending' | 'claimed', nextRunMinutesAgo = createdMinutesAgo) => {
+    const id = await enqueueCommand(db, { kind: 'run_completion', target: 'bridge', channelAccountId: 'ca-1', conversationId: 'conv-1',
+      payload: { agentKey: 'sales-bot', userId: 'zalo:zalo-acc-1:cust-1', text: 'Cho em hỏi', conversationId: 'conv-1', purpose: 'reply' }, dedupeKey: key });
+    await db.prepare(`UPDATE channel_command SET status = ?, created_at = ?, next_run_at = ?,
+        lease_expires_at = CASE WHEN ? = 'claimed' THEN ? ELSE NULL END, attempts = CASE WHEN ? = 'claimed' THEN 1 ELSE 0 END WHERE id = ?`)
+      .bind(status, at(createdMinutesAgo), at(nextRunMinutesAgo), status, at(-5), status, id).run();
+    return id;
+  };
+  const offline = await reply('r-offline', 11, 'pending');
+  const stuck = await reply('r-stuck', 12, 'claimed');
+  const fresh = await reply('r-fresh', 5, 'pending');
+  // Pushed back by a customer still typing: not due yet, so not given up.
+  const extended = await reply('r-extended', 11, 'pending', -0.1);
+  const status = (id: string) => db.prepare('SELECT status, result_json FROM channel_command WHERE id = ?').bind(id).first<any>();
+
+  await runScheduled(scheduledEnv, '* * * * *');
+  expect(await status(offline)).toEqual({ status: 'failed', result_json: '{"error":"REPLY_TIMEOUT"}' });
+  expect((await status(stuck)).status).toBe('failed');
+  expect((await status(fresh)).status).toBe('pending');
+  expect((await status(extended)).status).toBe('pending');
+  expect(await db.prepare("SELECT mode, handoff_reason FROM conversation WHERE id = 'conv-1'").first())
+    .toEqual({ mode: 'human', handoff_reason: 'Bot không trả lời được' });
+  const handoffs = () => db.prepare("SELECT COUNT(*) AS n FROM channel_command WHERE kind = 'send_lark' AND payload_json LIKE '%Handoff:%'").first<{ n: number }>();
+  expect(await handoffs()).toEqual({ n: 1 });
+  expect(sent.filter((t) => t.startsWith('Handoff:'))).toEqual([expect.stringContaining('Bot không trả lời được')]);
+
+  // Another stale reply of the same conversation later gives up the reply but hands off no second time.
+  await db.prepare("UPDATE channel_command SET created_at = ?, next_run_at = ? WHERE id = ?").bind(at(11), at(1), fresh).run();
+  await runScheduled(scheduledEnv, '* * * * *');
+  expect((await status(fresh)).status).toBe('failed');
+  expect(await handoffs()).toEqual({ n: 1 });
+});
+
 test('the daily cron does none of the per-minute work', async () => {
   const sent = fakeLark();
   await db.prepare("UPDATE conversation SET sla_due_at = ? WHERE id = 'conv-1'").bind(new Date(Date.now() - 60_000).toISOString()).run();
