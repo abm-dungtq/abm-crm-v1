@@ -20,7 +20,7 @@ Hội thoại được chia thủ công hoặc tự động lần lượt cho nh
 3. Handoff: nếu hội thoại đã có người được giao thì giữ; nếu chưa và chế độ `round_robin` thì chia theo quy tắc 2; nếu `manual` thì để chưa giao.
 4. Giao thủ công: role `leader`, `head`, `director`, `admin` giao cho bất kỳ nhân viên đang hoạt động; `sale` chỉ tự nhận hội thoại chưa giao.
 5. Mỗi lần giao ghi `audit_log` (người giao, người nhận, hội thoại) và tạo lệnh `send_lark` vào nhóm: `Giao <tên KH> cho <tên NV> – <APP_URL>/inbox/<id>`; nếu người nhận có `lark_open_id` thì thêm một lệnh nhắn riêng.
-6. SLA: khi hội thoại chuyển `human` hoặc có tin khách mới ở `human`, đặt `sla_due_at = now + inbox_sla_minutes` (mặc định 15, lưu ở `inbox_setting`). Nhân viên gửi tin (web hoặc điện thoại) → `sla_due_at = NULL`. Cron thấy `sla_due_at < now` → tạo `send_lark` nhắc (dedupe theo hội thoại + `sla_due_at`) và đặt `sla_due_at = now + inbox_sla_minutes`.
+6. SLA: khi hội thoại chuyển `human` hoặc có tin khách mới ở `human` mà `sla_due_at` đang NULL, đặt `sla_due_at = now + inbox_sla_minutes` (tin khách tiếp theo không lùi hạn, để khách nhắn liên tục vẫn được nhắc; rời `human` thì xoá hạn) (mặc định 15, lưu ở `inbox_setting`). Nhân viên gửi tin (web hoặc điện thoại) → `sla_due_at = NULL`. Cron thấy `sla_due_at < now` → tạo `send_lark` nhắc (dedupe theo hội thoại + `sla_due_at`) và đặt `sla_due_at = now + inbox_sla_minutes`.
 
 ## Dọn tin gửi bị kẹt
 
