@@ -14,6 +14,7 @@
 - Engineering: [môi trường](engineering/environments.md), [seed/config](engineering/seed-config-structure.md), [deploy](engineering/deployment-baseline.md), [test strategy](engineering/test-strategy.md).
 - Operations: [backup/restore plan](operations/backup-restore-plan.md); SLA còn cần drill chứng minh.
 - MISA: [coverage](integrations/misa/misa-coverage-v1.md), [đối soát payment](integrations/misa/payment-reconciliation-rules-v1.md).
+- Inbox đa kênh: [prompt agent GoClaw](integrations/goclaw-inbox-agents.md) cho agent khách hàng, `crm-extractor` và `group-summarizer`.
 
 ## Các thư mục sẽ được bổ sung
 

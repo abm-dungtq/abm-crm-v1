@@ -104,3 +104,11 @@ Spawn the `kongming` subagent for next-step counsel and pass:
 Apply kongming's guidance, then re-run the Verify step.
 If `kongming` cannot be spawned in this environment, STOP and report the same
 failure evidence to the user. Never continue by self-reasoning.
+
+## Tiến độ (2026-10-08)
+
+Phần Worker, migration, test và tài liệu đã xong (Task 7.1–7.5, 7.7 cho phần backend). Phase vẫn `pending` vì còn Task 7.6 (UI) chờ nhánh giao diện Inbox merge trước:
+
+- Còn lại: `apps/crm/src/web/pages/intakes.tsx`, `apps/crm/src/web/components/intake-card.tsx`, sửa `router.tsx`, `layout.tsx`, `pages/inbox.tsx`, `api.ts`; Verify `pnpm -F @abm/crm build`.
+- API cho UI: `GET /api/inbox/intakes?status=pending&conversationId=` trả `{ id, conversationId, conversationName, externalThreadId, channel, accountName, contactId, fields, proposed, status, leadId, classifiedByUserId, classifiedAt, createdAt, updatedAt }[]`; `POST /api/inbox/intakes/:id/classify` `{ pipeline: 'b2b'|'learner', input }` (input là form `createLeadInput` / `createLearnerLeadInput`, server đặt `source`); `POST .../discard`; `POST .../confirm-field` `{ field }`; `POST .../link-contact` `{ contactId }`; `POST /api/inbox/conversations/:id/extract`. Lỗi: 404 `NOT_FOUND`, 409 `STALE_VERSION` (intake không còn `pending`), 409 `DUPLICATE_SUSPECTED` (kèm `details`), 422 `VALIDATION_FAILED` (kèm `fields`).
+- Ngoài danh sách Files: `apps/crm/test/inbox-flow.test.ts` chọn lệnh `reply` theo `purpose`, vì trả lại AI giờ thêm một lệnh `extract`.

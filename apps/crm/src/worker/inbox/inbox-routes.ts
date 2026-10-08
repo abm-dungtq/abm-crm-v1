@@ -1,10 +1,13 @@
 import { Hono, type Context } from 'hono';
-import { CONVERSATION_MODES, type RoleCode } from '@abm/contracts';
+import { CONVERSATION_MODES, type ApiResult, type RoleCode } from '@abm/contracts';
 import { z } from 'zod';
 import { background, type Actor, type AppBindings } from '../env';
 import { ASSIGNABLE_ROLES, ROUND_ROBIN_ROLES, assignConversation, linkBase, loadInboxSettings, type AssignOutcome } from './assignment';
 import { STAFF_TEXT_MAX, setMode, staffSend } from './conversation-flow';
 import { enqueueCommand } from './dispatcher';
+import {
+  INTAKE_FIELDS, classifyIntake, confirmProposedField, discardIntake, enqueueExtraction, linkIntakeContact, type IntakeFields,
+} from './intake';
 import { processWorkerCommands } from './worker-commands';
 
 /** Inbox API for the web app. Inbox roles see every conversation of the organization; channel accounts are admin-only. */
@@ -343,6 +346,87 @@ inboxRoutes.put('/customer-bot-switch', adminOnly, async (c) => {
     auditRow(db, actor, 'inbox.setCustomerBotSwitch', 'customer_bot_switch', '1', { enabled: before?.enabled === 1 }, { enabled: enabled === 1 }, now),
   ]);
   return c.json(ok({ enabled: enabled === 1, updatedAt: now }));
+});
+
+// ---------- lead intake (ADR-009) ----------
+
+const INTAKE_STATUSES = ['pending', 'classified', 'discarded'] as const;
+const INTAKE_PAGE = 100;
+const intakeIdInput = z.string().trim().min(1).max(64);
+const classifyInput = z.object({
+  pipeline: z.enum(['b2b', 'learner']),
+  /** The staff form, passed to createLead / createLearnerLead as sent; `source` is set from the channel. */
+  input: z.record(z.string(), z.unknown()),
+});
+const confirmFieldInput = z.object({ field: z.enum(INTAKE_FIELDS) });
+const linkContactInput = z.object({ contactId: intakeIdInput });
+
+/** HTTP status of a command error, the same mapping as the command API. */
+const COMMAND_STATUS: Partial<Record<string, 403 | 404 | 409 | 422>> = {
+  FORBIDDEN: 403, NOT_FOUND: 404, STALE_VERSION: 409, IDEMPOTENCY_CONFLICT: 409, DUPLICATE_SUSPECTED: 409,
+  VALIDATION_FAILED: 422, APPROVAL_REQUIRED: 409, KILL_SWITCH_ON: 409,
+};
+const commandResponse = <T>(c: Ctx, result: ApiResult<T>) =>
+  result.ok ? c.json(result) : c.json(result, COMMAND_STATUS[result.error.code] ?? 400);
+
+interface IntakeListRow {
+  id: string; conversationId: string; conversationName: string | null; externalThreadId: string; channel: string; accountName: string;
+  contactId: string | null; fieldsJson: string; status: string; leadId: string | null; classifiedByUserId: string | null;
+  classifiedAt: string | null; createdAt: string; updatedAt: string;
+}
+
+/** Intakes of the organization, newest first: `status` (default pending) and optionally one conversation. */
+inboxRoutes.get('/intakes', async (c) => {
+  const status = c.req.query('status') || 'pending';
+  if (!(INTAKE_STATUSES as readonly string[]).includes(status)) return invalidQuery(c, 'status');
+  const where = ['i.organization_id = ?', 'i.status = ?'];
+  const binds: unknown[] = [c.get('actor').organizationId, status];
+  const conversationId = c.req.query('conversationId');
+  if (conversationId) { where.push('i.conversation_id = ?'); binds.push(conversationId); }
+  const rows = await c.env.DB.prepare(`SELECT i.id, i.conversation_id AS conversationId, c.display_name AS conversationName,
+      c.external_thread_id AS externalThreadId, a.channel, a.display_name AS accountName, i.contact_id AS contactId,
+      i.fields_json AS fieldsJson, i.status, i.lead_id AS leadId, i.classified_by_user_id AS classifiedByUserId,
+      i.classified_at AS classifiedAt, i.created_at AS createdAt, i.updated_at AS updatedAt
+    FROM lead_intake i JOIN conversation c ON c.id = i.conversation_id JOIN channel_account a ON a.id = c.channel_account_id
+    WHERE ${where.join(' AND ')} ORDER BY i.created_at DESC, i.id DESC LIMIT ?`).bind(...binds, INTAKE_PAGE).all<IntakeListRow>();
+  return c.json(ok(rows.results.map(({ fieldsJson, ...row }) => {
+    const { proposed = {}, ...values } = JSON.parse(fieldsJson) as IntakeFields;
+    return { ...row, fields: values, proposed };
+  })));
+});
+
+inboxRoutes.post('/intakes/:id/classify', async (c) => {
+  const input = await body(c, classifyInput);
+  if ('error' in input) return input.error;
+  return commandResponse(c, await classifyIntake(c.env.DB, c.get('actor'), c.req.param('id'), input.data));
+});
+
+inboxRoutes.post('/intakes/:id/discard', async (c) =>
+  commandResponse(c, await discardIntake(c.env.DB, c.get('actor'), c.req.param('id'))));
+
+inboxRoutes.post('/intakes/:id/confirm-field', async (c) => {
+  const input = await body(c, confirmFieldInput);
+  if ('error' in input) return input.error;
+  return commandResponse(c, await confirmProposedField(c.env.DB, c.get('actor'), c.req.param('id'), input.data.field));
+});
+
+inboxRoutes.post('/intakes/:id/link-contact', async (c) => {
+  const input = await body(c, linkContactInput);
+  if ('error' in input) return input.error;
+  return commandResponse(c, await linkIntakeContact(c.env.DB, c.get('actor'), c.req.param('id'), input.data.contactId));
+});
+
+/** "Cập nhật CRM": asks the extractor to read a direct conversation now. */
+inboxRoutes.post('/conversations/:id/extract', async (c) => {
+  const actor = c.get('actor');
+  const db = c.env.DB;
+  const conv = await db.prepare('SELECT id, kind FROM conversation WHERE id = ? AND organization_id = ?')
+    .bind(c.req.param('id'), actor.organizationId).first<{ id: string; kind: string }>();
+  if (!conv) return c.json(notFound, 404);
+  const commandId = conv.kind === 'direct' ? await enqueueExtraction(db, conv.id) : null;
+  if (!commandId) return c.json(fail('VALIDATION_FAILED', 'Chỉ trích được hội thoại 1-1 đã có tin nhắn'), 422);
+  await auditRow(db, actor, 'inbox.requestExtraction', 'conversation', conv.id, null, { commandId }, new Date().toISOString()).run();
+  return c.json(ok({ commandId }));
 });
 
 inboxRoutes.all('*', (c) => c.json(notFound, 404));

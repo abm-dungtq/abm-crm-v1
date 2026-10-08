@@ -2,6 +2,7 @@ import type { ConversationMode } from '@abm/contracts';
 import type { Actor, Env } from '../env';
 import { autoAssignOnHandoff, linkBase, slaDueSql } from './assignment';
 import { enqueueCommand, type CommandTarget } from './dispatcher';
+import { enqueueExtraction } from './intake';
 
 /**
  * Conversation rules of the customer-facing bot (ADR-009): when the bot may reply, how customer turns
@@ -143,7 +144,17 @@ export async function handoff(db: D1Database, env: Pick<Env, 'APP_URL'>, convers
   const noOneOnDuty = assignment.status === 'no_one_on_duty' ? ' – chưa có người trực' : '';
   const text = `Handoff: ${conv.display_name ?? conv.external_thread_id} (${conv.account_name}) – ${reason}${noOneOnDuty} – ${base}/inbox/${conv.id}`;
   await enqueueCommand(db, { kind: 'send_lark', target: 'worker', conversationId: conv.id, payload: { text } });
+  await requestExtraction(db, conv.id);
   return { workerCommandQueued: true };
+}
+
+/** Asks the CRM extractor to read the conversation; a failure is logged and never blocks the mode change. */
+async function requestExtraction(db: D1Database, conversationId: string) {
+  try {
+    await enqueueExtraction(db, conversationId);
+  } catch (error) {
+    console.error('extract_enqueue_error', error instanceof Error ? error.message : 'unknown');
+  }
 }
 
 /**
@@ -226,6 +237,8 @@ export async function setMode(db: D1Database, actor: Actor, conversationId: stri
     auditStatement(db, actor, 'inbox.setMode', conv.id, { mode: conv.mode, assigneeUserId: conv.assignee_user_id },
       { mode, assigneeUserId: assignee }, now),
   ]);
+  // Handing the conversation back to the bot is a natural point to capture what staff learned.
+  if (mode === 'ai' && conv.mode !== 'ai') await requestExtraction(db, conv.id);
   return { mode, assigneeUserId: assignee };
 }
 

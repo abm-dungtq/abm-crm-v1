@@ -2,6 +2,7 @@ import type { Env } from '../env';
 import { linkBase, slaDueSql } from './assignment';
 import { sweepStuckOutgoing } from './conversation-flow';
 import { enqueueCommand } from './dispatcher';
+import { extractIdleConversations } from './intake';
 import { processWorkerCommands } from './worker-commands';
 
 /** Cron Trigger work. Every task logs and continues on failure, so the scheduled handler never throws. */
@@ -66,4 +67,5 @@ export async function runScheduled(env: ScheduledEnv, cron: string, now = new Da
   await step('worker_commands', () => processWorkerCommands(env));
   await step('sla', () => checkSla(env.DB, now, env.APP_URL));
   await step('stuck_outgoing', () => sweepStuckOutgoing(env.DB, now));
+  await step('extract_idle', () => extractIdleConversations(env.DB, now));
 }

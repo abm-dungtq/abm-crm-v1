@@ -10,6 +10,9 @@
 -- (or 1 when no lead remains). fee_counter is removed when no charge remains,
 -- otherwise it is one past the highest remaining HP code.
 -- Does not delete app_user, team, department, organization, user_session, or agent_token.
+-- Inbox conversations and messages stay. A conversation linked to a demo contact is unlinked, and
+-- lead intakes classified into a demo lead or contact are removed with their audit rows.
+-- Comments here never contain a semicolon: the test runner splits statements on it.
 -- Id sets are ordinary tables, dropped at the end. D1 rejects TEMP tables and PRAGMA foreign_keys.
 -- Usage from apps/crm, only when you intend to change remote data:
 --   node node_modules/wrangler/bin/wrangler.js d1 execute abm-crm-eval --remote --file seed/cleanup-demo.sql
@@ -174,7 +177,18 @@ WHERE id LIKE 'demo-%'
    OR entity_id IN (
      SELECT id FROM partner_contract_step
      WHERE id LIKE 'demo-%' OR contract_id IN (SELECT id FROM demo_contract)
+   )
+   OR entity_id IN (
+     SELECT id FROM lead_intake
+     WHERE lead_id IN (SELECT id FROM demo_lead) OR contact_id IN (SELECT id FROM demo_contact)
    );
+
+-- Inbox conversations are not demo data: they keep their messages and only lose the link to a demo customer.
+UPDATE conversation SET contact_id = NULL WHERE contact_id IN (SELECT id FROM demo_contact);
+
+DELETE FROM lead_intake
+WHERE lead_id IN (SELECT id FROM demo_lead)
+   OR contact_id IN (SELECT id FROM demo_contact);
 
 DELETE FROM payment_allocation
 WHERE charge_id IN (SELECT id FROM demo_charge)

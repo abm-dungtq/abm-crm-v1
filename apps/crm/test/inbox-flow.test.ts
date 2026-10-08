@@ -211,8 +211,11 @@ test('after returning to ai the next bot turn starts with what staff discussed',
   const mode = await web('u-lan', 'POST', `/inbox/conversations/${conv.id}/mode`, { mode: 'ai' });
   expect(mode).toEqual({ status: 200, json: { ok: true, data: { mode: 'ai', assigneeUserId: 'u-lan' } } });
   await ingest(message({ text: 'Lớp còn chỗ không em' }));
-  const [command] = await commands('run_completion');
-  expect(command.payload.text).toBe('[Nhân viên đã trao đổi: Nhân viên: Em gửi chị lịch học nhé\nKhách: Cảm ơn em]\nLớp còn chỗ không em');
+  // Returning to ai also asks the CRM extractor to read the conversation; the bot reply is the `reply` completion.
+  const completions = await commands('run_completion');
+  const reply = completions.find((c) => c.payload.purpose === 'reply');
+  expect(reply?.payload.text).toBe('[Nhân viên đã trao đổi: Nhân viên: Em gửi chị lịch học nhé\nKhách: Cảm ơn em]\nLớp còn chỗ không em');
+  expect(completions.filter((c) => c.payload.purpose === 'extract')).toHaveLength(1);
   expect((await conversation()).staff_context_pending).toBeNull();
 });
 
