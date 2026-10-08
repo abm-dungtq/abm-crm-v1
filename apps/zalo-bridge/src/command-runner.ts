@@ -16,6 +16,8 @@ const MAX_RESULT_TEXT = 20_000;
 const MAX_ERROR_CHARS = 2000;
 /** Pause after a failed poll before polling again. */
 const POLL_ERROR_DELAY_MS = 5000;
+/** Send commands whose delivered chunks are remembered; the oldest is forgotten beyond this. */
+const MAX_SEND_PROGRESS = 1000;
 
 const completionPayload = z.object({ agentKey: z.string().min(1), userId: z.string().min(1), text: z.string() });
 const sendPayload = z.object({ threadId: z.string().min(1), threadKind: z.enum(['direct', 'group']), text: z.string() });
@@ -46,6 +48,9 @@ export interface CommandRunnerOptions {
 }
 
 type Outcome = Omit<BridgeCommandResult, 'attempts'>;
+
+/** Chunks of one send command that already reached Zalo, and the id of the first one. */
+interface SendProgress { delivered: number; firstMsgId: string }
 
 /**
  * Splits text into chunks of at most `max` characters at line boundaries. The newline where a chunk ends is the
@@ -85,6 +90,12 @@ export class CommandRunner {
   /** Commands queued or running, with the attempts of their latest claim. */
   private readonly inFlight = new Map<string, BridgeCommand>();
   private readonly running = new Set<Promise<void>>();
+  /**
+   * Delivered chunks per send command, so a retry (the same command claimed again after a failure or a lost
+   * result) continues with the next chunk instead of sending the customer the earlier ones twice. Kept in
+   * memory: one bridge instance runs the commands, and a restart loses at most a duplicate of sent chunks.
+   */
+  private readonly sendProgress = new Map<string, SendProgress>();
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly random: () => number;
   private readonly log: Logger;
@@ -152,7 +163,9 @@ export class CommandRunner {
       commandId: command.id, kind: command.kind, attempts: command.attempts, ok: outcome.ok, code: outcome.error,
     });
     const leaseEnd = command.leaseExpiresAt ? Date.parse(command.leaseExpiresAt) : NaN;
-    await this.options.crm.postResult(command.id, { attempts: command.attempts, ...outcome }, Number.isFinite(leaseEnd) ? leaseEnd : 0);
+    const delivered = await this.options.crm.postResult(command.id, { attempts: command.attempts, ...outcome }, Number.isFinite(leaseEnd) ? leaseEnd : 0);
+    // A send is forgotten once the Worker has its success; until then a re-claim must not send it again.
+    if (delivered && outcome.ok) this.sendProgress.delete(command.id);
   }
 
   private async perform(command: BridgeCommand): Promise<Outcome> {
@@ -190,18 +203,29 @@ export class CommandRunner {
     const chunks = splitIntoChunks(payload.data.text);
     if (!chunks.length) return { ok: false, error: 'EMPTY_TEXT' };
     const { sendMinDelayMs: min, sendMaxDelayMs: max } = this.options;
-    let firstMsgId: string | undefined;
-    for (const [index, chunk] of chunks.entries()) {
+    const progress = this.sendProgress.get(command.id);
+    let firstMsgId = progress?.firstMsgId;
+    for (let index = progress?.delivered ?? 0; index < chunks.length; index += 1) {
       await this.sleep(min + Math.floor(this.random() * (max - min + 1)));
       try {
-        const { msgId } = await this.options.accounts.send(command.channelAccountId, payload.data.threadId, payload.data.threadKind, chunk, command.id);
+        const { msgId } = await this.options.accounts.send(command.channelAccountId, payload.data.threadId, payload.data.threadKind, chunks[index]!, command.id);
         firstMsgId ??= msgId;
+        this.rememberProgress(command.id, { delivered: index + 1, firstMsgId });
       } catch (error) {
-        // Name a failure after some chunks went out, so a duplicate on retry can be traced.
+        // Name a failure after some chunks went out; the retry continues from this chunk.
         if (index > 0) return { ok: false, error: `${errorCode(error)}:PARTIAL_${index}_OF_${chunks.length}` };
         throw error;
       }
     }
     return { ok: true, externalMsgId: firstMsgId };
+  }
+
+  private rememberProgress(commandId: string, progress: SendProgress) {
+    this.sendProgress.delete(commandId);
+    this.sendProgress.set(commandId, progress);
+    if (this.sendProgress.size > MAX_SEND_PROGRESS) {
+      const oldest = this.sendProgress.keys().next().value;
+      if (oldest !== undefined) this.sendProgress.delete(oldest);
+    }
   }
 }

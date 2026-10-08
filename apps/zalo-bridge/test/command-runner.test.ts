@@ -106,6 +106,53 @@ describe('CommandRunner', () => {
     expect(results).toEqual([{ id: 's1', result: { attempts: 2, ok: true, externalMsgId: '100' } }]);
   });
 
+  it('continues a partly sent message from the next chunk when the command is claimed again', async () => {
+    let calls = 0;
+    const { runner, accounts, results } = setup({
+      send: async () => {
+        calls += 1;
+        if (calls === 2) throw Object.assign(new Error('ZALO_SEND_FAILED'), { code: 'ZALO_SEND_FAILED' });
+        return { msgId: `z${calls}` };
+      },
+    });
+    const text = Array.from({ length: 45 }, (_, i) => String(i).padEnd(99, '.')).join('\n');
+    const chunks = splitIntoChunks(text);
+    expect(chunks).toHaveLength(3);
+    const payload = { messageId: 'm1', threadId: 'cust-1', threadKind: 'direct', text };
+    runner.dispatch(command('s1', 'send_zalo', payload, 'conv-1', 1));
+    await runner.idle();
+    expect(results).toEqual([{ id: 's1', result: { attempts: 1, ok: false, error: 'ZALO_SEND_FAILED:PARTIAL_1_OF_3' } }]);
+
+    runner.dispatch(command('s1', 'send_zalo', payload, 'conv-1', 2));
+    await runner.idle();
+    // The first chunk went out once; the failed one is retried, then the rest.
+    expect(accounts.send.mock.calls.map((call) => call[3])).toEqual([chunks[0], chunks[1], chunks[1], chunks[2]]);
+    expect(results.at(-1)).toEqual({ id: 's1', result: { attempts: 2, ok: true, externalMsgId: 'z1' } });
+
+    // Once the Worker has the success, the command is forgotten: a later claim would send it as new.
+    runner.dispatch(command('s1', 'send_zalo', payload, 'conv-1', 3));
+    await runner.idle();
+    expect(accounts.send).toHaveBeenCalledTimes(7);
+  });
+
+  it('does not send again when the success of a send could not be reported', async () => {
+    const { runner, crm, accounts, results } = setup();
+    crm.postResult.mockImplementationOnce(async (id: string, result: BridgeCommandResult) => {
+      results.push({ id, result });
+      return false;
+    });
+    const payload = { messageId: 'm1', threadId: 'cust-1', threadKind: 'direct', text: 'a\n' + 'b'.repeat(2000) };
+    runner.dispatch(command('s1', 'send_zalo', payload, 'conv-1', 1));
+    await runner.idle();
+    runner.dispatch(command('s1', 'send_zalo', payload, 'conv-1', 2));
+    await runner.idle();
+    expect(accounts.send).toHaveBeenCalledTimes(2);
+    expect(results.map((r) => r.result)).toEqual([
+      { attempts: 1, ok: true, externalMsgId: '100' },
+      { attempts: 2, ok: true, externalMsgId: '100' },
+    ]);
+  });
+
   it('reports failures with the claimed attempts and an error code', async () => {
     const { runner, results } = setup({
       complete: async () => {
