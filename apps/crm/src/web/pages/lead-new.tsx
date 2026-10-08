@@ -7,8 +7,22 @@ import { NextActionFields, emptyNextAction, nextActionPayload } from '../compone
 import { Alert, Field, FormError, fieldErrors, useToast } from '../components/ui';
 
 /** Matches outside the viewer's scope come back without code, stage or owner. */
-interface DuplicateMatch { field: string; code: string | null; stage: string | null; owner: string | null }
+export interface DuplicateMatch { field: string; code: string | null; stage: string | null; owner: string | null }
 const FIELD_LABEL: Record<string, string> = { phone: 'Số điện thoại', email: 'Email', tax_code: 'Mã số thuế', company: 'Tên công ty' };
+
+/** Matches of a DUPLICATE_SUSPECTED error, or null for any other error. */
+export const duplicateMatches = (error: unknown) =>
+  (error instanceof ApiFailure && error.code === 'DUPLICATE_SUSPECTED' ? (error.error.details as DuplicateMatch[] | undefined) ?? [] : null);
+
+export function DuplicateMatches({ matches }: { matches: DuplicateMatch[] }) {
+  return (
+    <ul style={{ margin: '4px 0', paddingLeft: 18 }}>
+      {matches.map((d, i) => <li key={i}>{FIELD_LABEL[d.field] ?? d.field} trùng {d.code
+        ? <><span className="mono">{d.code}</span> · {d.stage} · {d.owner}</>
+        : 'một lead đã có trong hệ thống, ngoài phạm vi của bạn (hỏi Leader)'}</li>)}
+    </ul>
+  );
+}
 
 export function LeadNewPage() {
   const actor = useActor();
@@ -19,8 +33,7 @@ export function LeadNewPage() {
   const [next, setNext] = useState(emptyNextAction('Gọi giới thiệu và xác nhận nhu cầu'));
   const mutation = useCommand<CreateLeadInput, { leadId: string }>('createLead');
   const errors = fieldErrors(mutation.error);
-  const duplicates = mutation.error instanceof ApiFailure && mutation.error.code === 'DUPLICATE_SUSPECTED'
-    ? (mutation.error.error.details as DuplicateMatch[]) : null;
+  const duplicates = duplicateMatches(mutation.error);
   const set = (key: keyof typeof form) => (e: { target: { value: string } }) => setForm((f) => ({ ...f, [key]: e.target.value }));
 
   const submit = (confirmNotDuplicate = false) => {
@@ -78,11 +91,7 @@ export function LeadNewPage() {
           {duplicates && (
             <div className="alert" data-tone="warn" role="alert" style={{ flexDirection: 'column' }}>
               <strong>Có thể trùng với lead đã có</strong>
-              <ul style={{ margin: '4px 0', paddingLeft: 18 }}>
-                {duplicates.map((d, i) => <li key={i}>{FIELD_LABEL[d.field] ?? d.field} trùng {d.code
-                  ? <><span className="mono">{d.code}</span> · {d.stage} · {d.owner}</>
-                  : 'một lead đã có trong hệ thống, ngoài phạm vi của bạn (hỏi Leader)'}</li>)}
-              </ul>
+              <DuplicateMatches matches={duplicates} />
               <span>Nếu cùng khách, báo owner hiện tại thay vì tạo mới. Nếu chắc chắn là khách khác, xác nhận để tạo.</span>
               <div className="row-wrap" style={{ marginTop: 6 }}>
                 <button type="button" className="btn btn-sm" onClick={() => submit(true)} disabled={mutation.isPending}>Không trùng, vẫn tạo</button>

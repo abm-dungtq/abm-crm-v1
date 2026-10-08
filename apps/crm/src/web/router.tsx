@@ -36,6 +36,8 @@ import { PipelinePage } from './pages/pipeline';
 import { TasksPage } from './pages/tasks';
 import { ChannelAccountsPage } from './pages/channel-accounts';
 import { InboxConversationPage, InboxIndexPage, InboxPage } from './pages/inbox';
+import { InboxSettingsPage } from './pages/inbox-settings';
+import { IntakesPage } from './pages/intakes';
 
 function Root() {
   const mode = useAuthMode();
@@ -90,6 +92,7 @@ const tabs = ['active', 'queue', 'won', 'lost', 'all'] as const;
 const inboxRoute = createRoute({ getParentRoute: () => rootRoute, path: '/inbox', component: InboxPage });
 const inboxChildren = [
   createRoute({ getParentRoute: () => inboxRoute, path: '/', component: InboxIndexPage }),
+  createRoute({ getParentRoute: () => inboxRoute, path: 'settings', component: InboxSettingsPage }),
   createRoute({ getParentRoute: () => inboxRoute, path: '$conversationId', component: InboxConversationPage }),
 ] as const;
 
@@ -137,6 +140,7 @@ const routes = [
   createRoute({ getParentRoute: () => rootRoute, path: '/privacy', component: PrivacyRequestsPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/audit', component: AuditPage }),
   inboxRoute.addChildren(inboxChildren),
+  createRoute({ getParentRoute: () => rootRoute, path: '/intakes', component: IntakesPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/channel-accounts', component: ChannelAccountsPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/admin', component: AdminPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/admin/users', component: AdminUsersPage }),

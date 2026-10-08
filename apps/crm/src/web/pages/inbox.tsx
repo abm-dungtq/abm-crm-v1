@@ -1,18 +1,25 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { Link, Outlet, useParams } from '@tanstack/react-router';
+import { Link, Outlet, useParams, useRouterState } from '@tanstack/react-router';
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ConversationMode } from '@abm/contracts';
 import { useActor } from '../actor-context';
-import { ApiFailure, getConversation, listAccounts, listConversations, setMode } from '../api';
+import { ApiFailure, assignConversation, getConversation, listAccounts, listConversations, listRoster, setMode } from '../api';
+import { Icon } from '../components/icons';
 import { InboxThread, MODE_LABEL, ModeBadge, channelLabel, conversationName, fmtShortTime } from '../components/inbox-thread';
-import { Empty, ErrorState, FormError, Loading, useToast } from '../components/ui';
+import { IntakeCard } from '../components/intake-card';
+import { roleLabel } from '../components/layout';
+import { Empty, ErrorState, FormError, Loading, useDebounced, useToast } from '../components/ui';
 import { fmtDateTime } from '../format';
-import type { ChannelAccount, ConversationFilter, InboxConversation, SetModeResult } from '../types';
+import type { AssignResult, ChannelAccount, ConversationFilter, InboxConversation, RosterMember, SetModeResult } from '../types';
+import { INBOX_SETTINGS_ROLES, ROSTER_KEY } from './inbox-settings';
 
 /** Conversation list polling interval. */
 const LIST_POLL_MS = 5000;
 /** Page size of GET /inbox/conversations. */
 const CONVERSATION_PAGE = 50;
+
+/** Roles the Worker lets assign a conversation to anyone; a sale only claims an unassigned one. */
+const MANAGER_ROLES: readonly string[] = ['leader', 'head', 'director', 'admin'];
 
 type AssigneeTab = 'mine' | 'none' | 'all';
 const ASSIGNEE_TABS: [AssigneeTab, string][] = [['mine', 'Của tôi'], ['none', 'Chưa giao'], ['all', 'Tất cả']];
@@ -22,8 +29,10 @@ const SENDER_PREFIX: Record<string, string> = { bot: 'Bot: ', staff_web: 'Nhân 
 /** `/inbox` and `/inbox/$conversationId`: the list stays mounted so its filters survive opening a conversation. */
 export function InboxPage() {
   const { conversationId } = useParams({ strict: false });
+  // On small screens only one column shows: the list at /inbox, the open conversation or settings below it.
+  const atList = useRouterState({ select: (s) => /^\/inbox\/?$/.test(s.location.pathname) });
   return (
-    <div className="inbox" data-view={conversationId ? 'thread' : 'list'}>
+    <div className="inbox" data-view={atList ? 'list' : 'thread'}>
       <h1 className="visually-hidden">Inbox</h1>
       <ConversationList selectedId={conversationId ?? null} />
       <div className="inbox-main"><Outlet /></div>
@@ -60,12 +69,6 @@ export function InboxConversationPage() {
   );
 }
 
-function useDebounced(value: string, ms: number) {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => { const t = setTimeout(() => setDebounced(value), ms); return () => clearTimeout(t); }, [value, ms]);
-  return debounced;
-}
-
 function ConversationList({ selectedId }: { selectedId: string | null }) {
   const actor = useActor();
   const [tab, setTab] = useState<AssigneeTab>('all');
@@ -97,6 +100,9 @@ function ConversationList({ selectedId }: { selectedId: string | null }) {
   return (
     <section className="inbox-list" aria-label="Danh sách hội thoại">
       <div className="inbox-filters">
+        {INBOX_SETTINGS_ROLES.includes(actor.role) && (
+          <Link to="/inbox/settings" className="btn btn-ghost btn-sm" style={{ alignSelf: 'flex-end' }}><Icon name="settings" />Cài đặt chia việc</Link>
+        )}
         <div className="tabs" role="tablist" aria-label="Lọc theo người được giao" style={{ marginBottom: 0 }}>
           {ASSIGNEE_TABS.map(([value, label]) => (
             <button key={value} role="tab" aria-selected={tab === value} onClick={() => setTab(value)}>{label}</button>
@@ -171,10 +177,7 @@ function ConversationPanel({ conversation: c }: { conversation: InboxConversatio
   });
   return (
     <aside className="inbox-side" aria-label="Thông tin hội thoại">
-      <PanelSection title="Người được giao">
-        <span>{c.assigneeName ?? 'Chưa giao'}</span>
-        {c.assignedAt && <span className="small muted">Từ {fmtDateTime(c.assignedAt)}</span>}
-      </PanelSection>
+      <AssigneeSection conversation={c} />
       <PanelSection title="Chế độ">
         <span><ModeBadge mode={c.mode} /></span>
         {c.handoffReason && <p className="small text-2 inbox-handoff"><strong>Lý do chuyển người:</strong> {c.handoffReason}</p>}
@@ -188,6 +191,7 @@ function ConversationPanel({ conversation: c }: { conversation: InboxConversatio
           </button>
         ))}
       </div>
+      {c.kind === 'direct' && <IntakeCard conversation={c} />}
       <PanelSection title="Kênh">
         <span className="small">{channelLabel(c)}{c.kind === 'group' ? ' · Nhóm' : ''}</span>
         {c.lastInboundAt && <span className="small muted">Khách nhắn lần cuối {fmtDateTime(c.lastInboundAt)}</span>}
@@ -202,5 +206,50 @@ function PanelSection({ title, children }: { title: string; children: ReactNode 
       <div className="field-label">{title}</div>
       {children}
     </div>
+  );
+}
+
+/** Who handles the conversation and, for the roles allowed to, assigning it (managers) or claiming it (sale). */
+function AssigneeSection({ conversation: c }: { conversation: InboxConversation }) {
+  const actor = useActor();
+  const client = useQueryClient();
+  const toast = useToast();
+  const manager = MANAGER_ROLES.includes(actor.role);
+  const canClaim = actor.role === 'sale' && !c.assigneeUserId;
+  const roster = useQuery<RosterMember[], ApiFailure>({ queryKey: ROSTER_KEY, queryFn: listRoster, enabled: manager, staleTime: 60_000 });
+  const [userId, setUserId] = useState(c.assigneeUserId ?? '');
+  useEffect(() => setUserId(c.assigneeUserId ?? ''), [c.id, c.assigneeUserId]);
+  const assign = useMutation<AssignResult, ApiFailure, string>({
+    mutationFn: (to) => assignConversation(c.id, to),
+    onSuccess: (r) => toast(r.assigneeUserId === actor.id ? 'Đã nhận hội thoại' : `Đã giao cho ${r.assigneeName}`),
+    onSettled: () => client.invalidateQueries({ queryKey: ['inbox'] }),
+  });
+  const overdue = c.slaDueAt !== null && Date.parse(c.slaDueAt) < Date.now();
+  return (
+    <PanelSection title="Người được giao">
+      <span>{c.assigneeName ?? 'Chưa giao'}</span>
+      {c.assignedAt && <span className="small muted">Từ {fmtDateTime(c.assignedAt)}</span>}
+      {c.slaDueAt && (
+        <span className={`small ${overdue ? 'inbox-sla-overdue' : 'muted'}`}>
+          {overdue ? 'Quá hạn trả lời từ' : 'Hạn trả lời'} {fmtDateTime(c.slaDueAt)}
+        </span>
+      )}
+      <FormError error={assign.error} />
+      {canClaim && (
+        <button className="btn btn-primary" disabled={assign.isPending} onClick={() => assign.mutate(actor.id)}>Nhận</button>
+      )}
+      {manager && (
+        <form className="row" onSubmit={(e) => { e.preventDefault(); if (userId) assign.mutate(userId); }}>
+          <select aria-label="Giao hội thoại cho" value={userId} onChange={(e) => setUserId(e.target.value)} disabled={!roster.data} style={{ flex: 1, minWidth: 0 }}>
+            <option value="">{roster.isLoading ? 'Đang tải…' : 'Chọn nhân viên'}</option>
+            {roster.data?.map((m) => (
+              <option key={m.userId} value={m.userId}>{m.displayName} · {roleLabel(m.role)}{m.onDuty ? ' · đang trực' : ''}</option>
+            ))}
+          </select>
+          <button type="submit" className="btn" disabled={!userId || userId === c.assigneeUserId || assign.isPending}>Giao</button>
+        </form>
+      )}
+      {roster.error && <ErrorState error={roster.error} onRetry={() => roster.refetch()} />}
+    </PanelSection>
   );
 }

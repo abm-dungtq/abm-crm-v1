@@ -182,7 +182,9 @@ export function InboxThread({ conversation }: { conversation: InboxConversation 
         <Link to="/inbox" className="btn btn-ghost icon-btn inbox-back" aria-label="Quay lại danh sách hội thoại"><Icon name="arrow" style={{ transform: 'rotate(180deg)' }} /></Link>
         <div className="truncate" style={{ flex: 1 }}>
           <div className="truncate" style={{ fontWeight: 600 }}>{conversationName(conversation)}</div>
-          <div className="small muted truncate">{channelLabel(conversation)}{conversation.kind === 'group' ? ' · Nhóm' : ''}</div>
+          <div className="small muted truncate">
+            {channelLabel(conversation)}{conversation.kind === 'group' ? ' · Nhóm' : ''} · {conversation.assigneeName ? `Giao cho ${conversation.assigneeName}` : 'Chưa giao'}
+          </div>
         </div>
         <ModeBadge mode={conversation.mode} />
       </header>
