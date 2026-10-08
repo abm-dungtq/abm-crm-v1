@@ -1,7 +1,7 @@
 ---
 title: "CRM: inbox đa kênh Zalo cá nhân + Fanpage, chatbot GoClaw"
 description: "Thêm Inbox vào ABM CRM gom tin Zalo cá nhân (số chung công ty) và Fanpage, GoClaw deepseek-flash trả lời ở chế độ AI, nhân viên tiếp quản ngay trong CRM, lead chờ phân loại, chia việc, quản lý nhóm Zalo có tin định kỳ và tóm tắt hằng ngày gửi Lark."
-status: pending
+status: in-progress
 priority: P1
 effort: 14-17d
 branch: main

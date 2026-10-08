@@ -1,7 +1,8 @@
 ---
 phase: 1
 title: "ADR và điều kiện trước"
-status: pending
+status: in-progress
+note: "Chỉ còn Task 1.6 (user nộp Meta App Review); các task khác đã xong."
 priority: P1
 effort: "1d"
 dependencies: []
