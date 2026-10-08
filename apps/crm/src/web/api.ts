@@ -6,6 +6,7 @@ import type {
   GroupScheduleInput, InboxConversation, InboxMessage, InboxSettings, InboxSettingsUpdate, IntakeField, IntakePipeline, IntakeStatus,
   IntakeValues, LeadIntake, RosterMember, SendMessageResult, SetModeResult, ZaloGroup, ZaloGroupUpdate,
 } from './types';
+import { conversationsPath } from './inbox-format';
 
 const USER_KEY = 'abm-crm-demo-user';
 
@@ -100,17 +101,6 @@ export function useCommand<I, T = unknown>(name: CommandName) {
 
 // ---------- omnichannel inbox ----------
 const enc = encodeURIComponent;
-
-/** Query string of GET /inbox/conversations; empty filters are left out. */
-export function conversationsPath(filter: ConversationFilter = {}) {
-  const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(filter) as [keyof ConversationFilter, string | undefined][]) {
-    const text = value?.trim();
-    if (text) params.set(key, text);
-  }
-  const query = params.toString();
-  return `/inbox/conversations${query ? `?${query}` : ''}`;
-}
 
 export const listConversations = (filter: ConversationFilter = {}) => api.get<InboxConversation[]>(conversationsPath(filter));
 export const getConversation = (id: string) => api.get<InboxConversation>(`/inbox/conversations/${enc(id)}`);

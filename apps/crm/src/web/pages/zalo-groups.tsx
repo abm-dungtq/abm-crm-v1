@@ -11,6 +11,7 @@ import { Icon } from '../components/icons';
 import { InboxThread, conversationName, fmtShortTime } from '../components/inbox-thread';
 import { Alert, Badge, Empty, ErrorState, Field, FormError, Loading, Modal, fieldErrors, useToast, type Tone } from '../components/ui';
 import { fmtDateTime } from '../format';
+import { WEEKDAYS, weekdaysLabel } from '../inbox-format';
 import type {
   ChannelAccount, GroupSchedule, GroupScheduleInput, GroupScheduleStatus, InboxConversation, InboxSettings, ScheduleSkipReason, ZaloGroup,
   ZaloGroupUpdate,
@@ -25,14 +26,6 @@ const CONVERSATION_POLL_MS = 5000;
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 /** Monday to Friday, the default of a new schedule. */
 const WORKDAYS_MASK = 0b0011111;
-const EVERY_DAY_MASK = 0b1111111;
-
-/** Bit 0 = Monday … bit 6 = Sunday, as on the Worker. */
-const WEEKDAYS = ['T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'CN'] as const;
-export function weekdaysLabel(mask: number) {
-  if ((mask & EVERY_DAY_MASK) === EVERY_DAY_MASK) return 'Hằng ngày';
-  return WEEKDAYS.filter((_, i) => (mask & (1 << i)) !== 0).join(', ') || '—';
-}
 
 const STATUS_LABEL: Record<GroupScheduleStatus, [string, Tone]> = {
   draft: ['Nháp', 'neutral'],

@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ConversationMode } from '@abm/contracts';
 import { ApiFailure, listMessages, sendMessage } from '../api';
 import { fmtDateTime } from '../format';
+import { mergeMessages } from '../inbox-format';
 import type { InboxConversation, InboxMessage, SendMessageResult } from '../types';
 import { Icon } from './icons';
 import { Badge, ErrorState, FormError, Loading, type Tone } from './ui';
@@ -36,14 +37,6 @@ export function fmtShortTime(iso: string | null | undefined) {
   if (!iso) return '';
   const d = new Date(iso);
   return dayKey.format(d) === dayKey.format(new Date()) ? timeOnly.format(d) : dayMonth.format(d);
-}
-
-/** Adds or replaces messages by id, keeping the list oldest first. */
-export function mergeMessages(prev: InboxMessage[], incoming: InboxMessage[]) {
-  if (!incoming.length) return prev;
-  const byId = new Map(prev.map((m) => [m.id, m]));
-  for (const m of incoming) byId.set(m.id, m);
-  return [...byId.values()].sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
 }
 
 export const messagesKey = (conversationId: string) => ['inbox', 'messages', conversationId] as const;
