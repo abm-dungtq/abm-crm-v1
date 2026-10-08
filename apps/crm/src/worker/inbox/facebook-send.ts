@@ -123,12 +123,38 @@ async function failOutsideWindow(db: D1Database, command: ClaimedCommand, messag
   ]);
 }
 
+/** Parts of a split message already accepted by Messenger, recorded in the command payload by the claim that sent them. */
+interface SendProgress { sentChunks: number; firstMid: string | null }
+
+function readProgress(payload: unknown): SendProgress | null {
+  const { sentChunks, firstMid } = (payload ?? {}) as { sentChunks?: unknown; firstMid?: unknown };
+  if (typeof sentChunks !== 'number' || !Number.isInteger(sentChunks) || sentChunks < 1) return null;
+  return { sentChunks, firstMid: typeof firstMid === 'string' ? firstMid : null };
+}
+
+/**
+ * Records that the first `sentChunks` parts reached Messenger, only while this claim still owns the command and the
+ * count only grows. False means the claim was lost: a newer claim continues the message, so this one must stop.
+ */
+async function recordProgress(db: D1Database, command: ClaimedCommand, progress: SendProgress): Promise<boolean> {
+  const res = await db.prepare(`UPDATE channel_command
+      SET payload_json = json_set(payload_json, '$.sentChunks', ?1, '$.firstMid', ?2), updated_at = ?3
+    WHERE id = ?4 AND status = 'claimed' AND attempts = ?5
+      AND COALESCE(json_extract(payload_json, '$.sentChunks'), 0) < ?1`)
+    .bind(progress.sentChunks, progress.firstMid, new Date().toISOString(), command.id, command.attempts)
+    .run();
+  return res.meta.changes === 1;
+}
+
 interface SendRow {
   status: string; sender_kind: string; body: string; conversation_id: string; external_thread_id: string;
   last_inbound_at: string | null; channel: string; page_id: string | null; send_paused: number;
 }
 
-/** Runs one claimed `send_messenger` command to completion or failure. Safe to run again after a lost lease. */
+/**
+ * Runs one claimed `send_messenger` command to completion or failure. Safe to run again after a lost lease or a
+ * failed attempt: the parts already sent are recorded in the command (`sentChunks`), so a retry sends only the rest.
+ */
 export async function sendMessengerCommand(env: MessengerSendEnv, command: ClaimedCommand): Promise<void> {
   const db = env.DB;
   const messageId = (command.payload as { messageId?: unknown } | null)?.messageId;
@@ -138,8 +164,12 @@ export async function sendMessengerCommand(env: MessengerSendEnv, command: Claim
     FROM message m JOIN conversation c ON c.id = m.conversation_id JOIN channel_account a ON a.id = c.channel_account_id
     WHERE m.id = ? AND m.direction = 'out'`).bind(messageId).first<SendRow>();
   if (!row || row.channel !== 'facebook' || !row.page_id) return failSend(db, command, messageId, 'INVALID_PAYLOAD');
-  // Already delivered (an earlier run or its echo) or already given up: nothing to send again.
-  if (row.status !== 'pending') {
+  const progress = readProgress(command.payload);
+  // Given up, or delivered by an earlier run (or its echo) with no part left unsent: nothing to send again.
+  // The echo of a first part can mark the message sent while later parts still wait, so recorded progress wins.
+  const parts = splitMessengerText(row.body);
+  const unsentParts = progress !== null && progress.sentChunks < parts.length;
+  if (row.status === 'failed' || (row.status === 'sent' && !unsentParts)) {
     await completeCommand(db, command.id, command.attempts, { sent: row.status === 'sent' });
     return;
   }
@@ -148,14 +178,15 @@ export async function sendMessengerCommand(env: MessengerSendEnv, command: Claim
   if (!delivery) return failOutsideWindow(db, command, messageId, row.conversation_id);
   const token = pageToken(env.FB_PAGE_TOKENS, row.page_id);
   if (!token) return failSend(db, command, messageId, 'FB_NOT_CONFIGURED');
-  const parts = splitMessengerText(row.body);
   if (!parts.length) return failSend(db, command, messageId, 'INVALID_PAYLOAD');
 
-  let firstMid: string | null = null;
-  for (const part of parts) {
-    const outcome = await postMessage(token, row.external_thread_id, part, delivery, messageId);
+  let firstMid = progress?.firstMid ?? null;
+  for (let index = progress?.sentChunks ?? 0; index < parts.length; index += 1) {
+    const outcome = await postMessage(token, row.external_thread_id, parts[index]!, delivery, messageId);
     if (!outcome.ok) return failSend(db, command, messageId, outcome.error);
     firstMid ??= outcome.mid;
+    const recorded = await recordProgress(db, command, { sentChunks: index + 1, firstMid });
+    if (!recorded && index + 1 < parts.length) return;
   }
   // The message reached Messenger, so it is sent even if this claim has meanwhile lost the command.
   await markMessageSent(db, messageId, firstMid);

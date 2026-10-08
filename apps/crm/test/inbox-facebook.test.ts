@@ -215,6 +215,36 @@ test('a long reply is sent as several messages cut at line breaks', async () => 
   expect(calls.every((c) => c.body.message.metadata === bot.id)).toBe(true);
 });
 
+test('a retry after a failed part sends only the parts Messenger has not accepted yet', async () => {
+  const conv = await customerConversation();
+  const line = 'x'.repeat(900);
+  const text = [`a${line}`, line, `b${line}`, line, `c${line}`].join('\n');
+  const parts = splitMessengerText(text);
+  expect(parts).toHaveLength(3);
+  // The second part fails once; everything else is accepted.
+  const calls = fakeGraph((_c, i) => (i === 1
+    ? json({ error: { message: 'Temporary', code: 2 } }, 500)
+    : json({ recipient_id: PSID, message_id: `m_out_${i + 1}` })));
+  await applyCompletionResult(db, testEnv, conv.id, text);
+  await processWorkerCommands(testEnv);
+  const [first] = await commands('send_messenger');
+  expect(first).toMatchObject({ status: 'pending', attempts: 1, result: { error: 'GRAPH_2' } });
+  expect(first.payload).toMatchObject({ sentChunks: 1, firstMid: 'm_out_1' });
+
+  // The echo of the first part marks the message sent; the remaining parts must still go out.
+  const bot = (await messages(conv.id)).find((m) => m.sender_kind === 'bot');
+  expect((await webhook(page(echo('m_out_1', parts[0]!, bot.id)))).status).toBe(200);
+  expect((await messages(conv.id)).find((m) => m.id === bot.id)).toMatchObject({ status: 'sent' });
+
+  await db.prepare('UPDATE channel_command SET next_run_at = ? WHERE id = ?').bind(new Date(Date.now() - 1000).toISOString(), first.id).run();
+  await processWorkerCommands(testEnv);
+  expect(calls.map((c) => c.body.message.text)).toEqual([parts[0], parts[1], parts[1], parts[2]]);
+  const [done] = await commands('send_messenger');
+  expect(done).toMatchObject({ status: 'done', attempts: 2, result: { sent: true, parts: 3, externalMsgId: 'm_out_1' } });
+  expect(done.payload).toMatchObject({ sentChunks: 3, firstMid: 'm_out_1' });
+  expect((await messages(conv.id)).find((m) => m.id === bot.id)).toMatchObject({ status: 'sent', external_msg_id: 'm_out_1' });
+});
+
 test('a Graph error fails the attempt with the Graph code and never records the token', async () => {
   const conv = await customerConversation();
   const errors = vi.spyOn(console, 'error');
