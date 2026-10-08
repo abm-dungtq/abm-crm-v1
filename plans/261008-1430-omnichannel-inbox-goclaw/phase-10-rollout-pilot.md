@@ -57,7 +57,7 @@ Không in token, secret, mã QR, cookie Zalo hay nội dung các file `*.local*`
 
 ### Task 10.3 — Deploy (mỗi đợt)
 
-- Steps: hỏi đồng ý; `pnpm -F @abm/crm test && pnpm -F @abm/crm deploy`.
+- Steps: hỏi đồng ý; `pnpm -F @abm/crm test && pnpm -F @abm/crm run deploy` (pnpm có lệnh `deploy` sẵn, nên phải dùng `run`).
 - Verify: `curl -s https://<host eval>/api/health` in `{"ok":true}`; `npx wrangler deployments list` có bản mới nhất.
 
 ### Task 10.4 — GoClaw (Đợt A)
