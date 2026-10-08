@@ -147,13 +147,14 @@ export async function cancelCommand(db: D1Database, id: string, error: string): 
 }
 
 /**
- * Outgoing customer messages one channel account has sent or is sending since `dayStartIso`
- * (start of the current day in Vietnam time, as an ISO instant). Counts by claim time.
+ * Outgoing customer messages one channel account has sent, is sending or has waiting to send since
+ * `dayStartIso` (start of the current day in Vietnam time, as an ISO instant). A claimed or done send counts
+ * by claim time, a waiting one by creation time, so sends queued while the bridge is offline still use up the cap.
  */
 export async function accountSendsToday(db: D1Database, channelAccountId: string, dayStartIso: string): Promise<number> {
   const row = await db.prepare(`SELECT COUNT(*) AS n FROM channel_command
     WHERE channel_account_id = ? AND kind IN ('send_zalo', 'send_messenger')
-      AND status IN ('claimed', 'done') AND claimed_at >= ?`)
+      AND status IN ('pending', 'claimed', 'done') AND COALESCE(claimed_at, created_at) >= ?`)
     .bind(channelAccountId, dayStartIso)
     .first<{ n: number }>();
   return Number(row?.n ?? 0);

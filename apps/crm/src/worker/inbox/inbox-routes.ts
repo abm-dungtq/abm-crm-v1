@@ -2,9 +2,14 @@ import { Hono, type Context } from 'hono';
 import { CONVERSATION_MODES, type ApiResult, type RoleCode } from '@abm/contracts';
 import { z } from 'zod';
 import { background, type Actor, type AppBindings } from '../env';
-import { ASSIGNABLE_ROLES, ROUND_ROBIN_ROLES, assignConversation, linkBase, loadInboxSettings, type AssignOutcome } from './assignment';
+import {
+  ASSIGNABLE_ROLES, MANAGER_ROLES, ROUND_ROBIN_ROLES, assignConversation, linkBase, loadInboxSettings, type AssignOutcome,
+} from './assignment';
 import { STAFF_TEXT_MAX, setMode, staffSend } from './conversation-flow';
 import { enqueueCommand } from './dispatcher';
+import {
+  SCHEDULE_TEXT_MAX, approveSchedule, deleteSchedule, getSchedule, listSchedules, pauseSchedule, saveSchedule, submitSchedule,
+} from './group-schedules';
 import {
   INTAKE_FIELDS, classifyIntake, confirmProposedField, discardIntake, enqueueExtraction, linkIntakeContact, type IntakeFields,
 } from './intake';
@@ -56,7 +61,9 @@ const assignInput = z.object({ userId: userIdInput });
 const settingsInput = z.object({
   assignMode: z.enum(['manual', 'round_robin']).optional(),
   slaMinutes: z.number().int().min(1).max(1440).optional(),
-}).refine((v) => v.assignMode !== undefined || v.slaMinutes !== undefined, { message: 'Không có thay đổi' });
+  /** The organization-wide switch for recurring group posts; admin only. */
+  scheduledSendsEnabled: z.boolean().optional(),
+}).refine((v) => v.assignMode !== undefined || v.slaMinutes !== undefined || v.scheduledSendsEnabled !== undefined, { message: 'Không có thay đổi' });
 const rosterInput = z.object({ userId: userIdInput, onDuty: z.boolean() });
 
 inboxRoutes.use('*', async (c, next) => {
@@ -179,25 +186,40 @@ inboxRoutes.post('/conversations/:id/assign', async (c) => {
   return c.json(ok({ assigneeUserId: outcome.assignee.id, assigneeName: outcome.assignee.displayName }));
 });
 
-inboxRoutes.get('/settings', async (c) => c.json(ok(await loadInboxSettings(c.env.DB))));
+/** Inbox settings plus the recurring group posts switch (off unless an admin turned it on). */
+async function loadSettingsView(db: D1Database) {
+  const row = await db.prepare('SELECT scheduled_sends_enabled FROM inbox_setting WHERE id = 1').first<{ scheduled_sends_enabled: number }>();
+  return { ...(await loadInboxSettings(db)), scheduledSendsEnabled: row?.scheduled_sends_enabled === 1 };
+}
+
+inboxRoutes.get('/settings', async (c) => c.json(ok(await loadSettingsView(c.env.DB))));
 
 inboxRoutes.put('/settings', settingsManager, async (c) => {
   const input = await body(c, settingsInput);
   if ('error' in input) return input.error;
   const actor = c.get('actor');
+  if (input.data.scheduledSendsEnabled !== undefined && actor.role !== 'admin') {
+    return c.json(fail('FORBIDDEN', 'Chỉ quản trị được bật hoặc tắt tin định kỳ'), 403);
+  }
   const db = c.env.DB;
-  const current = await loadInboxSettings(db);
-  const next = { assignMode: input.data.assignMode ?? current.assignMode, slaMinutes: input.data.slaMinutes ?? current.slaMinutes };
+  const current = await loadSettingsView(db);
+  const next = {
+    assignMode: input.data.assignMode ?? current.assignMode,
+    slaMinutes: input.data.slaMinutes ?? current.slaMinutes,
+    scheduledSendsEnabled: input.data.scheduledSendsEnabled ?? current.scheduledSendsEnabled,
+  };
   const now = new Date().toISOString();
   await db.batch([
-    db.prepare(`INSERT INTO inbox_setting (id, assign_mode, sla_minutes, updated_by_user_id, updated_at) VALUES (1, ?, ?, ?, ?)
+    db.prepare(`INSERT INTO inbox_setting (id, assign_mode, sla_minutes, scheduled_sends_enabled, updated_by_user_id, updated_at)
+      VALUES (1, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET assign_mode = excluded.assign_mode, sla_minutes = excluded.sla_minutes,
+        scheduled_sends_enabled = excluded.scheduled_sends_enabled,
         updated_by_user_id = excluded.updated_by_user_id, updated_at = excluded.updated_at`)
-      .bind(next.assignMode, next.slaMinutes, actor.id, now),
+      .bind(next.assignMode, next.slaMinutes, next.scheduledSendsEnabled ? 1 : 0, actor.id, now),
     auditRow(db, actor, 'inbox.updateSettings', 'inbox_setting', '1',
-      { assignMode: current.assignMode, slaMinutes: current.slaMinutes }, next, now),
+      { assignMode: current.assignMode, slaMinutes: current.slaMinutes, scheduledSendsEnabled: current.scheduledSendsEnabled }, next, now),
   ]);
-  return c.json(ok(await loadInboxSettings(db)));
+  return c.json(ok(await loadSettingsView(db)));
 });
 
 /** Active inbox staff (the people a conversation can be assigned to) with their duty flag; `roundRobin` marks who can be on duty. */
@@ -428,5 +450,96 @@ inboxRoutes.post('/conversations/:id/extract', async (c) => {
   await auditRow(db, actor, 'inbox.requestExtraction', 'conversation', conv.id, null, { commandId }, new Date().toISOString()).run();
   return c.json(ok({ commandId }));
 });
+
+// ---------- Zalo groups and recurring posts ----------
+
+const groupPatchInput = z.object({
+  summaryEnabled: z.boolean().optional(),
+  scheduledOptOut: z.boolean().optional(),
+}).refine((v) => v.summaryEnabled !== undefined || v.scheduledOptOut !== undefined, { message: 'Không có thay đổi' });
+const weekdaysMask = z.number().int().min(1).max(127);
+const templateText = z.string().trim().min(1).max(SCHEDULE_TEXT_MAX);
+const createScheduleInput = z.object({ conversationId: intakeIdInput, templateText, weekdaysMask, timeOfDay: hhmm });
+const updateScheduleInput = z.object({ templateText: templateText.optional(), weekdaysMask: weekdaysMask.optional(), timeOfDay: hhmm.optional() })
+  .refine((v) => Object.values(v).some((x) => x !== undefined), { message: 'Không có thay đổi' });
+
+interface GroupRow {
+  id: string; channelAccountId: string; accountName: string; accountStatus: string; sendPaused: number; externalThreadId: string;
+  displayName: string | null; summaryEnabled: number; scheduledOptOut: number; lastMessageAt: string | null; activeSchedules: number;
+}
+const GROUP_SELECT = `SELECT c.id, c.channel_account_id AS channelAccountId, a.display_name AS accountName, a.status AS accountStatus,
+    a.send_paused AS sendPaused, c.external_thread_id AS externalThreadId, c.display_name AS displayName,
+    c.summary_enabled AS summaryEnabled, c.scheduled_opt_out AS scheduledOptOut, c.last_message_at AS lastMessageAt,
+    (SELECT COUNT(*) FROM group_schedule s WHERE s.conversation_id = c.id AND s.status = 'active') AS activeSchedules
+  FROM conversation c JOIN channel_account a ON a.id = c.channel_account_id`;
+const GROUP_PAGE = 1000;
+const presentGroup = (row: GroupRow) => ({
+  ...row, sendPaused: row.sendPaused === 1, summaryEnabled: row.summaryEnabled === 1, scheduledOptOut: row.scheduledOptOut === 1,
+});
+const loadGroup = (db: D1Database, actor: Actor, id: string) =>
+  db.prepare(`${GROUP_SELECT} WHERE c.id = ? AND c.organization_id = ? AND c.kind = 'group'`).bind(id, actor.organizationId).first<GroupRow>();
+
+/** Zalo groups of the organization, by account then name; `account` narrows to one channel account. */
+inboxRoutes.get('/groups', async (c) => {
+  const actor = c.get('actor');
+  const account = c.req.query('account');
+  const rows = await c.env.DB.prepare(`${GROUP_SELECT} WHERE c.organization_id = ? AND c.kind = 'group' ${account ? 'AND c.channel_account_id = ?' : ''}
+    ORDER BY a.display_name, c.display_name, c.id LIMIT ?`).bind(...(account ? [actor.organizationId, account] : [actor.organizationId]), GROUP_PAGE)
+    .all<GroupRow>();
+  return c.json(ok(rows.results.map(presentGroup)));
+});
+
+/**
+ * Daily summary and recurring-post opt-out of a group. Any inbox role may turn summaries on or off and opt a group
+ * out; letting recurring posts into a group again takes a manager.
+ */
+inboxRoutes.patch('/groups/:id', async (c) => {
+  const input = await body(c, groupPatchInput);
+  if ('error' in input) return input.error;
+  const actor = c.get('actor');
+  const db = c.env.DB;
+  const current = await loadGroup(db, actor, c.req.param('id'));
+  if (!current) return c.json(notFound, 404);
+  if (input.data.scheduledOptOut === false && current.scheduledOptOut === 1 && !MANAGER_ROLES.has(actor.role)) {
+    return c.json(fail('FORBIDDEN', 'Chỉ quản lý được cho nhóm nhận lại tin định kỳ'), 403);
+  }
+  const next = {
+    summaryEnabled: input.data.summaryEnabled ?? current.summaryEnabled === 1,
+    scheduledOptOut: input.data.scheduledOptOut ?? current.scheduledOptOut === 1,
+  };
+  const now = new Date().toISOString();
+  await db.batch([
+    db.prepare('UPDATE conversation SET summary_enabled = ?, scheduled_opt_out = ?, updated_at = ? WHERE id = ?')
+      .bind(next.summaryEnabled ? 1 : 0, next.scheduledOptOut ? 1 : 0, now, current.id),
+    auditRow(db, actor, 'inbox.updateGroup', 'conversation', current.id,
+      { summaryEnabled: current.summaryEnabled === 1, scheduledOptOut: current.scheduledOptOut === 1 }, next, now),
+  ]);
+  return c.json(ok(presentGroup((await loadGroup(db, actor, current.id))!)));
+});
+
+inboxRoutes.get('/group-schedules', async (c) =>
+  c.json(ok(await listSchedules(c.env.DB, c.get('actor'), c.req.query('conversationId') || undefined))));
+
+inboxRoutes.get('/group-schedules/:id', async (c) => {
+  const schedule = await getSchedule(c.env.DB, c.get('actor'), c.req.param('id'));
+  return schedule ? c.json(ok(schedule)) : c.json(notFound, 404);
+});
+
+inboxRoutes.post('/group-schedules', async (c) => {
+  const input = await body(c, createScheduleInput);
+  if ('error' in input) return input.error;
+  return commandResponse(c, await saveSchedule(c.env.DB, c.get('actor'), input.data));
+});
+
+inboxRoutes.patch('/group-schedules/:id', async (c) => {
+  const input = await body(c, updateScheduleInput);
+  if ('error' in input) return input.error;
+  return commandResponse(c, await saveSchedule(c.env.DB, c.get('actor'), { id: c.req.param('id'), ...input.data }));
+});
+
+inboxRoutes.delete('/group-schedules/:id', async (c) => commandResponse(c, await deleteSchedule(c.env.DB, c.get('actor'), c.req.param('id'))));
+inboxRoutes.post('/group-schedules/:id/submit', async (c) => commandResponse(c, await submitSchedule(c.env.DB, c.get('actor'), c.req.param('id'))));
+inboxRoutes.post('/group-schedules/:id/approve', async (c) => commandResponse(c, await approveSchedule(c.env.DB, c.get('actor'), c.req.param('id'))));
+inboxRoutes.post('/group-schedules/:id/pause', async (c) => commandResponse(c, await pauseSchedule(c.env.DB, c.get('actor'), c.req.param('id'))));
 
 inboxRoutes.all('*', (c) => c.json(notFound, 404));

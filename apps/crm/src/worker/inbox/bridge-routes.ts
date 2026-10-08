@@ -6,6 +6,7 @@ import { background } from '../env';
 import { bridgeAuth, type BridgeBindings } from './bridge-auth';
 import { applyCompletionResult, markMessageSent } from './conversation-flow';
 import { MAX_COMMAND_ATTEMPTS, claimCommands, completeCommand, failCommand, type ClaimedCommand } from './dispatcher';
+import { applyGroupSummaryResult } from './group-summaries';
 import { ingestEvents } from './ingest';
 import { applyExtractionResult } from './intake';
 import { processWorkerCommands } from './worker-commands';
@@ -108,8 +109,15 @@ bridgeRoutes.post('/commands/:id/result', async (c) => {
     return c.json(ok({ ignored: !moved }));
   }
   // The CRM extractor's answer fills a lead intake; it is never sent to the customer.
-  if (row.kind === 'run_completion' && (command.payload as { purpose?: unknown } | null)?.purpose === 'extract') {
+  const purpose = row.kind === 'run_completion' ? (command.payload as { purpose?: unknown } | null)?.purpose : undefined;
+  if (purpose === 'extract') {
     const owned = await applyExtractionResult(db, { id: row.id, attempts: result.attempts, conversationId: row.conversation_id }, result.text ?? '');
+    return c.json(ok({ ignored: !owned }));
+  }
+  // A group summary goes to the Lark inbox group; it is never sent into the Zalo group.
+  if (purpose === 'group_summary') {
+    const owned = await applyGroupSummaryResult(db, { id: row.id, attempts: result.attempts, conversationId: row.conversation_id }, result.text ?? '');
+    if (owned) await background(c, processWorkerCommands(c.env));
     return c.json(ok({ ignored: !owned }));
   }
   const completed = await completeCommand(db, row.id, result.attempts,

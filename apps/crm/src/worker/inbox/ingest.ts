@@ -2,6 +2,7 @@ import type { BridgeEvent } from '@abm/contracts';
 import { isConstraintFailure } from '../guarded-tx';
 import { slaDueSql } from './assignment';
 import { ATTACHMENT_ONLY_TEXT, appendStaffContext, markMessageSent, scheduleCompletion } from './conversation-flow';
+import { enqueueCommand } from './dispatcher';
 
 /**
  * Applies events pushed by the Zalo bridge sidecar. Each event is handled on its own: a failure or an
@@ -101,6 +102,21 @@ async function ingestMessage(db: D1Database, event: MessageEvent, now: Date) {
   return true;
 }
 
+/**
+ * The bridge gave up on an account's session: sending stops until an admin turns it back on, and the Lark inbox
+ * group is warned at most once per account per hour.
+ */
+async function pauseFailedAccount(db: D1Database, accountId: string, now: string) {
+  const account = await db.prepare('UPDATE channel_account SET send_paused = 1, updated_at = ? WHERE id = ? RETURNING display_name')
+    .bind(now, accountId).first<{ display_name: string }>();
+  if (!account) return;
+  await enqueueCommand(db, {
+    kind: 'send_lark', target: 'worker', channelAccountId: accountId,
+    payload: { text: `Tài khoản ${account.display_name} lỗi kết nối, đã tạm dừng gửi` },
+    dedupeKey: `account-error:${accountId}:${now.slice(0, 13)}`,
+  });
+}
+
 async function ingestAccountStatus(db: D1Database, event: AccountStatusEvent, now: string) {
   const connected = event.status === 'connected';
   try {
@@ -111,7 +127,9 @@ async function ingestAccountStatus(db: D1Database, event: AccountStatusEvent, no
       WHERE id = ?`)
       .bind(event.status, now, now, connected ? 1 : 0, event.accountExternalId ?? null, connected ? 1 : 0, connected ? 1 : 0, event.accountId)
       .run();
-    return res.meta.changes === 1;
+    if (res.meta.changes !== 1) return false;
+    if (event.status === 'error') await pauseFailedAccount(db, event.accountId, now);
+    return true;
   } catch (error) {
     if (!isConstraintFailure(error)) throw error;
     // The Zalo number already belongs to another channel account; this one cannot take it.

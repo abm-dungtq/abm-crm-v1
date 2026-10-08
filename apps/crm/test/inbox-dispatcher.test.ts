@@ -118,7 +118,7 @@ test('only a pending command can be cancelled', async () => {
   expect(await row(claimed)).toMatchObject({ status: 'failed', result_json: JSON.stringify({ error: 'account removed' }) });
 });
 
-test('daily sends count claimed and done sends of one account since the day start', async () => {
+test('daily sends count waiting, claimed and done sends of one account since the day start', async () => {
   const dayStart = '2026-10-07T17:00:00.000Z';
   const yesterday = at('2026-10-07T16:59:00.000Z');
   const old = await enqueueCommand(db, { kind: 'send_zalo', target: 'bridge', channelAccountId: 'ca-1', payload: {}, dedupeKey: 'old', runAt: yesterday });
@@ -136,12 +136,29 @@ test('daily sends count claimed and done sends of one account since the day star
   expect(await claimCommands(db, 'bridge', 100, 300, T0)).toHaveLength(6);
   expect(await claimCommands(db, 'worker', 100, 300, T0)).toHaveLength(1);
   expect(await completeCommand(db, done, 1, { ok: true })).toBe(true);
-  // A send that failed for good today, and one that went back to waiting, do not count.
+  // A send that failed for good today does not count; one that went back to waiting still does.
   await db.prepare("UPDATE channel_command SET status = 'failed', attempts = 5 WHERE id = ?").bind(failed).run();
-  await db.prepare("UPDATE channel_command SET status = 'pending', claimed_at = NULL WHERE dedupe_key = 'pending'").run();
+  await db.prepare("UPDATE channel_command SET status = 'pending', claimed_at = NULL, created_at = ? WHERE dedupe_key = 'pending'").bind(STAMP).run();
 
   expect((await row(claimed)).status).toBe('claimed');
-  // done + claimed + messenger; excludes yesterday, failed, pending, the other account and Lark.
-  expect(await accountSendsToday(db, 'ca-1', dayStart)).toBe(3);
+  // done + claimed + pending + messenger; excludes yesterday, failed, the other account and Lark.
+  expect(await accountSendsToday(db, 'ca-1', dayStart)).toBe(4);
   expect(await accountSendsToday(db, 'ca-2', dayStart)).toBe(1);
+});
+
+test('sends queued while the bridge is offline count toward the daily cap by creation time', async () => {
+  const dayStart = '2026-10-07T17:00:00.000Z';
+  // Never claimed: the bridge has not polled since they were queued.
+  await enqueueSend('waiting-1');
+  await enqueueSend('waiting-2');
+  await db.prepare("UPDATE channel_command SET created_at = ? WHERE dedupe_key LIKE 'waiting-%'").bind(STAMP).run();
+  expect(await accountSendsToday(db, 'ca-1', dayStart)).toBe(2);
+  // A send still waiting from before the day start is yesterday's.
+  await enqueueSend('waiting-old');
+  await db.prepare("UPDATE channel_command SET created_at = '2026-10-07T16:59:00.000Z' WHERE dedupe_key = 'waiting-old'").run();
+  expect(await accountSendsToday(db, 'ca-1', dayStart)).toBe(2);
+  // Once claimed, the claim time decides.
+  await claimCommands(db, 'bridge', 100, 300, T0);
+  expect(await accountSendsToday(db, 'ca-1', dayStart)).toBe(3);
+  expect(await accountSendsToday(db, 'ca-1', '2026-10-08T17:00:00.000Z')).toBe(0);
 });

@@ -2,12 +2,16 @@ import type { Env } from '../env';
 import { linkBase, slaDueSql } from './assignment';
 import { sweepStuckOutgoing } from './conversation-flow';
 import { enqueueCommand } from './dispatcher';
+import { runDueSchedules } from './group-schedules';
+import { enqueueDailyGroupSummaries } from './group-summaries';
 import { extractIdleConversations } from './intake';
 import { processWorkerCommands } from './worker-commands';
 
 /** Cron Trigger work. Every task logs and continues on failure, so the scheduled handler never throws. */
 
 export const EVERY_MINUTE_CRON = '* * * * *';
+/** 14:00 UTC = 21:00 Vietnam time. */
+export const DAILY_SUMMARY_CRON = '0 14 * * *';
 const SLA_BATCH = 50;
 
 type ScheduledEnv = Pick<Env, 'DB' | 'LARK_APP_ID' | 'LARK_APP_SECRET' | 'LARK_INBOX_CHAT_ID' | 'APP_URL'>;
@@ -61,11 +65,16 @@ async function step(name: string, work: () => Promise<unknown>) {
   }
 }
 
-/** Entry point of the Cron Trigger. The daily `0 14 * * *` run has no work yet. */
+/** Entry point of the Cron Trigger: per-minute work, and the daily group summaries at 21:00 Vietnam time. */
 export async function runScheduled(env: ScheduledEnv, cron: string, now = new Date()): Promise<void> {
+  if (cron === DAILY_SUMMARY_CRON) {
+    await step('group_summaries', () => enqueueDailyGroupSummaries(env.DB, now));
+    return;
+  }
   if (cron !== EVERY_MINUTE_CRON) return;
   await step('worker_commands', () => processWorkerCommands(env));
   await step('sla', () => checkSla(env.DB, now, env.APP_URL));
   await step('stuck_outgoing', () => sweepStuckOutgoing(env.DB, now));
   await step('extract_idle', () => extractIdleConversations(env.DB, now));
+  await step('group_schedules', () => runDueSchedules(env.DB, now));
 }
