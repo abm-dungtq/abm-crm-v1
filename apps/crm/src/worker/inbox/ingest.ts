@@ -156,17 +156,27 @@ export function accountErrorReason(lastError: string | undefined): string | null
   return ERROR_CODE.test(lastError) ? lastError : 'UNRECOGNIZED_ERROR';
 }
 
+/** How long after an admin asks for a Zalo login a `connected` status still counts as that admin's reconnect. */
+export const ADMIN_RECONNECT_WINDOW_MS = 15 * 60_000;
+
 async function ingestAccountStatus(db: D1Database, event: AccountStatusEvent, now: string) {
   const connected = event.status === 'connected';
   // Only an account in error keeps a reason; any other status clears the previous one.
   const lastError = event.status === 'error' ? accountErrorReason(event.lastError) ?? 'UNKNOWN_ERROR' : null;
+  // Sending resumes only when an admin asked for this login recently. A sidecar restart that logs back in by itself
+  // leaves a paused account paused.
+  const reconnectSince = new Date(Date.parse(now) - ADMIN_RECONNECT_WINDOW_MS).toISOString();
   try {
     const res = await db.prepare(`UPDATE channel_account SET status = ?, last_seen_at = ?, updated_at = ?, last_error = ?,
         external_id = CASE WHEN ? = 1 THEN ? ELSE external_id END,
         qr_image = CASE WHEN ? = 1 THEN NULL ELSE qr_image END,
-        qr_expires_at = CASE WHEN ? = 1 THEN NULL ELSE qr_expires_at END
+        qr_expires_at = CASE WHEN ? = 1 THEN NULL ELSE qr_expires_at END,
+        send_paused = CASE WHEN ? = 1 AND EXISTS (SELECT 1 FROM channel_command
+            WHERE kind = 'zalo_login' AND channel_account_id = channel_account.id AND created_at >= ?)
+          THEN 0 ELSE send_paused END
       WHERE id = ?`)
-      .bind(event.status, now, now, lastError, connected ? 1 : 0, event.accountExternalId ?? null, connected ? 1 : 0, connected ? 1 : 0, event.accountId)
+      .bind(event.status, now, now, lastError, connected ? 1 : 0, event.accountExternalId ?? null, connected ? 1 : 0, connected ? 1 : 0,
+        connected ? 1 : 0, reconnectSince, event.accountId)
       .run();
     if (res.meta.changes !== 1) return false;
     if (event.status === 'error') await pauseFailedAccount(db, event.accountId, now);

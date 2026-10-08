@@ -79,6 +79,9 @@ export function ChannelAccountsPage() {
                       <td data-label="Trạng thái">
                         <Badge tone={STATUS_LABEL[a.status][1]} dot>{STATUS_LABEL[a.status][0]}</Badge>
                         {a.status === 'error' && a.lastError && <div className="cell-sub mono" title="Mã lỗi bridge báo gần nhất">{a.lastError}</div>}
+                        {a.status === 'connected' && a.sendPaused && (
+                          <div className="cell-sub" role="note">Đã kết nối nhưng vẫn tạm dừng gửi tin. Bấm "Tạm dừng" ở cột Gửi tin để mở lại.</div>
+                        )}
                       </td>
                       <td data-label="Thấy lần cuối"><span title={fmtDateTime(a.lastSeenAt, true)}>{a.lastSeenAt ? fmtAgo(a.lastSeenAt) : '—'}</span></td>
                       <td data-label="Agent GoClaw" className="mono">{a.agentKey ?? <span className="muted">Chưa đặt</span>}</td>

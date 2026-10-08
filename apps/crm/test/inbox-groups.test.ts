@@ -321,3 +321,24 @@ test('an account error from the bridge pauses its sending and warns Lark once pe
   await ingestEvents(db, [{ type: 'account_status', accountId: 'ca-1', accountExternalId: 'zalo-acc-1', status: 'connected' }]);
   expect(await db.prepare("SELECT status, send_paused FROM channel_account WHERE id = 'ca-1'").first()).toEqual({ status: 'connected', send_paused: 1 });
 });
+
+test('a login an admin asked for within 15 minutes turns sending back on; an older one does not', async () => {
+  const paused = { type: 'account_status' as const, accountId: 'ca-1', status: 'error' as const, lastError: 'ZALO_KICKED' };
+  const connected = { type: 'account_status' as const, accountId: 'ca-1', accountExternalId: 'zalo-acc-1', status: 'connected' as const };
+  const account = () => db.prepare("SELECT status, send_paused, last_error FROM channel_account WHERE id = 'ca-1'").first();
+
+  // A login queued 20 minutes ago is not this reconnect: a sidecar restart logged back in by itself.
+  await ingestEvents(db, [paused]);
+  const oldLogin = await enqueueCommand(db, { kind: 'zalo_login', target: 'bridge', channelAccountId: 'ca-1', payload: { accountId: 'ca-1' } });
+  await db.prepare('UPDATE channel_command SET created_at = ? WHERE id = ?').bind(new Date(Date.now() - 20 * 60_000).toISOString(), oldLogin).run();
+  await ingestEvents(db, [connected]);
+  expect(await account()).toEqual({ status: 'connected', send_paused: 1, last_error: null });
+
+  // The admin presses connect: the login that follows resumes sending.
+  const res = await web('u-admin', 'POST', '/inbox/accounts/ca-1/connect');
+  expect(res.status).toBe(200);
+  await ingestEvents(db, [paused]);
+  expect(await account()).toEqual({ status: 'error', send_paused: 1, last_error: 'ZALO_KICKED' });
+  await ingestEvents(db, [connected]);
+  expect(await account()).toEqual({ status: 'connected', send_paused: 0, last_error: null });
+});
