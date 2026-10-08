@@ -75,7 +75,7 @@ Không in token, secret, mã QR, cookie Zalo hay nội dung các file `*.local*`
 
 - Steps:
   1. User điền `apps/zalo-bridge/.env` (`CRM_BASE_URL`, `BRIDGE_SECRET`, `GOCLAW_API_KEY`).
-  2. Hỏi đồng ý; chạy `apps/zalo-bridge/scripts/install-startup-task.ps1`; khởi động task.
+  2. Hỏi đồng ý; chạy `apps/zalo-bridge/scripts/install-startup-task.ps1` (cần PowerShell quyền Admin). Không có quyền Admin thì thêm `-AtLogOn`: task chạy khi tài khoản Windows đăng nhập và dừng khi đăng xuất. Sau đó khởi động task.
 - Verify: `Get-ScheduledTask -TaskName "ABM Zalo Bridge"` có `State` là `Running` hoặc `Ready`; `apps/zalo-bridge/logs/bridge.log` có dòng poll thành công trong 2 phút.
 
 ### Task 10.6 — Kết nối 2 số pilot (Đợt A)
