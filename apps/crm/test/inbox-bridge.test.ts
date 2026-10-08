@@ -125,7 +125,31 @@ test('a connected account records its Zalo id and then receives messages for it'
 test('connecting with a Zalo id another account owns marks the account as error', async () => {
   const res = await bridge('/events', { body: { events: [{ type: 'account_status', accountId: 'ca-2', accountExternalId: 'zalo-acc-1', status: 'connected' }] } });
   expect(res.json.data).toEqual({ accepted: 0, rejected: 1 });
-  expect(await db.prepare("SELECT status, external_id FROM channel_account WHERE id = 'ca-2'").first()).toEqual({ status: 'error', external_id: null });
+  expect(await db.prepare("SELECT status, external_id, last_error FROM channel_account WHERE id = 'ca-2'").first())
+    .toEqual({ status: 'error', external_id: null, last_error: 'ZALO_NUMBER_IN_USE' });
+});
+
+test('the error code the bridge reports is kept until the account connects and shown only to admins', async () => {
+  const accounts = async (user: string) => {
+    const res = await app.fetch(new Request(`${ORIGIN}/api/inbox/accounts`, { headers: { 'X-Demo-User': user } }), { ...testEnv, DEMO_MODE: '1' });
+    const body = await res.json() as { data: { id: string; status: string; lastError: string | null }[] };
+    return body.data.find((a) => a.id === 'ca-1')!;
+  };
+  const statusEvent = (status: string, extra: Record<string, unknown> = {}) =>
+    bridge('/events', { body: { events: [{ type: 'account_status', accountId: 'ca-1', status, ...extra }] } });
+
+  expect((await statusEvent('error', { lastError: 'ZALO_KICKED' })).json.data).toEqual({ accepted: 1, rejected: 0 });
+  expect(await accounts('u-admin')).toMatchObject({ status: 'error', lastError: 'ZALO_KICKED' });
+  expect(await accounts('u-lan')).toMatchObject({ status: 'error', lastError: null });
+
+  // Anything that is not an error code (it could carry a cookie or token) is never stored.
+  await statusEvent('error', { lastError: 'login failed: cookie=zpw_sek abc; token=secret-value' });
+  expect(await db.prepare("SELECT last_error FROM channel_account WHERE id = 'ca-1'").first()).toEqual({ last_error: 'UNRECOGNIZED_ERROR' });
+  await statusEvent('error');
+  expect(await db.prepare("SELECT last_error FROM channel_account WHERE id = 'ca-1'").first()).toEqual({ last_error: 'UNKNOWN_ERROR' });
+
+  await statusEvent('connected', { accountExternalId: 'zalo-acc-1' });
+  expect(await accounts('u-admin')).toMatchObject({ status: 'connected', lastError: null });
 });
 
 test('qr and group list events update the account and its groups', async () => {

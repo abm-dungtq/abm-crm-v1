@@ -271,17 +271,21 @@ inboxRoutes.put('/roster', settingsManager, async (c) => {
 interface AccountRow {
   id: string; channel: string; externalId: string | null; displayName: string; agentKey: string | null; botEnabled: number;
   sendPaused: number; dailySendCap: number; quietStart: string | null; quietEnd: string | null; status: string;
-  qrImage: string | null; qrExpiresAt: string | null; lastSeenAt: string | null; createdAt: string; updatedAt: string;
+  qrImage: string | null; qrExpiresAt: string | null; lastSeenAt: string | null; lastError: string | null; createdAt: string; updatedAt: string;
 }
 const ACCOUNT_SELECT = `SELECT id, channel, external_id AS externalId, display_name AS displayName, agent_key AS agentKey,
     bot_enabled AS botEnabled, send_paused AS sendPaused, daily_send_cap AS dailySendCap, quiet_start AS quietStart,
     quiet_end AS quietEnd, status, qr_image AS qrImage, qr_expires_at AS qrExpiresAt, last_seen_at AS lastSeenAt,
-    created_at AS createdAt, updated_at AS updatedAt
+    last_error AS lastError, created_at AS createdAt, updated_at AS updatedAt
   FROM channel_account`;
-/** The login QR signs a company number into the bridge, so only admins receive it. */
+/**
+ * The login QR signs a company number into the bridge, so only admins receive it. The bridge's last error code
+ * is an operations detail for admins too.
+ */
 const presentAccount = (row: AccountRow, actor: Actor) => ({
   ...row, botEnabled: row.botEnabled === 1, sendPaused: row.sendPaused === 1,
   qrImage: actor.role === 'admin' ? row.qrImage : null,
+  lastError: actor.role === 'admin' ? row.lastError : null,
 });
 const loadAccount = (db: D1Database, actor: Actor, id: string) =>
   db.prepare(`${ACCOUNT_SELECT} WHERE id = ? AND organization_id = ?`).bind(id, actor.organizationId).first<AccountRow>();

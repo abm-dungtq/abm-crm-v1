@@ -76,7 +76,10 @@ export function ChannelAccountsPage() {
                     <tr key={a.id}>
                       <td data-label="Tên"><div className="cell-title">{a.displayName}</div>{a.externalId && <div className="cell-sub mono">{a.externalId}</div>}</td>
                       <td data-label="Kênh">{a.channel === 'facebook' ? 'Fanpage' : 'Zalo'}</td>
-                      <td data-label="Trạng thái"><Badge tone={STATUS_LABEL[a.status][1]} dot>{STATUS_LABEL[a.status][0]}</Badge></td>
+                      <td data-label="Trạng thái">
+                        <Badge tone={STATUS_LABEL[a.status][1]} dot>{STATUS_LABEL[a.status][0]}</Badge>
+                        {a.status === 'error' && a.lastError && <div className="cell-sub mono" title="Mã lỗi bridge báo gần nhất">{a.lastError}</div>}
+                      </td>
                       <td data-label="Thấy lần cuối"><span title={fmtDateTime(a.lastSeenAt, true)}>{a.lastSeenAt ? fmtAgo(a.lastSeenAt) : '—'}</span></td>
                       <td data-label="Agent GoClaw" className="mono">{a.agentKey ?? <span className="muted">Chưa đặt</span>}</td>
                       <td data-label="Bot">
@@ -214,7 +217,11 @@ function ConnectDialog({ account, connect, onRetry, onClose }: {
     </>}>
       <FormError error={connect.error} />
       {connect.isPending && <p className="text-2">Đang gửi yêu cầu đăng nhập…</p>}
-      {connect.isSuccess && status === 'error' && <Alert tone="danger">Bridge báo lỗi khi đăng nhập. Kiểm tra máy chạy bridge rồi tạo mã mới.</Alert>}
+      {connect.isSuccess && status === 'error' && (
+        <Alert tone="danger">
+          Bridge báo lỗi khi đăng nhập{account?.lastError ? <> (<span className="mono">{account.lastError}</span>)</> : null}. Kiểm tra máy chạy bridge rồi tạo mã mới.
+        </Alert>
+      )}
       {connect.isSuccess && !showQr && status !== 'error' && (
         <p className="text-2" role="status">Đang chờ bridge tạo mã QR… Nếu chờ lâu, kiểm tra máy chạy bridge có đang mở không.</p>
       )}

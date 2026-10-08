@@ -146,15 +146,26 @@ async function pauseFailedAccount(db: D1Database, accountId: string, now: string
   });
 }
 
+/** Error codes the bridge reports look like this; anything else (free text that might hold a secret) is not stored. */
+const ERROR_CODE = /^[A-Za-z0-9_.:-]{1,120}$/;
+
+/** The stored reason of an account error: the bridge's code, a placeholder for anything that is not a code, or null. */
+export function accountErrorReason(lastError: string | undefined): string | null {
+  if (!lastError) return null;
+  return ERROR_CODE.test(lastError) ? lastError : 'UNRECOGNIZED_ERROR';
+}
+
 async function ingestAccountStatus(db: D1Database, event: AccountStatusEvent, now: string) {
   const connected = event.status === 'connected';
+  // Only an account in error keeps a reason; any other status clears the previous one.
+  const lastError = event.status === 'error' ? accountErrorReason(event.lastError) ?? 'UNKNOWN_ERROR' : null;
   try {
-    const res = await db.prepare(`UPDATE channel_account SET status = ?, last_seen_at = ?, updated_at = ?,
+    const res = await db.prepare(`UPDATE channel_account SET status = ?, last_seen_at = ?, updated_at = ?, last_error = ?,
         external_id = CASE WHEN ? = 1 THEN ? ELSE external_id END,
         qr_image = CASE WHEN ? = 1 THEN NULL ELSE qr_image END,
         qr_expires_at = CASE WHEN ? = 1 THEN NULL ELSE qr_expires_at END
       WHERE id = ?`)
-      .bind(event.status, now, now, connected ? 1 : 0, event.accountExternalId ?? null, connected ? 1 : 0, connected ? 1 : 0, event.accountId)
+      .bind(event.status, now, now, lastError, connected ? 1 : 0, event.accountExternalId ?? null, connected ? 1 : 0, connected ? 1 : 0, event.accountId)
       .run();
     if (res.meta.changes !== 1) return false;
     if (event.status === 'error') await pauseFailedAccount(db, event.accountId, now);
@@ -162,7 +173,7 @@ async function ingestAccountStatus(db: D1Database, event: AccountStatusEvent, no
   } catch (error) {
     if (!isConstraintFailure(error)) throw error;
     // The Zalo number already belongs to another channel account; this one cannot take it.
-    await db.prepare("UPDATE channel_account SET status = 'error', last_seen_at = ?, updated_at = ? WHERE id = ?")
+    await db.prepare("UPDATE channel_account SET status = 'error', last_error = 'ZALO_NUMBER_IN_USE', last_seen_at = ?, updated_at = ? WHERE id = ?")
       .bind(now, now, event.accountId).run();
     return false;
   }

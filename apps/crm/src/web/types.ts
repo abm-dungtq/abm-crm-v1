@@ -327,6 +327,8 @@ export interface ChannelAccount {
   qrImage: string | null;
   qrExpiresAt: string | null;
   lastSeenAt: string | null;
+  /** Error code the bridge last reported while the account is in error; only Admin receives it. */
+  lastError: string | null;
   createdAt: string;
   updatedAt: string;
 }
