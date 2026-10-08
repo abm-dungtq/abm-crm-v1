@@ -2,6 +2,7 @@ import { Hono, type Context } from 'hono';
 import { CONVERSATION_MODES, type RoleCode } from '@abm/contracts';
 import { z } from 'zod';
 import { background, type Actor, type AppBindings } from '../env';
+import { ASSIGNABLE_ROLES, ROUND_ROBIN_ROLES, assignConversation, linkBase, loadInboxSettings, type AssignOutcome } from './assignment';
 import { STAFF_TEXT_MAX, setMode, staffSend } from './conversation-flow';
 import { enqueueCommand } from './dispatcher';
 import { processWorkerCommands } from './worker-commands';
@@ -47,6 +48,13 @@ const updateAccountInput = z.object({
   agentKey: agentKey.optional(),
 }).refine((v) => Object.values(v).some((x) => x !== undefined), { message: 'Không có thay đổi' });
 const botSwitchInput = z.object({ enabled: z.boolean() });
+const userIdInput = z.string().trim().min(1).max(128);
+const assignInput = z.object({ userId: userIdInput });
+const settingsInput = z.object({
+  assignMode: z.enum(['manual', 'round_robin']).optional(),
+  slaMinutes: z.number().int().min(1).max(1440).optional(),
+}).refine((v) => v.assignMode !== undefined || v.slaMinutes !== undefined, { message: 'Không có thay đổi' });
+const rosterInput = z.object({ userId: userIdInput, onDuty: z.boolean() });
 
 inboxRoutes.use('*', async (c, next) => {
   if (!INBOX_ROLES.has(c.get('actor').role)) return c.json(forbidden, 403);
@@ -56,6 +64,13 @@ const adminOnly = async (c: Ctx, next: () => Promise<void>) => {
   if (c.get('actor').role !== 'admin') return c.json(forbidden, 403);
   await next();
 };
+/** Assignment settings and the duty roster are managed by team leaders and admins. */
+const SETTINGS_ROLES: ReadonlySet<RoleCode> = new Set(['leader', 'admin']);
+const settingsManager = async (c: Ctx, next: () => Promise<void>) => {
+  if (!SETTINGS_ROLES.has(c.get('actor').role)) return c.json(forbidden, 403);
+  await next();
+};
+const placeholders = (n: number) => Array.from({ length: n }, () => '?').join(', ');
 
 const CONVERSATION_SELECT = `SELECT c.id, c.channel_account_id AS channelAccountId, a.display_name AS accountName, a.channel,
     c.kind, c.external_thread_id AS externalThreadId, c.contact_id AS contactId, c.display_name AS displayName, c.mode,
@@ -139,6 +154,81 @@ inboxRoutes.post('/conversations/:id/mode', async (c) => {
   if ('error' in input) return input.error;
   const changed = await setMode(c.env.DB, c.get('actor'), c.req.param('id'), input.data.mode);
   return changed ? c.json(ok(changed)) : c.json(notFound, 404);
+});
+
+const ASSIGN_FAILURES: Record<Extract<AssignOutcome, { ok: false }>['reason'], { status: 403 | 404 | 409 | 422; message: string }> = {
+  NOT_FOUND: { status: 404, message: 'Không tìm thấy trong phạm vi của bạn' },
+  FORBIDDEN: { status: 403, message: 'Nhân viên kinh doanh chỉ tự nhận hội thoại chưa giao' },
+  INVALID_ASSIGNEE: { status: 422, message: 'Người nhận không phải nhân viên Inbox đang hoạt động' },
+  ALREADY_ASSIGNED: { status: 409, message: 'Hội thoại đã có người nhận' },
+};
+
+inboxRoutes.post('/conversations/:id/assign', async (c) => {
+  const input = await body(c, assignInput);
+  if ('error' in input) return input.error;
+  const outcome = await assignConversation(c.env.DB, c.get('actor'), c.req.param('id'), input.data.userId,
+    linkBase(c.env.APP_URL, new URL(c.req.url).origin));
+  if (!outcome.ok) {
+    const failure = ASSIGN_FAILURES[outcome.reason];
+    return c.json(fail(outcome.reason, failure.message), failure.status);
+  }
+  if (outcome.changed) await background(c, processWorkerCommands(c.env));
+  return c.json(ok({ assigneeUserId: outcome.assignee.id, assigneeName: outcome.assignee.displayName }));
+});
+
+inboxRoutes.get('/settings', async (c) => c.json(ok(await loadInboxSettings(c.env.DB))));
+
+inboxRoutes.put('/settings', settingsManager, async (c) => {
+  const input = await body(c, settingsInput);
+  if ('error' in input) return input.error;
+  const actor = c.get('actor');
+  const db = c.env.DB;
+  const current = await loadInboxSettings(db);
+  const next = { assignMode: input.data.assignMode ?? current.assignMode, slaMinutes: input.data.slaMinutes ?? current.slaMinutes };
+  const now = new Date().toISOString();
+  await db.batch([
+    db.prepare(`INSERT INTO inbox_setting (id, assign_mode, sla_minutes, updated_by_user_id, updated_at) VALUES (1, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET assign_mode = excluded.assign_mode, sla_minutes = excluded.sla_minutes,
+        updated_by_user_id = excluded.updated_by_user_id, updated_at = excluded.updated_at`)
+      .bind(next.assignMode, next.slaMinutes, actor.id, now),
+    auditRow(db, actor, 'inbox.updateSettings', 'inbox_setting', '1',
+      { assignMode: current.assignMode, slaMinutes: current.slaMinutes }, next, now),
+  ]);
+  return c.json(ok(await loadInboxSettings(db)));
+});
+
+/** Active inbox staff (the people a conversation can be assigned to) with their duty flag; `roundRobin` marks who can be on duty. */
+inboxRoutes.get('/roster', async (c) => {
+  const rows = await c.env.DB.prepare(`SELECT u.id AS userId, u.display_name AS displayName, u.role,
+      COALESCE(r.on_duty, 0) AS onDuty, r.last_assigned_at AS lastAssignedAt
+    FROM app_user u LEFT JOIN inbox_roster r ON r.user_id = u.id
+    WHERE u.organization_id = ? AND u.status = 'active' AND u.role IN (${placeholders(ASSIGNABLE_ROLES.length)})
+    ORDER BY u.display_name`).bind(c.get('actor').organizationId, ...ASSIGNABLE_ROLES)
+    .all<{ userId: string; displayName: string; role: RoleCode; onDuty: number; lastAssignedAt: string | null }>();
+  return c.json(ok(rows.results.map((r) => ({ ...r, onDuty: r.onDuty === 1, roundRobin: ROUND_ROBIN_ROLES.includes(r.role) }))));
+});
+
+inboxRoutes.put('/roster', settingsManager, async (c) => {
+  const input = await body(c, rosterInput);
+  if ('error' in input) return input.error;
+  const actor = c.get('actor');
+  const db = c.env.DB;
+  const user = await db.prepare(`SELECT id FROM app_user
+    WHERE id = ? AND organization_id = ? AND status = 'active' AND role IN (${placeholders(ROUND_ROBIN_ROLES.length)})`)
+    .bind(input.data.userId, actor.organizationId, ...ROUND_ROBIN_ROLES).first<{ id: string }>();
+  if (!user) {
+    return c.json(fail('VALIDATION_FAILED', 'Chỉ nhân viên kinh doanh hoặc trưởng nhóm đang hoạt động được xếp trực',
+      { fields: { userId: 'Không hợp lệ' } }), 422);
+  }
+  const before = await db.prepare('SELECT on_duty FROM inbox_roster WHERE user_id = ?').bind(user.id).first<{ on_duty: number }>();
+  const onDuty = input.data.onDuty ? 1 : 0;
+  const now = new Date().toISOString();
+  await db.batch([
+    db.prepare(`INSERT INTO inbox_roster (user_id, on_duty) VALUES (?, ?)
+      ON CONFLICT(user_id) DO UPDATE SET on_duty = excluded.on_duty`).bind(user.id, onDuty),
+    auditRow(db, actor, 'inbox.setDuty', 'inbox_roster', user.id, { onDuty: before?.on_duty === 1 }, { onDuty: onDuty === 1 }, now),
+  ]);
+  return c.json(ok({ userId: user.id, onDuty: onDuty === 1 }));
 });
 
 interface AccountRow {

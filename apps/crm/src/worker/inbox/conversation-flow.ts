@@ -1,5 +1,6 @@
 import type { ConversationMode } from '@abm/contracts';
 import type { Actor, Env } from '../env';
+import { autoAssignOnHandoff, linkBase, slaDueSql } from './assignment';
 import { enqueueCommand, type CommandTarget } from './dispatcher';
 
 /**
@@ -130,13 +131,17 @@ export interface FlowOutcome {
 export async function handoff(db: D1Database, env: Pick<Env, 'APP_URL'>, conversationId: string, reason: string, origin?: string): Promise<FlowOutcome> {
   const conv = await loadConversation(db, conversationId);
   if (!conv) return { workerCommandQueued: false };
-  const now = new Date().toISOString();
-  const base = (env.APP_URL || origin || '').replace(/\/+$/, '');
-  const text = `Handoff: ${conv.display_name ?? conv.external_thread_id} (${conv.account_name}) – ${reason} – ${base}/inbox/${conv.id}`;
+  const nowDate = new Date();
+  const now = nowDate.toISOString();
+  const base = linkBase(env.APP_URL, origin);
   await db.batch([
-    db.prepare("UPDATE conversation SET mode = 'human', handoff_reason = ?, updated_at = ? WHERE id = ?").bind(reason, now, conv.id),
+    db.prepare(`UPDATE conversation SET mode = 'human', handoff_reason = ?, sla_due_at = ${slaDueSql()}, updated_at = ? WHERE id = ?`)
+      .bind(reason, now, now, conv.id),
     auditStatement(db, null, 'inbox.handoff', conv.id, { mode: conv.mode }, { mode: 'human', reason }, now),
   ]);
+  const assignment = await autoAssignOnHandoff(db, conv.id, base, nowDate);
+  const noOneOnDuty = assignment.status === 'no_one_on_duty' ? ' – chưa có người trực' : '';
+  const text = `Handoff: ${conv.display_name ?? conv.external_thread_id} (${conv.account_name}) – ${reason}${noOneOnDuty} – ${base}/inbox/${conv.id}`;
   await enqueueCommand(db, { kind: 'send_lark', target: 'worker', conversationId: conv.id, payload: { text } });
   return { workerCommandQueued: true };
 }
@@ -191,7 +196,7 @@ export async function staffSend(db: D1Database, actor: Actor, conversationId: st
   const mode: ConversationMode = conv.mode === 'ai' ? 'human' : conv.mode;
   const assignee = conv.assignee_user_id ?? (conv.mode === 'ai' ? actor.id : null);
   await db.batch([
-    db.prepare(`UPDATE conversation SET mode = ?, last_message_at = ?, last_staff_reply_at = ?, updated_at = ?,
+    db.prepare(`UPDATE conversation SET mode = ?, last_message_at = ?, last_staff_reply_at = ?, sla_due_at = NULL, updated_at = ?,
         assigned_at = CASE WHEN assignee_user_id IS NULL AND ? IS NOT NULL THEN ? ELSE assigned_at END,
         assignee_user_id = COALESCE(assignee_user_id, ?)
       WHERE id = ?`).bind(mode, now, now, now, assignee, now, assignee, conv.id),
@@ -212,12 +217,31 @@ export async function setMode(db: D1Database, actor: Actor, conversationId: stri
   const now = new Date().toISOString();
   const assignee = conv.assignee_user_id ?? (mode === 'human' ? actor.id : null);
   await db.batch([
-    db.prepare(`UPDATE conversation SET mode = ?, updated_at = ?,
-        assigned_at = CASE WHEN assignee_user_id IS NULL AND ? IS NOT NULL THEN ? ELSE assigned_at END,
-        assignee_user_id = COALESCE(assignee_user_id, ?)
-      WHERE id = ?`).bind(mode, now, assignee, now, assignee, conv.id),
+    // Switching to `human` starts the reply deadline; any other mode has no staff reply to wait for.
+    db.prepare(`UPDATE conversation SET mode = ?1, updated_at = ?2,
+        sla_due_at = CASE WHEN ?1 <> 'human' THEN NULL WHEN mode = 'human' THEN sla_due_at ELSE ${slaDueSql('?2')} END,
+        assigned_at = CASE WHEN assignee_user_id IS NULL AND ?3 IS NOT NULL THEN ?2 ELSE assigned_at END,
+        assignee_user_id = COALESCE(assignee_user_id, ?3)
+      WHERE id = ?4`).bind(mode, now, assignee, conv.id),
     auditStatement(db, actor, 'inbox.setMode', conv.id, { mode: conv.mode, assigneeUserId: conv.assignee_user_id },
       { mode, assigneeUserId: assignee }, now),
   ]);
   return { mode, assigneeUserId: assignee };
+}
+
+/** An outgoing message still pending after this long without a live send command is given up. */
+export const STUCK_OUTGOING_MS = 15 * 60_000;
+
+/**
+ * Marks outgoing messages failed when they have been pending for 15 minutes and no pending or claimed
+ * command refers to them any more (for example the send command failed for good). Returns the count.
+ */
+export async function sweepStuckOutgoing(db: D1Database, now = new Date()): Promise<number> {
+  const cutoff = new Date(now.getTime() - STUCK_OUTGOING_MS).toISOString();
+  const res = await db.prepare(`UPDATE message SET status = 'failed'
+    WHERE direction = 'out' AND status = 'pending' AND created_at < ?
+      AND NOT EXISTS (SELECT 1 FROM channel_command cc
+        WHERE json_extract(cc.payload_json, '$.messageId') = message.id AND cc.status IN ('pending', 'claimed'))`)
+    .bind(cutoff).run();
+  return res.meta.changes;
 }

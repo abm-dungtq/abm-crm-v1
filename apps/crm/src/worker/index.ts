@@ -5,6 +5,7 @@ import { adminRoutes } from './admin-routes';
 import { notifyCommitted } from './approval-notify';
 import { bridgeRoutes } from './inbox/bridge-routes';
 import { inboxRoutes } from './inbox/inbox-routes';
+import { runScheduled } from './inbox/scheduled';
 import { mcpRoutes } from './mcp-routes';
 import { canSeeOverview, overviewData } from './overview';
 import { publicAuth, sessionAuth } from './auth-routes';
@@ -16,7 +17,7 @@ import { chargeGuide, contactLedger, listCharges, listUnallocatedPayments, orgBa
 import { canReadLearners, learnerDetail, listLearners, listPartners, partnerDetail } from './learner-queries';
 import { learnerReports } from './learner-reports';
 import { listPrivacyRequests } from './privacy';
-import type { AppBindings } from './env';
+import type { AppBindings, Env } from './env';
 import {
   accountDetail, adminOverview, canReadAudit, dashboard, leadDetail, listAccounts, listApprovals,
   listAudit, listLeads, leadPage, accountPage, listProducts, listTasks, search, teamMembers, canReadProducts,
@@ -210,4 +211,7 @@ app.post('/commands/:name', async (c) => {
 
 app.all('*', (c) => c.json(notFound, 404));
 
-export default app;
+export default {
+  fetch: app.fetch,
+  scheduled: (event: ScheduledController, env: Env, ctx: ExecutionContext) => ctx.waitUntil(runScheduled(env, event.cron)),
+};

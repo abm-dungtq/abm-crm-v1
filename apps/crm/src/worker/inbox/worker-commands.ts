@@ -1,5 +1,5 @@
 import type { Env } from '../env';
-import { LarkError, sendToChat } from '../lark';
+import { LarkError, sendText, sendToChat } from '../lark';
 import { claimCommands, completeCommand, failCommand, type ClaimedCommand } from './dispatcher';
 
 type WorkerCommandEnv = Pick<Env, 'DB' | 'LARK_APP_ID' | 'LARK_APP_SECRET' | 'LARK_INBOX_CHAT_ID'>;
@@ -9,11 +9,15 @@ const CLAIM_LIMIT = 20;
 async function runCommand(env: WorkerCommandEnv, command: ClaimedCommand) {
   const db = env.DB;
   if (command.kind !== 'send_lark') return failCommand(db, command.id, command.attempts, 'UNSUPPORTED_COMMAND');
-  if (!env.LARK_INBOX_CHAT_ID) return failCommand(db, command.id, command.attempts, 'LARK_NOT_CONFIGURED');
-  const text = (command.payload as { text?: unknown } | null)?.text;
+  // `openId` sends a private message to one user; without it the notice goes to the inbox group.
+  const { text, openId } = (command.payload ?? {}) as { text?: unknown; openId?: unknown };
+  if (openId !== undefined && (typeof openId !== 'string' || !openId)) return failCommand(db, command.id, command.attempts, 'INVALID_PAYLOAD');
+  const chatId = env.LARK_INBOX_CHAT_ID;
+  if (openId === undefined && !chatId) return failCommand(db, command.id, command.attempts, 'LARK_NOT_CONFIGURED');
   if (typeof text !== 'string' || !text) return failCommand(db, command.id, command.attempts, 'INVALID_PAYLOAD');
   try {
-    await sendToChat(env, env.LARK_INBOX_CHAT_ID, text);
+    if (typeof openId === 'string') await sendText(env, openId, text);
+    else if (chatId) await sendToChat(env, chatId, text);
   } catch (error) {
     return failCommand(db, command.id, command.attempts, error instanceof LarkError ? error.message : 'LARK_SEND_FAILED');
   }

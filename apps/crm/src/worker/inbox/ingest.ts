@@ -1,5 +1,6 @@
 import type { BridgeEvent } from '@abm/contracts';
 import { isConstraintFailure } from '../guarded-tx';
+import { slaDueSql } from './assignment';
 import { ATTACHMENT_ONLY_TEXT, appendStaffContext, markMessageSent, scheduleCompletion } from './conversation-flow';
 
 /**
@@ -83,15 +84,17 @@ async function ingestMessage(db: D1Database, event: MessageEvent, now: Date) {
   if (event.fromSelf) {
     // Someone answered from the shared phone: people take over; the assignee stays as it is.
     await db.batch([
-      db.prepare(`UPDATE conversation SET mode = 'human', last_staff_reply_at = ?, last_message_at = ?, updated_at = ? WHERE id = ?`)
+      db.prepare(`UPDATE conversation SET mode = 'human', last_staff_reply_at = ?, last_message_at = ?, sla_due_at = NULL, updated_at = ? WHERE id = ?`)
         .bind(nowIso, nowIso, nowIso, conv.id),
       appendStaffContext(db, conv.id, `Nhân viên: ${text}`, nowIso),
     ]);
     return true;
   }
 
-  const updates = [db.prepare('UPDATE conversation SET last_inbound_at = ?, last_message_at = ?, updated_at = ? WHERE id = ?')
-    .bind(nowIso, nowIso, nowIso, conv.id)];
+  // In `human` mode the customer now waits for staff: the reply deadline starts unless one is already running.
+  const updates = [db.prepare(`UPDATE conversation SET last_inbound_at = ?1, last_message_at = ?1, updated_at = ?1,
+      sla_due_at = CASE WHEN mode = 'human' THEN COALESCE(sla_due_at, ${slaDueSql('?1')}) ELSE sla_due_at END
+    WHERE id = ?2`).bind(nowIso, conv.id)];
   if (conv.mode !== 'ai') updates.push(appendStaffContext(db, conv.id, `Khách: ${text}`, nowIso));
   await db.batch(updates);
   if (conv.mode === 'ai') await scheduleCompletion(db, conv.id, messageId, event.text, now);
