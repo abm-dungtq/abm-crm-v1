@@ -118,7 +118,7 @@ describe('CrmClient', () => {
   it('posts a result once and does not retry a 404', async () => {
     const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => new Response('{}', { status: 404 }));
     const { crm, sleep } = client(fetchMock as unknown as typeof fetch);
-    expect(await crm.postResult('c1', { attempts: 2, ok: true, externalMsgId: '99' })).toBe(false);
+    expect(await crm.postResult('c1', { attempts: 2, ok: true, externalMsgId: '99' })).toBe('undelivered');
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(sleep).not.toHaveBeenCalled();
     const [url, init] = fetchMock.mock.calls[0]!;
@@ -126,9 +126,13 @@ describe('CrmClient', () => {
     expect(JSON.parse(String(init!.body))).toEqual({ attempts: 2, ok: true, externalMsgId: '99' });
   });
 
-  it('treats a stale result answered with ignored as delivered', async () => {
+  it('tells a stale result answered with ignored apart from an applied one, and resends neither', async () => {
     const fetchMock = vi.fn(async () => ok({ ignored: true }));
-    const { crm } = client(fetchMock as unknown as typeof fetch);
-    expect(await crm.postResult('c1', { attempts: 1, ok: false, error: 'X' })).toBe(true);
+    const { crm, sleep } = client(fetchMock as unknown as typeof fetch);
+    expect(await crm.postResult('c1', { attempts: 1, ok: false, error: 'X' })).toBe('ignored');
+    fetchMock.mockImplementation(async () => ok({ ignored: false }));
+    expect(await crm.postResult('c1', { attempts: 2, ok: true })).toBe('accepted');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(sleep).not.toHaveBeenCalled();
   });
 });

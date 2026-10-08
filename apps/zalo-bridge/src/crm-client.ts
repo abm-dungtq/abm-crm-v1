@@ -30,6 +30,13 @@ const claimedCommandSchema = z.object({
 export type BridgeCommand = z.infer<typeof claimedCommandSchema>;
 const pollResponseSchema = z.object({ ok: z.literal(true), data: z.array(claimedCommandSchema) });
 const ingestResponseSchema = z.object({ ok: z.literal(true), data: z.object({ accepted: z.number(), rejected: z.number() }) });
+const resultResponseSchema = z.object({ ok: z.literal(true), data: z.object({ ignored: z.boolean() }) });
+
+/**
+ * What became of a reported command result: the Worker applied it (`accepted`), answered that the claim no longer
+ * owns the command so nothing was applied (`ignored`), or never got it (`undelivered`).
+ */
+export type ResultDelivery = 'accepted' | 'ignored' | 'undelivered';
 
 /** Delays before the 2nd, 3rd and 4th attempt of a request that failed on the network or with a 5xx. */
 export const RETRY_DELAYS_MS = [2000, 4000, 8000] as const;
@@ -136,11 +143,11 @@ export class CrmClient {
   }
 
   /**
-   * Reports a command result. Network errors and 5xx are retried after 2, 4 and 8 seconds and then every 8 seconds
-   * while `retryUntil` (epoch ms, normally the lease expiry) has not passed. A 4xx is final. A stale result is
-   * answered with { ignored: true }, which counts as delivered. Returns true when the Worker accepted the request.
+   * Reports a command result. Network errors, 5xx and auth failures are retried after 2, 4 and 8 seconds and then
+   * every 8 seconds while `retryUntil` (epoch ms, normally the lease expiry) has not passed. Any other 4xx is final.
+   * A stale result is answered with { ignored: true }: it needs no resend, but the Worker did not apply it.
    */
-  async postResult(id: string, result: BridgeCommandResult, retryUntil = 0): Promise<boolean> {
+  async postResult(id: string, result: BridgeCommandResult, retryUntil = 0): Promise<ResultDelivery> {
     const body = JSON.stringify(result);
     const path = `/api/bridge/commands/${encodeURIComponent(id)}/result`;
     let outcome = await this.withRetry(() => this.request('POST', path, body));
@@ -148,11 +155,14 @@ export class CrmClient {
       await this.sleep(RETRY_DELAYS_MS[2]);
       outcome = await this.request('POST', path, body);
     }
-    if (outcome.kind === 'ok') return true;
+    if (outcome.kind === 'ok') {
+      const parsed = resultResponseSchema.safeParse(outcome.json);
+      return parsed.success && parsed.data.data.ignored ? 'ignored' : 'accepted';
+    }
     this.log('error', 'result.undelivered', {
       commandId: id, ...(outcome.kind === 'rejected' ? { status: outcome.status } : { code: outcome.code }),
     });
-    return false;
+    return 'undelivered';
   }
 
   private async withRetry(send: () => Promise<SendOutcome>): Promise<SendOutcome> {

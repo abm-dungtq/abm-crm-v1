@@ -1,7 +1,7 @@
 import type { BridgeCommandResult } from '@abm/contracts';
 import { z } from 'zod';
 import { CodedError, errorCode, silentLogger, type Logger } from './config';
-import type { BridgeCommand } from './crm-client';
+import type { BridgeCommand, ResultDelivery } from './crm-client';
 import type { CompletionRequest } from './goclaw-client';
 import type { ThreadKind } from './zalo-client';
 
@@ -25,7 +25,7 @@ const sessionPayload = z.object({ accountId: z.string().min(1) }).partial();
 
 export interface RunnerCrm {
   pollCommands(): Promise<BridgeCommand[]>;
-  postResult(id: string, result: BridgeCommandResult, retryUntil?: number): Promise<boolean>;
+  postResult(id: string, result: BridgeCommandResult, retryUntil?: number): Promise<ResultDelivery>;
 }
 export interface RunnerGoClaw {
   complete(request: CompletionRequest): Promise<string>;
@@ -163,9 +163,10 @@ export class CommandRunner {
       commandId: command.id, kind: command.kind, attempts: command.attempts, ok: outcome.ok, code: outcome.error,
     });
     const leaseEnd = command.leaseExpiresAt ? Date.parse(command.leaseExpiresAt) : NaN;
-    const delivered = await this.options.crm.postResult(command.id, { attempts: command.attempts, ...outcome }, Number.isFinite(leaseEnd) ? leaseEnd : 0);
-    // A send is forgotten once the Worker has its success; until then a re-claim must not send it again.
-    if (delivered && outcome.ok) this.sendProgress.delete(command.id);
+    const delivery = await this.options.crm.postResult(command.id, { attempts: command.attempts, ...outcome }, Number.isFinite(leaseEnd) ? leaseEnd : 0);
+    // A send is forgotten once the Worker has applied its success. An ignored success (a newer claim owns the command)
+    // was not applied, so the newer claim must still find the delivered chunks.
+    if (delivery === 'accepted' && outcome.ok) this.sendProgress.delete(command.id);
   }
 
   private async perform(command: BridgeCommand): Promise<Outcome> {

@@ -1,7 +1,7 @@
 import type { BridgeCommandResult } from '@abm/contracts';
 import { describe, expect, it, vi } from 'vitest';
 import { CommandRunner, splitIntoChunks, type RunnerAccounts } from '../src/command-runner';
-import type { BridgeCommand } from '../src/crm-client';
+import type { BridgeCommand, ResultDelivery } from '../src/crm-client';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -13,9 +13,9 @@ function setup(overrides: { complete?: (r: { text: string }) => Promise<string>;
   const results: { id: string; result: BridgeCommandResult }[] = [];
   const crm = {
     pollCommands: vi.fn(async () => [] as BridgeCommand[]),
-    postResult: vi.fn(async (id: string, result: BridgeCommandResult) => {
+    postResult: vi.fn(async (id: string, result: BridgeCommandResult): Promise<ResultDelivery> => {
       results.push({ id, result });
-      return true;
+      return 'accepted';
     }),
   };
   const goclaw = { complete: vi.fn(overrides.complete ?? (async () => 'reply')) };
@@ -139,7 +139,7 @@ describe('CommandRunner', () => {
     const { runner, crm, accounts, results } = setup();
     crm.postResult.mockImplementationOnce(async (id: string, result: BridgeCommandResult) => {
       results.push({ id, result });
-      return false;
+      return 'undelivered';
     });
     const payload = { messageId: 'm1', threadId: 'cust-1', threadKind: 'direct', text: 'a\n' + 'b'.repeat(2000) };
     runner.dispatch(command('s1', 'send_zalo', payload, 'conv-1', 1));
@@ -151,6 +151,30 @@ describe('CommandRunner', () => {
       { attempts: 1, ok: true, externalMsgId: '100' },
       { attempts: 2, ok: true, externalMsgId: '100' },
     ]);
+  });
+
+  it('keeps the delivered chunks when the Worker ignores the success because a newer claim owns the command', async () => {
+    const { runner, crm, accounts, results } = setup();
+    crm.postResult.mockImplementationOnce(async (id: string, result: BridgeCommandResult) => {
+      results.push({ id, result });
+      return 'ignored';
+    });
+    const payload = { messageId: 'm1', threadId: 'cust-1', threadKind: 'direct', text: 'a\n' + 'b'.repeat(2000) };
+    runner.dispatch(command('s1', 'send_zalo', payload, 'conv-1', 1));
+    await runner.idle();
+    expect(accounts.send).toHaveBeenCalledTimes(2);
+
+    // The newer claim reports the same success without sending anything again, and is then forgotten.
+    runner.dispatch(command('s1', 'send_zalo', payload, 'conv-1', 2));
+    await runner.idle();
+    expect(accounts.send).toHaveBeenCalledTimes(2);
+    expect(results.map((r) => r.result)).toEqual([
+      { attempts: 1, ok: true, externalMsgId: '100' },
+      { attempts: 2, ok: true, externalMsgId: '100' },
+    ]);
+    runner.dispatch(command('s1', 'send_zalo', payload, 'conv-1', 3));
+    await runner.idle();
+    expect(accounts.send).toHaveBeenCalledTimes(4);
   });
 
   it('reports failures with the claimed attempts and an error code', async () => {
