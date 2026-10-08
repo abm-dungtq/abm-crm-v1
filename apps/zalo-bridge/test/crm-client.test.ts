@@ -72,6 +72,25 @@ describe('CrmClient', () => {
     expect(crm.pendingCount).toBe(0);
   });
 
+  it('keeps a batch refused with 401 or 403 and logs CRM_AUTH as an error', async () => {
+    for (const status of [401, 403]) {
+      const fetchMock = vi.fn(async () => new Response('{}', { status }));
+      const sleep = vi.fn(async (_ms: number) => {});
+      const log = vi.fn();
+      const crm = new CrmClient({ baseUrl: 'https://crm.test', secret: SECRET, pollWaitSeconds: 20, fetch: fetchMock as unknown as typeof fetch, sleep, now: () => NOW_MS, log });
+      await crm.pushEvents([message(1), message(2)]);
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+      expect(sleep.mock.calls.map(([ms]) => ms)).toEqual([...RETRY_DELAYS_MS]);
+      expect(crm.pendingCount).toBe(2);
+      expect(log).toHaveBeenCalledWith('error', 'crm.auth_failed', { code: 'CRM_AUTH', status, path: '/api/bridge/events' });
+      expect(log).toHaveBeenCalledWith('warn', 'events.deferred', { count: 2, code: 'CRM_AUTH' });
+
+      fetchMock.mockImplementation(async () => ok({ accepted: 2, rejected: 0 }));
+      await crm.flush();
+      expect(crm.pendingCount).toBe(0);
+    }
+  });
+
   it('drops events that break the contract before sending', async () => {
     const fetchMock = vi.fn(async () => ok({ accepted: 1, rejected: 0 }));
     const { crm } = client(fetchMock as unknown as typeof fetch);

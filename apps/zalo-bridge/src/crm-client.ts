@@ -75,8 +75,9 @@ export class CrmClient {
 
   /**
    * Queues events and delivers them in batches of at most 100, one request at a time. A batch that fails on the
-   * network or with a 5xx is retried after 2, 4 and 8 seconds, then kept for the next flush. A batch the Worker
-   * refuses (4xx) is dropped. Events that do not match the contract are dropped here so they cannot sink a batch.
+   * network, with a 5xx, or with 401/403 (a wrong secret or clock: the Worker never saw the events) is retried after
+   * 2, 4 and 8 seconds, then kept for the next flush. A batch the Worker refuses as invalid (any other 4xx, such
+   * as 422) is dropped. Events that do not match the contract are dropped here so they cannot sink a batch.
    */
   pushEvents(events: BridgeEvent[]): Promise<void> {
     for (const event of events) {
@@ -182,6 +183,12 @@ export class CrmClient {
     if (response.status >= 500) {
       await response.body?.cancel().catch(() => {});
       return { kind: 'retryable', code: `CRM_HTTP_${response.status}` };
+    }
+    // Authentication failed: nothing was processed, and it lasts until an operator fixes the secret or the clock.
+    if (response.status === 401 || response.status === 403) {
+      await response.body?.cancel().catch(() => {});
+      this.log('error', 'crm.auth_failed', { code: 'CRM_AUTH', status: response.status, path: path.split('?')[0] });
+      return { kind: 'retryable', code: 'CRM_AUTH' };
     }
     if (!response.ok) {
       await response.body?.cancel().catch(() => {});
