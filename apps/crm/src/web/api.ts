@@ -119,7 +119,9 @@ export const listMessages = (id: string, after?: string) =>
 export const sendMessage = (id: string, text: string) => api.post<SendMessageResult>(`/inbox/conversations/${enc(id)}/messages`, { text });
 export const setMode = (id: string, mode: ConversationMode) => api.post<SetModeResult>(`/inbox/conversations/${enc(id)}/mode`, { mode });
 export const listAccounts = () => api.get<ChannelAccount[]>('/inbox/accounts');
-export const createAccount = (input: { displayName: string; agentKey: string }) => api.post<ChannelAccount>('/inbox/accounts', input);
+/** A Facebook Page is added with `channel: 'facebook'` and its page id as `externalId`; without `channel` a Zalo number is added. */
+export const createAccount = (input: { displayName: string; agentKey: string; channel?: 'zalo' | 'facebook'; externalId?: string }) =>
+  api.post<ChannelAccount>('/inbox/accounts', input);
 export const updateAccount = (id: string, input: ChannelAccountUpdate) => api.patch<ChannelAccount>(`/inbox/accounts/${enc(id)}`, input);
 export const connectAccount = (id: string) => api.post<{ commandId: string }>(`/inbox/accounts/${enc(id)}/connect`);
 export const disconnectAccount = (id: string) => api.post<{ commandId: string }>(`/inbox/accounts/${enc(id)}/disconnect`);

@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient, type UseMutationResult } from '@tanstack/react-query';
-import type { ChannelAccountStatus } from '@abm/contracts';
+import type { ChannelAccountStatus, ChannelKind } from '@abm/contracts';
 import { useActor } from '../actor-context';
 import {
   ApiFailure, connectAccount, createAccount, disconnectAccount, getCustomerBotSwitch, listAccounts, setCustomerBotSwitch, updateAccount,
@@ -60,7 +60,7 @@ export function ChannelAccountsPage() {
           <div className="card-head"><h2>Danh sách tài khoản</h2></div>
           {accounts.isLoading && <div className="card-body"><Loading rows={3} /></div>}
           {accounts.error && <div className="card-body"><ErrorState error={accounts.error} onRetry={() => accounts.refetch()} /></div>}
-          {accounts.data && !accounts.data.length && <Empty title="Chưa có tài khoản kênh">Thêm số Zalo ở trên để bắt đầu.</Empty>}
+          {accounts.data && !accounts.data.length && <Empty title="Chưa có tài khoản kênh">Thêm số Zalo hoặc Fanpage ở trên để bắt đầu.</Empty>}
           {toggle.error && <div className="card-body"><FormError error={toggle.error} /></div>}
           {!!accounts.data?.length && (
             <div className="table-wrap">
@@ -121,33 +121,58 @@ export function ChannelAccountsPage() {
   );
 }
 
+const EMPTY_ACCOUNT_FORM = { channel: 'zalo' as ChannelKind, displayName: '', agentKey: '', externalId: '' };
+
+/** Adds a Zalo number (connected later by QR) or a Facebook Page (identified by its page id, no QR). */
 function AddAccountCard() {
   const toast = useToast();
-  const [form, setForm] = useState({ displayName: '', agentKey: '' });
+  const [form, setForm] = useState(EMPTY_ACCOUNT_FORM);
   const create = useAccountMutation(createAccount);
   const errors = fieldErrors(create.error);
+  const isPage = form.channel === 'facebook';
+  const pageIdValid = /^\d{1,32}$/.test(form.externalId.trim());
+  const submitLabel = isPage ? 'Thêm Fanpage' : 'Thêm số Zalo';
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    create.mutate({ displayName: form.displayName.trim(), agentKey: form.agentKey.trim() }, {
-      onSuccess: (a) => { toast(`Đã thêm ${a.displayName}`); setForm({ displayName: '', agentKey: '' }); },
+    const base = { displayName: form.displayName.trim(), agentKey: form.agentKey.trim() };
+    create.mutate(isPage ? { ...base, channel: 'facebook', externalId: form.externalId.trim() } : base, {
+      onSuccess: (a) => { toast(`Đã thêm ${a.displayName}`); setForm({ ...EMPTY_ACCOUNT_FORM, channel: form.channel }); },
     });
   };
   return (
     <section className="card">
-      <div className="card-head"><h2>Thêm số Zalo</h2></div>
+      <div className="card-head"><h2>Thêm tài khoản kênh</h2></div>
       <form className="card-body stack" onSubmit={submit}>
         <FormError error={create.error && !Object.keys(errors).length ? create.error : null} />
+        <Field label="Kênh" htmlFor="account-channel" error={errors.channel}>
+          <select id="account-channel" value={form.channel} onChange={(e) => setForm({ ...form, channel: e.target.value as ChannelKind })}>
+            <option value="zalo">Số Zalo (kết nối bằng mã QR)</option>
+            <option value="facebook">Fanpage Facebook (Messenger)</option>
+          </select>
+        </Field>
         <div className="grid-2">
-          <Field label="Tên hiển thị" required htmlFor="account-name" error={errors.displayName} hint="Ví dụ: Zalo tuyển sinh 1">
+          <Field label="Tên hiển thị" required htmlFor="account-name" error={errors.displayName} hint={isPage ? 'Ví dụ: Fanpage ABM' : 'Ví dụ: Zalo tuyển sinh 1'}>
             <input id="account-name" type="text" maxLength={200} required value={form.displayName}
               aria-invalid={Boolean(errors.displayName)} onChange={(e) => setForm({ ...form, displayName: e.target.value })} />
           </Field>
-          <Field label="Agent GoClaw (agentKey)" required htmlFor="account-agent" error={errors.agentKey} hint="Agent trả lời khách của số này">
+          <Field label="Agent GoClaw (agentKey)" required htmlFor="account-agent" error={errors.agentKey} hint={`Agent trả lời khách của ${isPage ? 'Fanpage' : 'số'} này`}>
             <input id="account-agent" type="text" maxLength={128} required value={form.agentKey}
               aria-invalid={Boolean(errors.agentKey)} onChange={(e) => setForm({ ...form, agentKey: e.target.value })} />
           </Field>
+          {isPage && (
+            <Field label="Page ID" required htmlFor="account-page-id"
+              error={errors.externalId ?? (form.externalId.trim() && !pageIdValid ? 'Page ID là dãy số' : undefined)}
+              hint="Token của Page do quản trị đặt trong secret FB_PAGE_TOKENS; không cần quét QR">
+              <input id="account-page-id" type="text" inputMode="numeric" maxLength={32} required value={form.externalId}
+                aria-invalid={Boolean(errors.externalId) || Boolean(form.externalId.trim() && !pageIdValid)}
+                onChange={(e) => setForm({ ...form, externalId: e.target.value })} />
+            </Field>
+          )}
         </div>
-        <div><button type="submit" className="btn btn-primary" disabled={create.isPending || !form.displayName.trim() || !form.agentKey.trim()}>Thêm số Zalo</button></div>
+        <div>
+          <button type="submit" className="btn btn-primary"
+            disabled={create.isPending || !form.displayName.trim() || !form.agentKey.trim() || (isPage && !pageIdValid)}>{submitLabel}</button>
+        </div>
       </form>
     </section>
   );

@@ -1,7 +1,8 @@
 import { Hono, type Context } from 'hono';
-import { CONVERSATION_MODES, type ApiResult, type RoleCode } from '@abm/contracts';
+import { CHANNEL_KINDS, CONVERSATION_MODES, type ApiResult, type RoleCode } from '@abm/contracts';
 import { z } from 'zod';
 import { background, type Actor, type AppBindings } from '../env';
+import { isConstraintFailure } from '../guarded-tx';
 import {
   ASSIGNABLE_ROLES, MANAGER_ROLES, ROUND_ROBIN_ROLES, assignConversation, linkBase, loadInboxSettings, type AssignOutcome,
 } from './assignment';
@@ -46,7 +47,13 @@ const sendTextInput = z.object({ text: z.string().trim().min(1).max(STAFF_TEXT_M
 const modeInput = z.object({ mode: z.enum(CONVERSATION_MODES) });
 const agentKey = z.string().trim().min(1).max(128);
 const hhmm = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Định dạng HH:MM');
-const createAccountInput = z.object({ displayName: z.string().trim().min(1).max(200), agentKey });
+/** A Zalo number learns its id when it first connects; a Facebook Page is added with its page id and needs no login. */
+const createAccountInput = z.object({
+  channel: z.enum(CHANNEL_KINDS).default('zalo'),
+  displayName: z.string().trim().min(1).max(200),
+  agentKey,
+  externalId: z.string().trim().regex(/^\d{1,32}$/, 'Page ID là dãy số').optional(),
+}).refine((v) => v.channel !== 'facebook' || v.externalId !== undefined, { message: 'Cần Page ID', path: ['externalId'] });
 const updateAccountInput = z.object({
   botEnabled: z.boolean().optional(),
   sendPaused: z.boolean().optional(),
@@ -287,11 +294,20 @@ inboxRoutes.post('/accounts', adminOnly, async (c) => {
   const db = c.env.DB;
   const now = new Date().toISOString();
   const id = crypto.randomUUID();
-  await db.batch([
-    db.prepare(`INSERT INTO channel_account (id, organization_id, channel, display_name, agent_key, created_at, updated_at)
-      VALUES (?, ?, 'zalo', ?, ?, ?, ?)`).bind(id, actor.organizationId, input.data.displayName, input.data.agentKey, now, now),
-    auditRow(db, actor, 'inbox.createAccount', 'channel_account', id, null, input.data, now),
-  ]);
+  const { channel, displayName, agentKey: key } = input.data;
+  const externalId = channel === 'facebook' ? input.data.externalId! : null;
+  const after = { channel, displayName, agentKey: key, externalId };
+  try {
+    await db.batch([
+      db.prepare(`INSERT INTO channel_account (id, organization_id, channel, external_id, display_name, agent_key, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .bind(id, actor.organizationId, channel, externalId, displayName, key, channel === 'facebook' ? 'connected' : 'disconnected', now, now),
+      auditRow(db, actor, 'inbox.createAccount', 'channel_account', id, null, after, now),
+    ]);
+  } catch (error) {
+    if (!isConstraintFailure(error)) throw error;
+    return c.json(fail('VALIDATION_FAILED', 'Fanpage này đã được thêm', { fields: { externalId: 'Đã tồn tại' } }), 422);
+  }
   return c.json(ok(presentAccount((await loadAccount(db, actor, id))!, actor)));
 });
 

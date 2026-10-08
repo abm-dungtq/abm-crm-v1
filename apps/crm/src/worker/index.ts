@@ -4,6 +4,7 @@ import { isDemoMode, requireActor } from './actor';
 import { adminRoutes } from './admin-routes';
 import { notifyCommitted } from './approval-notify';
 import { bridgeRoutes } from './inbox/bridge-routes';
+import { facebookWebhookRoutes } from './inbox/facebook-webhook';
 import { inboxRoutes } from './inbox/inbox-routes';
 import { runScheduled } from './inbox/scheduled';
 import { mcpRoutes } from './mcp-routes';
@@ -40,6 +41,8 @@ app.get('/health', (c) => c.json({ ok: true }));
 app.route('/mcp', mcpRoutes);
 // The Zalo bridge sidecar signs each request with HMAC, so it is mounted before the browser origin and session checks.
 app.route('/bridge', bridgeRoutes);
+// Meta signs Messenger webhooks with the app secret, so they are mounted before the browser origin and session checks.
+app.route('/channels/facebook', facebookWebhookRoutes);
 app.use('*', originGuard);
 app.route('/auth', publicAuth);
 

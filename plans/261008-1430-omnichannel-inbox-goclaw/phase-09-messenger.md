@@ -1,7 +1,7 @@
 ---
 phase: 9
 title: "Messenger vào Inbox"
-status: pending
+status: completed
 priority: P2
 effort: "1.5d"
 dependencies: [3, 6]

@@ -7,7 +7,7 @@ import { enqueueCommand } from './dispatcher';
 /**
  * Applies events pushed by the Zalo bridge sidecar. Each event is handled on its own: a failure or an
  * unknown account counts as rejected and never fails the batch, so the sidecar does not resend it forever.
- * Message text is never logged.
+ * `ingestMessage` is the message path shared with the Messenger webhook. Message text is never logged.
  */
 
 type MessageEvent = Extract<BridgeEvent, { type: 'message' }>;
@@ -22,13 +22,31 @@ const ECHO_MATCH_CHARS = 2000;
 
 export interface IngestResult { accepted: number; rejected: number }
 
-interface AccountRow { id: string; organization_id: string }
+/** Channel account a message belongs to. */
+export interface ChannelAccountRef { id: string; organization_id: string }
 interface ConversationRef { id: string; mode: 'ai' | 'human' | 'paused' }
 
-const findZaloAccount = (db: D1Database, externalId: string) =>
-  db.prepare("SELECT id, organization_id FROM channel_account WHERE channel = 'zalo' AND external_id = ?").bind(externalId).first<AccountRow>();
+/** One message of any channel, in the shape the shared ingest path stores. */
+export interface InboundMessage {
+  threadId: string;
+  threadKind: 'direct' | 'group';
+  msgId: string;
+  /** Sent from the account itself: a system message's echo or a staff reply typed outside the CRM. */
+  fromSelf: boolean;
+  senderExternalId: string;
+  /** Customer's display name; null or blank leaves the conversation name as it is. */
+  senderName: string | null;
+  text: string;
+  attachments?: { url: string; name?: string; mimeType?: string }[];
+}
 
-const upsertConversation = (db: D1Database, account: AccountRow, threadId: string, kind: 'direct' | 'group', displayName: string | null, now: string) =>
+/** Decides whether a fromSelf message echoes a message the system sent; when it does, it marks that message sent. */
+export type EchoMatcher = (conversationId: string) => Promise<boolean>;
+
+const findZaloAccount = (db: D1Database, externalId: string) =>
+  db.prepare("SELECT id, organization_id FROM channel_account WHERE channel = 'zalo' AND external_id = ?").bind(externalId).first<ChannelAccountRef>();
+
+const upsertConversation = (db: D1Database, account: ChannelAccountRef, threadId: string, kind: 'direct' | 'group', displayName: string | null, now: string) =>
   db.prepare(`INSERT INTO conversation (id, organization_id, channel_account_id, kind, external_thread_id, display_name, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(channel_account_id, external_thread_id) DO UPDATE SET kind = excluded.kind,
@@ -60,15 +78,20 @@ async function applyEcho(db: D1Database, conversationId: string, event: MessageE
   return true;
 }
 
-async function ingestMessage(db: D1Database, event: MessageEvent, now: Date) {
-  const account = await findZaloAccount(db, event.accountExternalId);
-  if (!account) return false;
+/**
+ * Stores one message of a known channel account. A fromSelf message that `isEcho`
+ * recognises adds nothing; any other fromSelf message is a staff reply typed outside the CRM (`staff_phone`)
+ * and hands the conversation to people. A customer message queues the bot's reply in `ai` mode.
+ * The same external message id twice stores one message.
+ */
+export async function ingestMessage(db: D1Database, account: ChannelAccountRef, event: InboundMessage, now: Date, isEcho: EchoMatcher) {
   const nowIso = now.toISOString();
   // A direct thread is named after the customer; our own messages and group members do not rename it.
-  const name = !event.fromSelf && event.threadKind === 'direct' && event.senderName.trim() ? event.senderName.trim() : null;
+  const senderName = event.senderName?.trim();
+  const name = !event.fromSelf && event.threadKind === 'direct' && senderName ? senderName : null;
   const conv = await upsertConversation(db, account, event.threadId, event.threadKind, name, nowIso).first<ConversationRef>();
   if (!conv) throw new Error('conversation upsert returned no row');
-  if (event.fromSelf && await applyEcho(db, conv.id, event, now)) return true;
+  if (event.fromSelf && await isEcho(conv.id)) return;
 
   const messageId = crypto.randomUUID();
   const inserted = await db.prepare(`INSERT INTO message
@@ -79,17 +102,17 @@ async function ingestMessage(db: D1Database, event: MessageEvent, now: Date) {
       event.msgId, event.text, event.attachments?.length ? JSON.stringify(event.attachments) : null,
       event.fromSelf ? 'sent' : 'received', nowIso)
     .run();
-  if (inserted.meta.changes === 0) return true;
+  if (inserted.meta.changes === 0) return;
   const text = event.text || ATTACHMENT_ONLY_TEXT;
 
   if (event.fromSelf) {
-    // Someone answered from the shared phone: people take over; the assignee stays as it is.
+    // Someone answered outside the CRM (the shared phone, Meta Business Suite): people take over; the assignee stays as it is.
     await db.batch([
       db.prepare(`UPDATE conversation SET mode = 'human', last_staff_reply_at = ?, last_message_at = ?, sla_due_at = NULL, updated_at = ? WHERE id = ?`)
         .bind(nowIso, nowIso, nowIso, conv.id),
       appendStaffContext(db, conv.id, `Nhân viên: ${text}`, nowIso),
     ]);
-    return true;
+    return;
   }
 
   // In `human` mode the customer now waits for staff: the reply deadline starts unless one is already running.
@@ -99,6 +122,12 @@ async function ingestMessage(db: D1Database, event: MessageEvent, now: Date) {
   if (conv.mode !== 'ai') updates.push(appendStaffContext(db, conv.id, `Khách: ${text}`, nowIso));
   await db.batch(updates);
   if (conv.mode === 'ai') await scheduleCompletion(db, conv.id, messageId, event.text, now);
+}
+
+async function ingestZaloMessage(db: D1Database, event: MessageEvent, now: Date) {
+  const account = await findZaloAccount(db, event.accountExternalId);
+  if (!account) return false;
+  await ingestMessage(db, account, event, now, (conversationId) => applyEcho(db, conversationId, event, now));
   return true;
 }
 
@@ -159,7 +188,7 @@ export async function ingestEvents(db: D1Database, events: BridgeEvent[]): Promi
   for (const event of events) {
     const now = new Date();
     try {
-      const ok = event.type === 'message' ? await ingestMessage(db, event, now)
+      const ok = event.type === 'message' ? await ingestZaloMessage(db, event, now)
         : event.type === 'account_status' ? await ingestAccountStatus(db, event, now.toISOString())
         : event.type === 'qr' ? await ingestQr(db, event, now.toISOString())
         : await ingestGroupList(db, event, now.toISOString());
