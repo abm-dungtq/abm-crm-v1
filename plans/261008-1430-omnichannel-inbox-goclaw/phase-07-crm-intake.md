@@ -26,6 +26,7 @@ Agent GoClaw `crm-extractor` trích thông tin khách từ hội thoại vào `l
 
 ## Files to Create / Modify
 
+- Modify: `apps/crm/seed/cleanup-demo.sql` và `apps/crm/test/demo-cleanup.test.ts`: trước khi xoá contact/lead demo, `UPDATE conversation SET contact_id = NULL WHERE contact_id` thuộc contact demo (không xoá hội thoại), `DELETE FROM lead_intake WHERE lead_id` thuộc lead demo `OR contact_id` thuộc contact demo, và xoá `audit_log` của các `lead_intake` đó. Thêm test: gắn một hội thoại vào contact demo, chạy cleanup, `PRAGMA foreign_key_check` rỗng và hội thoại vẫn còn. Không thêm bảng inbox vào `BUSINESS_EMPTY_TABLES`.
 - Create: `apps/crm/migrations/0015_conversation_extracted_at.sql` (`ALTER TABLE conversation ADD COLUMN last_extracted_at TEXT;`)
 - Create: `apps/crm/src/worker/inbox/intake.ts` (`enqueueExtraction`, `applyExtractionResult`, `classifyIntake`, `discardIntake`, `confirmProposedField`)
 - Create: `apps/crm/src/web/pages/intakes.tsx` (danh sách lead chờ phân loại)

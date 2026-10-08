@@ -25,7 +25,7 @@ Trang Nhóm Zalo cho xem và gửi tin nhóm; tóm tắt nhóm hằng ngày lúc
    3. Tài khoản `status = 'connected'` và `send_paused = 0`.
    4. Nhóm `scheduled_opt_out = 0`.
    5. Không trong giờ yên lặng của tài khoản (`quiet_start`–`quiet_end`, mặc định 21:00–08:00); nếu đang yên lặng thì dời tới `quiet_end` + lệch ngẫu nhiên.
-   6. `accountSendsToday(...) < daily_send_cap`; nếu đủ cap thì dời sang ngày hợp lệ kế tiếp.
+   6. `accountSendsToday(...) < daily_send_cap`; nếu đủ cap thì dời sang ngày hợp lệ kế tiếp. Trước khi dùng, sửa `accountSendsToday` trong `dispatcher.ts` để đếm `status IN ('pending','claimed','done') AND COALESCE(claimed_at, created_at) >= ?` (lệnh đang chờ khi sidecar tắt cũng tính vào cap) và thêm test cho trường hợp đó.
    Qua hết → lệnh `send_zalo` (`threadKind = 'group'`, `dedupe_key = 'schedule:' + id + ':' + <ngày>`), cập nhật `last_run_at`, tính `next_run_at` mới.
 6. Sự kiện `account_status = 'error'` từ sidecar → `send_paused = 1` và lệnh `send_lark` cảnh báo `Tài khoản <tên> lỗi kết nối, đã tạm dừng gửi`. Bật lại gửi là thao tác tay của admin.
 
@@ -34,6 +34,7 @@ Trang Nhóm Zalo cho xem và gửi tin nhóm; tóm tắt nhóm hằng ngày lúc
 - Create: `apps/crm/migrations/0016_group_controls.sql` (`ALTER TABLE inbox_setting ADD COLUMN scheduled_sends_enabled INTEGER NOT NULL DEFAULT 0 CHECK (scheduled_sends_enabled IN (0,1));` và `ALTER TABLE group_schedule ADD COLUMN last_skip_reason TEXT;`)
 - Create: `apps/crm/src/worker/inbox/group-schedules.ts` (`computeNextRun`, `saveSchedule`, `submitSchedule`, `approveSchedule`, `pauseSchedule`, `runDueSchedules`)
 - Create: `apps/crm/src/worker/inbox/group-summaries.ts` (`enqueueDailyGroupSummaries`, `applyGroupSummaryResult`)
+- Modify: `apps/crm/src/worker/inbox/dispatcher.ts` (`accountSendsToday` theo quy tắc 5.6) và `apps/crm/test/inbox-dispatcher.test.ts`
 - Create: `apps/crm/src/web/pages/zalo-groups.tsx`
 - Create: `apps/crm/test/inbox-groups.test.ts`
 - Modify: `apps/crm/src/worker/inbox/scheduled.ts` (mỗi phút gọi `runDueSchedules`; `0 14 * * *` gọi `enqueueDailyGroupSummaries`)
