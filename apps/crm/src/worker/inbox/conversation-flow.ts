@@ -156,7 +156,8 @@ export async function handoff(db: D1Database, env: Pick<Env, 'APP_URL'>, convers
   const nowDate = new Date();
   const now = nowDate.toISOString();
   const base = linkBase(env.APP_URL, origin);
-  const update = db.prepare(`UPDATE conversation SET mode = 'human', handoff_reason = ?, sla_due_at = ${slaDueSql()}, updated_at = ?
+  const update = db.prepare(`UPDATE conversation SET mode = 'human', handoff_reason = ?,
+      sla_due_at = CASE WHEN kind = 'direct' THEN ${slaDueSql()} ELSE NULL END, updated_at = ?
     WHERE id = ?${options.onlyFromAi ? " AND mode = 'ai'" : ''}`).bind(reason, now, now, conv.id);
   const audit = auditStatement(db, null, 'inbox.handoff', conv.id, { mode: conv.mode }, { mode: 'human', reason }, now);
   if (options.onlyFromAi) {
@@ -322,9 +323,10 @@ export async function setMode(db: D1Database, actor: Actor, conversationId: stri
   const now = new Date().toISOString();
   const assignee = conv.assignee_user_id ?? (mode === 'human' ? actor.id : null);
   await db.batch([
-    // Switching to `human` starts the reply deadline; any other mode has no staff reply to wait for.
+    // Switching a direct conversation to `human` starts the reply deadline; any other mode, or a group, has no staff
+    // reply to wait for.
     db.prepare(`UPDATE conversation SET mode = ?1, updated_at = ?2,
-        sla_due_at = CASE WHEN ?1 <> 'human' THEN NULL WHEN mode = 'human' THEN sla_due_at ELSE ${slaDueSql('?2')} END,
+        sla_due_at = CASE WHEN ?1 <> 'human' OR kind <> 'direct' THEN NULL WHEN mode = 'human' THEN sla_due_at ELSE ${slaDueSql('?2')} END,
         assigned_at = CASE WHEN assignee_user_id IS NULL AND ?3 IS NOT NULL THEN ?2 ELSE assigned_at END,
         assignee_user_id = COALESCE(assignee_user_id, ?3)
       WHERE id = ?4`).bind(mode, now, assignee, conv.id),

@@ -115,9 +115,10 @@ export async function ingestMessage(db: D1Database, account: ChannelAccountRef, 
     return;
   }
 
-  // In `human` mode the customer now waits for staff: the reply deadline starts unless one is already running.
+  // In a direct `human` conversation the customer now waits for staff: the reply deadline starts unless one is
+  // already running. Group chatter has no reply deadline.
   const updates = [db.prepare(`UPDATE conversation SET last_inbound_at = ?1, last_message_at = ?1, updated_at = ?1,
-      sla_due_at = CASE WHEN mode = 'human' THEN COALESCE(sla_due_at, ${slaDueSql('?1')}) ELSE sla_due_at END
+      sla_due_at = CASE WHEN mode = 'human' AND kind = 'direct' THEN COALESCE(sla_due_at, ${slaDueSql('?1')}) ELSE sla_due_at END
     WHERE id = ?2`).bind(nowIso, conv.id)];
   if (conv.mode !== 'ai') updates.push(appendStaffContext(db, conv.id, `Khách: ${text}`, nowIso));
   await db.batch(updates);

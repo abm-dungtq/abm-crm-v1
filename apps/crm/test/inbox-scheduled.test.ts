@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import seedSql from '../seed/demo.sql?raw';
 import worker from '../src/worker/index';
 import { enqueueCommand } from '../src/worker/inbox/dispatcher';
+import { ingestEvents } from '../src/worker/inbox/ingest';
 import { runScheduled } from '../src/worker/inbox/scheduled';
 import { resetDb } from './helpers/reset-db';
 
@@ -108,6 +109,30 @@ test('a bot reply the bridge has not answered for 10 minutes is given up and peo
   await runScheduled(scheduledEnv, '* * * * *');
   expect((await status(fresh)).status).toBe('failed');
   expect(await handoffs()).toEqual({ n: 1 });
+});
+
+test('a group in human mode has no reply deadline and is never reminded', async () => {
+  fakeLark();
+  await db.prepare(`INSERT INTO conversation (id, organization_id, channel_account_id, kind, external_thread_id, display_name, mode, created_at, updated_at)
+    VALUES ('grp-1', 'org-abm', 'ca-1', 'group', 'g-1', 'Lớp IELTS K1', 'ai', ?, ?)`).bind(STAMP, STAMP).run();
+  const groupDue = () => db.prepare("SELECT mode, sla_due_at FROM conversation WHERE id = 'grp-1'").first<{ mode: string; sla_due_at: string | null }>();
+
+  // Taking the group over by hand starts no deadline.
+  const res = await worker.fetch(new Request('http://crm.test/api/inbox/conversations/grp-1/mode', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Demo-User': 'u-lan' }, body: JSON.stringify({ mode: 'human' }),
+  }), { ...env, DEMO_MODE: '1' });
+  expect(res.status).toBe(200);
+  expect(await groupDue()).toEqual({ mode: 'human', sla_due_at: null });
+
+  // A member writing in the group starts none either.
+  await ingestEvents(db, [{ type: 'message', accountExternalId: 'zalo-acc-1', threadId: 'g-1', threadKind: 'group', msgId: 'gm-1', fromSelf: false,
+    senderExternalId: 'member-1', senderName: 'Bạn A', text: 'Mai lớp nghỉ ạ?', sentAt: new Date().toISOString() }]);
+  expect(await groupDue()).toEqual({ mode: 'human', sla_due_at: null });
+
+  // Even a deadline left over from before is not reminded.
+  await db.prepare("UPDATE conversation SET sla_due_at = ? WHERE id = 'grp-1'").bind(new Date(Date.now() - 60_000).toISOString()).run();
+  await runScheduled(scheduledEnv, '* * * * *');
+  expect(await reminders()).toHaveLength(0);
 });
 
 test('the daily cron does none of the per-minute work', async () => {

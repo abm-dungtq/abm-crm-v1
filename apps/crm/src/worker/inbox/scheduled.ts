@@ -26,7 +26,7 @@ interface OverdueRow {
 }
 
 /**
- * Reminds the Lark inbox group of `human` conversations whose customer has waited past the reply deadline,
+ * Reminds the Lark inbox group of direct `human` conversations whose customer has waited past the reply deadline,
  * then moves the deadline one reply window ahead. The reminder is deduplicated per conversation and
  * deadline, and the deadline moves only if nobody changed it meanwhile. Returns the number of reminders.
  */
@@ -36,7 +36,7 @@ export async function checkSla(db: D1Database, now = new Date(), appUrl?: string
   const overdue = await db.prepare(`SELECT c.id, c.display_name, c.external_thread_id, c.sla_due_at, a.display_name AS account_name,
       u.display_name AS assignee_name
     FROM conversation c JOIN channel_account a ON a.id = c.channel_account_id LEFT JOIN app_user u ON u.id = c.assignee_user_id
-    WHERE c.mode = 'human' AND c.sla_due_at IS NOT NULL AND c.sla_due_at < ?
+    WHERE c.kind = 'direct' AND c.mode = 'human' AND c.sla_due_at IS NOT NULL AND c.sla_due_at < ?
     ORDER BY c.sla_due_at LIMIT ?`).bind(nowIso, SLA_BATCH).all<OverdueRow>();
   let reminded = 0;
   for (const conv of overdue.results) {
