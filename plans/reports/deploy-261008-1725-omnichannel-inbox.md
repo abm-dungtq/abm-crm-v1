@@ -62,6 +62,7 @@ User đồng ý trong chat ("cook xong thì push lên cloudflare") cho backup, m
 5. **Task 10.7:** chạy 6 kịch bản thật.
 
 ## Ghi chú sau rà soát
+- `wrangler tail` 75 giây: cron `* * * * *` chạy, outcome `ok`, không có `scheduled_task_error` hay exception.
 - Cron mỗi phút hiện không làm gì: các bảng inbox đều rỗng, `/api/bridge/*` trả 401 khi chưa có `BRIDGE_SECRET`, nên không có lệnh nào được tạo và không gọi Lark.
 - Mỗi lần `wrangler secret put` tạo ra một version Worker mới. Sau Task 10.2 cần ghi lại version id mới; mốc rollback `be2f8e11` vẫn dùng được.
 - `LARK_INBOX_CHAT_ID` là điều kiện bắt buộc trước khi quét QR ở Task 10.6.
