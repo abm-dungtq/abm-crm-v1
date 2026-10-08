@@ -1,6 +1,9 @@
 import { useRef } from 'react';
 import { useMutation, useQuery, useQueryClient, type UseQueryOptions } from '@tanstack/react-query';
-import type { ApiError, CommandName } from '@abm/contracts';
+import type { ApiError, CommandName, ConversationMode } from '@abm/contracts';
+import type {
+  ChannelAccount, ChannelAccountUpdate, ConversationFilter, CustomerBotSwitch, InboxConversation, InboxMessage, SendMessageResult, SetModeResult,
+} from './types';
 
 const USER_KEY = 'abm-crm-demo-user';
 
@@ -91,3 +94,32 @@ export function useCommand<I, T = unknown>(name: CommandName) {
     },
   });
 }
+
+// ---------- omnichannel inbox ----------
+const enc = encodeURIComponent;
+
+/** Query string of GET /inbox/conversations; empty filters are left out. */
+export function conversationsPath(filter: ConversationFilter = {}) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filter) as [keyof ConversationFilter, string | undefined][]) {
+    const text = value?.trim();
+    if (text) params.set(key, text);
+  }
+  const query = params.toString();
+  return `/inbox/conversations${query ? `?${query}` : ''}`;
+}
+
+export const listConversations = (filter: ConversationFilter = {}) => api.get<InboxConversation[]>(conversationsPath(filter));
+export const getConversation = (id: string) => api.get<InboxConversation>(`/inbox/conversations/${enc(id)}`);
+/** Latest page oldest first, or with `after` only the messages created after that instant. */
+export const listMessages = (id: string, after?: string) =>
+  api.get<InboxMessage[]>(`/inbox/conversations/${enc(id)}/messages${after ? `?after=${enc(after)}` : ''}`);
+export const sendMessage = (id: string, text: string) => api.post<SendMessageResult>(`/inbox/conversations/${enc(id)}/messages`, { text });
+export const setMode = (id: string, mode: ConversationMode) => api.post<SetModeResult>(`/inbox/conversations/${enc(id)}/mode`, { mode });
+export const listAccounts = () => api.get<ChannelAccount[]>('/inbox/accounts');
+export const createAccount = (input: { displayName: string; agentKey: string }) => api.post<ChannelAccount>('/inbox/accounts', input);
+export const updateAccount = (id: string, input: ChannelAccountUpdate) => api.patch<ChannelAccount>(`/inbox/accounts/${enc(id)}`, input);
+export const connectAccount = (id: string) => api.post<{ commandId: string }>(`/inbox/accounts/${enc(id)}/connect`);
+export const disconnectAccount = (id: string) => api.post<{ commandId: string }>(`/inbox/accounts/${enc(id)}/disconnect`);
+export const getCustomerBotSwitch = () => api.get<CustomerBotSwitch>('/inbox/customer-bot-switch');
+export const setCustomerBotSwitch = (enabled: boolean) => api.put<CustomerBotSwitch>('/inbox/customer-bot-switch', { enabled });
