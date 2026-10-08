@@ -1,10 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { Link } from '@tanstack/react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { ConversationMode } from '@abm/contracts';
+import type { ChannelKind, ConversationMode } from '@abm/contracts';
 import { ApiFailure, listMessages, sendMessage } from '../api';
 import { fmtDateTime } from '../format';
-import { mergeMessages } from '../inbox-format';
+import { mergeMessages, senderLabel } from '../inbox-format';
 import type { InboxConversation, InboxMessage, SendMessageResult } from '../types';
 import { Icon } from './icons';
 import { Badge, ErrorState, FormError, Loading, type Tone } from './ui';
@@ -82,19 +82,13 @@ function parseAttachments(json: string | null): Attachment[] {
   }
 }
 
-const senderLabel = (m: InboxMessage) =>
-  m.senderKind === 'bot' ? 'Bot'
-    : m.senderKind === 'staff_web' ? (m.sentByName ?? 'Nhân viên')
-      : m.senderKind === 'staff_phone' ? 'Điện thoại'
-        : null;
-
-function MessageBubble({ message: m }: { message: InboxMessage }) {
+function MessageBubble({ message: m, channel }: { message: InboxMessage; channel: ChannelKind }) {
   const time = <time dateTime={m.createdAt} title={fmtDateTime(m.createdAt, true)}>{fmtShortTime(m.createdAt)}</time>;
   if (m.senderKind === 'system') {
     return <li className="msg-system" role="note"><span>{m.body}</span> · {time}</li>;
   }
   const attachments = parseAttachments(m.attachmentsJson);
-  const label = senderLabel(m);
+  const label = senderLabel(m, channel);
   return (
     <li className="msg" data-side={m.senderKind === 'customer' ? 'in' : 'out'} data-kind={m.senderKind} data-status={m.status}>
       <div className="msg-bubble">
@@ -105,7 +99,7 @@ function MessageBubble({ message: m }: { message: InboxMessage }) {
       </div>
       <div className="msg-meta">
         {m.senderKind === 'bot' && <Icon name="bot" />}
-        {m.senderKind === 'staff_phone' && <Icon name="phone" />}
+        {m.senderKind === 'staff_phone' && <Icon name={channel === 'facebook' ? 'message' : 'phone'} />}
         {label && <span className="msg-sender">{label}</span>}
         {time}
         {m.status === 'pending' && <span className="msg-state">Đang gửi</span>}
@@ -201,7 +195,7 @@ export function InboxThread({ conversation, backTo = '/inbox' }: { conversation:
         {messages.error && <ErrorState error={messages.error} onRetry={() => messages.refetch()} />}
         {messages.data && !messages.data.length && <div className="empty"><strong>Chưa có tin nhắn</strong></div>}
         <ol className="msg-list" aria-live="polite" aria-relevant="additions">
-          {messages.data?.map((m) => <MessageBubble key={m.id} message={m} />)}
+          {messages.data?.map((m) => <MessageBubble key={m.id} message={m} channel={conversation.channel} />)}
         </ol>
       </div>
       <Composer key={conversation.id} conversationId={conversation.id} />

@@ -1,3 +1,4 @@
+import type { ChannelKind } from '@abm/contracts';
 import type { ConversationFilter, InboxMessage } from './types';
 
 // Pure inbox helpers of the web app, kept free of React so they can be tested on their own.
@@ -19,6 +20,19 @@ export function mergeMessages(prev: InboxMessage[], incoming: InboxMessage[]) {
   const byId = new Map(prev.map((m) => [m.id, m]));
   for (const m of incoming) byId.set(m.id, m);
   return [...byId.values()].sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
+}
+
+/**
+ * Who wrote an outgoing message, or null for customer messages and system notes. A reply typed outside the CRM comes from the shared
+ * phone on Zalo, but from Meta Business Suite on a Facebook Page.
+ */
+export function senderLabel(m: Pick<InboxMessage, 'senderKind' | 'sentByName'>, channel: ChannelKind) {
+  switch (m.senderKind) {
+    case 'bot': return 'Bot';
+    case 'staff_web': return m.sentByName ?? 'Nhân viên';
+    case 'staff_phone': return channel === 'facebook' ? 'Meta Business Suite' : 'Điện thoại';
+    default: return null;
+  }
 }
 
 const EVERY_DAY_MASK = 0b1111111;

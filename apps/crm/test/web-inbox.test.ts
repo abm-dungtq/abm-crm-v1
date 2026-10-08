@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { conversationsPath, mergeMessages, weekdaysLabel } from '../src/web/inbox-format';
+import { conversationsPath, mergeMessages, senderLabel, weekdaysLabel } from '../src/web/inbox-format';
 import type { InboxMessage } from '../src/web/types';
 
 const msg = (id: string, createdAt: string, overrides: Partial<InboxMessage> = {}): InboxMessage => ({
@@ -44,4 +44,15 @@ test('weekday masks read Monday first, every day as "Hằng ngày", none as a da
   // Bits above Sunday are not days.
   expect(weekdaysLabel(0b10000000)).toBe('—');
   expect(weekdaysLabel(0b11111111)).toBe('Hằng ngày');
+});
+
+test('a reply typed outside the CRM is labelled by its channel: the phone on Zalo, Meta Business Suite on Facebook', () => {
+  const phone = msg('p', '2026-10-08T03:00:00.000Z', { direction: 'out', senderKind: 'staff_phone' });
+  expect(senderLabel(phone, 'zalo')).toBe('Điện thoại');
+  expect(senderLabel(phone, 'facebook')).toBe('Meta Business Suite');
+  const web = msg('w', '2026-10-08T03:00:00.000Z', { direction: 'out', senderKind: 'staff_web', sentByName: 'Đỗ Ngọc Lan' });
+  expect(senderLabel(web, 'facebook')).toBe('Đỗ Ngọc Lan');
+  expect(senderLabel({ ...web, sentByName: null }, 'zalo')).toBe('Nhân viên');
+  expect(senderLabel(msg('b', '2026-10-08T03:00:00.000Z', { senderKind: 'bot' }), 'facebook')).toBe('Bot');
+  expect(senderLabel(msg('c', '2026-10-08T03:00:00.000Z'), 'facebook')).toBeNull();
 });
