@@ -95,7 +95,7 @@ Một service Node 22 trên máy Windows giữ phiên Zalo cá nhân cho từng 
 - Steps:
   1. Vòng lặp: `pollCommands` → đưa từng lệnh vào hàng theo `conversationId` (lệnh không có hội thoại chạy ngay).
   2. `run_completion` → `goclaw.complete` → `postResult(id, { attempts, ok: true, text })`; lỗi → `postResult(id, { attempts, ok: false, error })`. `attempts` lấy từ lệnh đã nhận; mọi `postResult` khác cũng gửi kèm `attempts`.
-  3. `send_zalo` → chờ ngẫu nhiên giữa `SEND_MIN_DELAY_MS` và `SEND_MAX_DELAY_MS`, cắt text thành đoạn ≤ 2000 ký tự theo dòng, gửi lần lượt, ghi `msgId` vào tập đã gửi kèm `commandId`, `postResult({ ok: true, externalMsgId })` với id của đoạn đầu.
+  3. `send_zalo` → chờ ngẫu nhiên giữa `SEND_MIN_DELAY_MS` và `SEND_MAX_DELAY_MS`, cắt text thành đoạn ≤ 2000 ký tự theo ranh giới dòng (không trim từng đoạn, để echo của mỗi đoạn trùng nguyên các dòng của tin gốc — Worker nhận echo theo dòng nguyên), gửi lần lượt, ghi `msgId` vào tập đã gửi kèm `commandId`, `postResult({ ok: true, externalMsgId })` với id của đoạn đầu.
   4. `zalo_login` / `zalo_logout` → `account-manager`.
   5. `main.ts`: nạp config, khởi động tài khoản đã lưu, chạy vòng lặp, bắt `SIGINT`/`SIGTERM` để đóng phiên sạch.
 - Verify: test `command-runner.test.ts`: hai lệnh cùng hội thoại chạy tuần tự (lệnh hai bắt đầu sau khi lệnh một xong); text 4500 ký tự → 3 lần gửi. Exit 0.

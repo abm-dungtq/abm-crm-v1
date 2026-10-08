@@ -22,6 +22,10 @@ Hội thoại được chia thủ công hoặc tự động lần lượt cho nh
 5. Mỗi lần giao ghi `audit_log` (người giao, người nhận, hội thoại) và tạo lệnh `send_lark` vào nhóm: `Giao <tên KH> cho <tên NV> – <APP_URL>/inbox/<id>`; nếu người nhận có `lark_open_id` thì thêm một lệnh nhắn riêng.
 6. SLA: khi hội thoại chuyển `human` hoặc có tin khách mới ở `human`, đặt `sla_due_at = now + inbox_sla_minutes` (mặc định 15, lưu ở `inbox_setting`). Nhân viên gửi tin (web hoặc điện thoại) → `sla_due_at = NULL`. Cron thấy `sla_due_at < now` → tạo `send_lark` nhắc (dedupe theo hội thoại + `sla_due_at`) và đặt `sla_due_at = now + inbox_sla_minutes`.
 
+## Dọn tin gửi bị kẹt
+
+Cron mỗi phút cũng gọi `sweepStuckOutgoing(db, now)` (đặt trong `conversation-flow.ts`): tin `out` `status = 'pending'` tạo trước `now - 15 phút` mà không có `channel_command` nào có `json_extract(payload_json,'$.messageId')` bằng id tin ở trạng thái `pending`/`claimed` → đặt `status = 'failed'`. Thêm một test trong `inbox-scheduled.test.ts` cho trường hợp này.
+
 ## Files to Create / Modify
 
 - Create: `apps/crm/migrations/0014_inbox_settings.sql` (`inbox_setting`: `id`, `assign_mode`, `sla_minutes`, `updated_by_user_id`, `updated_at`; chèn dòng mặc định)
