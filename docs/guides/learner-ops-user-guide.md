@@ -1,6 +1,6 @@
 # Hướng dẫn vận hành học viên
 
-Mỗi người một vai trò. Màn hình chỉ hiện phần việc của vai đó. Báo cáo học viên ở menu **Báo cáo học viên**. Trưởng phòng không có màn này.
+Mỗi người một vai trò. Màn hình chỉ hiện phần việc của vai đó. Báo cáo học viên ở menu **Tổng quan**, tab **Báo cáo học viên**. Trưởng phòng không có màn này.
 
 ## Tuyển sinh (Sale và Leader)
 
