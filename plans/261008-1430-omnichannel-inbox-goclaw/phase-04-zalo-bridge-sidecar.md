@@ -1,7 +1,7 @@
 ---
 phase: 4
 title: "Sidecar apps/zalo-bridge"
-status: pending
+status: completed
 priority: P1
 effort: "2d"
 dependencies: [3]
@@ -115,9 +115,9 @@ Một service Node 22 trên máy Windows giữ phiên Zalo cá nhân cho từng 
 - Target files: `apps/zalo-bridge/src/goclaw-session-cleanup.ts`, `src/main.ts`.
 - Steps:
   1. Đọc `D:\Goclaw\source\internal\gateway\methods\sessions.go` (RPC `sessions.list`, `sessions.delete`) và `D:\Goclaw\source\docs\19-websocket-rpc.md` để lấy cách kết nối WebSocket và quyền cần có.
-  2. Nếu RPC `sessions.delete` cần quyền quản trị (Gateway Token) chứ không chạy với API key `operator.write`: STOP, báo user (không dùng Gateway Token trong sidecar khi chưa được đồng ý).
-  3. Nếu được: mỗi ngày 03:00 giờ Việt Nam, liệt kê phiên có key chứa `crm-extract:` hoặc `group-summary:` cũ hơn 24 giờ và xoá; log số lượng, không log nội dung.
-- Verify: test `goclaw-session-cleanup.test.ts` với WebSocket giả: chỉ phiên đúng tiền tố và quá 24 giờ bị gửi lệnh xoá; `pnpm -F @abm/zalo-bridge test -- goclaw-session-cleanup` exit 0.
+  2. Quyết định của user (2026-10-08): API key `operator.write` chỉ xoá được phiên của chính user id đang kết nối, nên sidecar tự dọn theo id, không dùng Gateway Token hay key `operator.admin`. Mỗi lần chạy `run_completion` có `userId` bắt đầu bằng `crm-extract:` hoặc `group-summary:`, sidecar ghi `userId` và thời điểm vào `apps/zalo-bridge/.sessions/stateless-users.json` (ghi atomic, đã gitignore).
+  3. Mỗi ngày 03:00 giờ Việt Nam: với từng `userId` trong file cũ hơn 24 giờ, kết nối WebSocket GoClaw bằng API key của sidecar với đúng `userId` đó, gọi `sessions.list` rồi `sessions.delete` các phiên của user đó, sau đó bỏ `userId` khỏi file. Lỗi với một id thì giữ id lại cho lần sau (tối đa 7 ngày rồi bỏ). Log số lượng, không log nội dung. API key phải không gắn owner (nếu GoClaw ép user id theo owner thì STOP và báo user).
+- Verify: test `goclaw-session-cleanup.test.ts` với WebSocket giả: chỉ `userId` quá 24 giờ được kết nối và xoá phiên, id lỗi được giữ lại, id quá 7 ngày bị bỏ; `pnpm -F @abm/zalo-bridge test -- goclaw-session-cleanup` exit 0.
 
 ### Task 4.9 — Hồi quy và commit
 
