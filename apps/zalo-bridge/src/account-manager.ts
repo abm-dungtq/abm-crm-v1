@@ -19,6 +19,9 @@ export const ECHO_HOLD_MS = 3000;
 const SENT_ID_TTL_MS = 10 * 60_000;
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const SESSION_SUFFIX = '.json';
+/** Files in the sessions directory that are not Zalo sessions (the GoClaw cleanup's id list). */
+export const STATELESS_USERS_FILE = 'stateless-users.json';
+const RESERVED_FILE_NAMES = new Set([STATELESS_USERS_FILE.slice(0, -SESSION_SUFFIX.length)]);
 
 /** Error codes for which retrying the saved session cannot succeed. */
 const PERMANENT_SAVED_LOGIN_ERRORS = new Set(['SESSION_FILE_MISSING', 'SESSION_FILE_INVALID']);
@@ -64,7 +67,8 @@ export class AccountManager {
     } catch {
       return;
     }
-    const ids = names.filter((n) => n.endsWith(SESSION_SUFFIX)).map((n) => n.slice(0, -SESSION_SUFFIX.length)).filter((id) => ACCOUNT_ID.test(id));
+    const ids = names.filter((n) => n.endsWith(SESSION_SUFFIX)).map((n) => n.slice(0, -SESSION_SUFFIX.length))
+      .filter((id) => ACCOUNT_ID.test(id) && !RESERVED_FILE_NAMES.has(id));
     await Promise.all(ids.map((accountId) => this.reconnect(this.account(accountId))));
   }
 
@@ -138,7 +142,7 @@ export class AccountManager {
   }
 
   private checkId(accountId: string): string {
-    if (!ACCOUNT_ID.test(accountId)) throw new CodedError('INVALID_ACCOUNT_ID');
+    if (!ACCOUNT_ID.test(accountId) || RESERVED_FILE_NAMES.has(accountId)) throw new CodedError('INVALID_ACCOUNT_ID');
     return accountId;
   }
 

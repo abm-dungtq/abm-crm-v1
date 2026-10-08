@@ -1,9 +1,11 @@
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AccountManager } from './account-manager';
+import { AccountManager, STATELESS_USERS_FILE } from './account-manager';
 import { CommandRunner } from './command-runner';
 import { ConfigError, consoleLogger as log, errorCode, loadConfig, type BridgeConfig } from './config';
 import { CrmClient } from './crm-client';
 import { GoClawClient } from './goclaw-client';
+import { GoClawSessionCleanup, gatewayWsUrl } from './goclaw-session-cleanup';
 import { zcaConnector } from './zalo-client';
 
 /** Zalo sessions are stored next to the package, in a git-ignored directory. */
@@ -23,7 +25,18 @@ async function main() {
   }
 
   const crm = new CrmClient({ baseUrl: config.crmBaseUrl, secret: config.bridgeSecret, pollWaitSeconds: config.pollWaitSeconds, log });
-  const goclaw = new GoClawClient({ baseUrl: config.goclawBaseUrl, apiKey: config.goclawApiKey });
+  const goclawClient = new GoClawClient({ baseUrl: config.goclawBaseUrl, apiKey: config.goclawApiKey });
+  const cleanup = new GoClawSessionCleanup({
+    wsUrl: gatewayWsUrl(config.goclawBaseUrl), apiKey: config.goclawApiKey, file: join(SESSIONS_DIR, STATELESS_USERS_FILE), log,
+  });
+  await cleanup.load();
+  // A stateless run's id is recorded before the call: GoClaw creates the session even when the run fails.
+  const goclaw = {
+    complete: async (request: Parameters<GoClawClient['complete']>[0]) => {
+      await cleanup.record(request.userId);
+      return goclawClient.complete(request);
+    },
+  };
   const accounts = new AccountManager({
     connector: zcaConnector, sessionsDir: SESSIONS_DIR, log,
     emit: (events) => void crm.pushEvents(events),
@@ -41,6 +54,7 @@ async function main() {
     log('info', 'bridge.stopping', { signal });
     controller.abort();
     clearInterval(flushTimer);
+    cleanup.stop();
     accounts.stopAll();
     await Promise.race([
       runner.idle().then(() => crm.flush()),
@@ -54,6 +68,7 @@ async function main() {
 
   log('info', 'bridge.starting', {});
   await accounts.startSaved();
+  cleanup.start();
   await runner.run(controller.signal);
 }
 

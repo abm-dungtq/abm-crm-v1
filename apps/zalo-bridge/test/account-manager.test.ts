@@ -136,8 +136,17 @@ describe('AccountManager', () => {
     await expect(accounts.send('acc-1', 't', 'direct', 'x', 'c')).rejects.toThrow('ACCOUNT_NOT_CONNECTED');
   });
 
-  it('refuses account ids that could escape the sessions directory', async () => {
+  it('refuses account ids that could escape the sessions directory or clobber the cleanup id list', async () => {
     const accounts = manager({ loginWithQr: vi.fn(), loginWithSaved: vi.fn() });
     await expect(accounts.login('../evil')).rejects.toThrow('INVALID_ACCOUNT_ID');
+    await expect(accounts.logout('stateless-users')).rejects.toThrow('INVALID_ACCOUNT_ID');
+  });
+
+  it('does not treat the GoClaw cleanup id list as a Zalo session', async () => {
+    await writeFile(join(dir, 'stateless-users.json'), '{"version":1,"users":{}}');
+    const loginWithSaved = vi.fn();
+    await manager({ loginWithQr: vi.fn(), loginWithSaved }).startSaved();
+    expect(loginWithSaved).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
   });
 });
