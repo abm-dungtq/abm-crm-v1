@@ -344,8 +344,16 @@ export interface CustomerBotSwitch { enabled: boolean; updatedAt: string | null 
 
 // ---------- inbox assignment (src/worker/inbox/assignment.ts) ----------
 export type AssignMode = 'manual' | 'round_robin';
-export interface InboxSettings { assignMode: AssignMode; slaMinutes: number; updatedByUserId: string | null; updatedAt: string | null }
-export interface InboxSettingsUpdate { assignMode?: AssignMode; slaMinutes?: number }
+/** `scheduledSendsEnabled` is the organization-wide switch for recurring group posts (off until the pilot ends). */
+export interface InboxSettings {
+  assignMode: AssignMode;
+  slaMinutes: number;
+  scheduledSendsEnabled: boolean;
+  updatedByUserId: string | null;
+  updatedAt: string | null;
+}
+/** `scheduledSendsEnabled` is admin-only on the Worker. */
+export interface InboxSettingsUpdate { assignMode?: AssignMode; slaMinutes?: number; scheduledSendsEnabled?: boolean }
 /** Active inbox staff; `roundRobin` marks the roles that can be put on duty. */
 export interface RosterMember {
   userId: string;
@@ -383,3 +391,44 @@ export interface LeadIntake {
   updatedAt: string;
 }
 export interface ClassifyIntakeResult { intakeId: string; leadId: string; contactId: string }
+
+// ---------- Zalo groups and recurring posts (src/worker/inbox/group-schedules.ts) ----------
+/** A Zalo group conversation; `id` is the conversation id. */
+export interface ZaloGroup {
+  id: string;
+  channelAccountId: string;
+  accountName: string;
+  accountStatus: ChannelAccountStatus;
+  sendPaused: boolean;
+  externalThreadId: string;
+  displayName: string | null;
+  summaryEnabled: boolean;
+  scheduledOptOut: boolean;
+  lastMessageAt: string | null;
+  activeSchedules: number;
+}
+export interface ZaloGroupUpdate { summaryEnabled?: boolean; scheduledOptOut?: boolean }
+
+export type GroupScheduleStatus = 'draft' | 'pending_approval' | 'active' | 'paused';
+export type ScheduleSkipReason = 'feature_off' | 'bot_switch_on' | 'account_unavailable' | 'group_opted_out' | 'quiet_hours' | 'daily_cap';
+/** `weekdaysMask`: bit 0 = Monday … bit 6 = Sunday; `timeOfDay` is HH:MM Vietnam time. */
+export interface GroupScheduleInput { templateText: string; weekdaysMask: number; timeOfDay: string }
+export interface GroupSchedule extends GroupScheduleInput {
+  id: string;
+  conversationId: string;
+  conversationName: string | null;
+  externalThreadId: string;
+  channelAccountId: string;
+  accountName: string;
+  status: GroupScheduleStatus;
+  createdByUserId: string | null;
+  createdByName: string | null;
+  approvedByUserId: string | null;
+  approvedByName: string | null;
+  approvedAt: string | null;
+  nextRunAt: string | null;
+  lastRunAt: string | null;
+  lastSkipReason: ScheduleSkipReason | null;
+  createdAt: string;
+  updatedAt: string;
+}

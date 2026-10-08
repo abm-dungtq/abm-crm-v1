@@ -158,8 +158,11 @@ function Composer({ conversationId }: { conversationId: string }) {
   );
 }
 
-/** Middle column: header, messages (polled every few seconds) and the composer. */
-export function InboxThread({ conversation }: { conversation: InboxConversation }) {
+/**
+ * Middle column: header, messages (polled every few seconds) and the composer. `backTo` is the list the
+ * small-screen back button returns to.
+ */
+export function InboxThread({ conversation, backTo = '/inbox' }: { conversation: InboxConversation; backTo?: '/inbox' | '/zalo-groups' }) {
   const messages = useThreadMessages(conversation.id);
   const list = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -179,7 +182,7 @@ export function InboxThread({ conversation }: { conversation: InboxConversation 
   return (
     <section className="inbox-thread" aria-label={`Hội thoại với ${conversationName(conversation)}`}>
       <header className="inbox-thread-head">
-        <Link to="/inbox" className="btn btn-ghost icon-btn inbox-back" aria-label="Quay lại danh sách hội thoại"><Icon name="arrow" style={{ transform: 'rotate(180deg)' }} /></Link>
+        <Link to={backTo} className="btn btn-ghost icon-btn inbox-back" aria-label="Quay lại danh sách hội thoại"><Icon name="arrow" style={{ transform: 'rotate(180deg)' }} /></Link>
         <div className="truncate" style={{ flex: 1 }}>
           <div className="truncate" style={{ fontWeight: 600 }}>{conversationName(conversation)}</div>
           <div className="small muted truncate">

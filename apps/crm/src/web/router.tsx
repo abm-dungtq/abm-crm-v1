@@ -38,6 +38,7 @@ import { ChannelAccountsPage } from './pages/channel-accounts';
 import { InboxConversationPage, InboxIndexPage, InboxPage } from './pages/inbox';
 import { InboxSettingsPage } from './pages/inbox-settings';
 import { IntakesPage } from './pages/intakes';
+import { ZaloGroupPage, ZaloGroupsPage } from './pages/zalo-groups';
 
 function Root() {
   const mode = useAuthMode();
@@ -141,6 +142,8 @@ const routes = [
   createRoute({ getParentRoute: () => rootRoute, path: '/audit', component: AuditPage }),
   inboxRoute.addChildren(inboxChildren),
   createRoute({ getParentRoute: () => rootRoute, path: '/intakes', component: IntakesPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/zalo-groups', component: ZaloGroupsPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/zalo-groups/$groupId', component: ZaloGroupPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/channel-accounts', component: ChannelAccountsPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/admin', component: AdminPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/admin/users', component: AdminUsersPage }),

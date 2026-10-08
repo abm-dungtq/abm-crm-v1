@@ -2,9 +2,9 @@ import { useRef } from 'react';
 import { useMutation, useQuery, useQueryClient, type UseQueryOptions } from '@tanstack/react-query';
 import type { ApiError, CommandName, ConversationMode } from '@abm/contracts';
 import type {
-  AssignResult, ChannelAccount, ChannelAccountUpdate, ClassifyIntakeResult, ConversationFilter, CustomerBotSwitch, InboxConversation,
-  InboxMessage, InboxSettings, InboxSettingsUpdate, IntakeField, IntakePipeline, IntakeStatus, IntakeValues, LeadIntake, RosterMember,
-  SendMessageResult, SetModeResult,
+  AssignResult, ChannelAccount, ChannelAccountUpdate, ClassifyIntakeResult, ConversationFilter, CustomerBotSwitch, GroupSchedule,
+  GroupScheduleInput, InboxConversation, InboxMessage, InboxSettings, InboxSettingsUpdate, IntakeField, IntakePipeline, IntakeStatus,
+  IntakeValues, LeadIntake, RosterMember, SendMessageResult, SetModeResult, ZaloGroup, ZaloGroupUpdate,
 } from './types';
 
 const USER_KEY = 'abm-crm-demo-user';
@@ -55,6 +55,7 @@ export const api = {
   post: <T>(path: string, body: unknown = {}) => request<T>(path, { method: 'POST', body: JSON.stringify(body) }),
   patch: <T>(path: string, body: unknown) => request<T>(path, { method: 'PATCH', body: JSON.stringify(body) }),
   put: <T>(path: string, body: unknown) => request<T>(path, { method: 'PUT', body: JSON.stringify(body) }),
+  delete: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
   command: <T>(name: CommandName, input: unknown, idempotencyKey: string) =>
     request<T>(`/commands/${name}`, { method: 'POST', body: JSON.stringify(input), headers: { 'Idempotency-Key': idempotencyKey } }),
 };
@@ -155,3 +156,19 @@ export const linkIntakeContact = (id: string, contactId: string) =>
 /** "Cập nhật CRM": queues an extraction of a direct conversation now. */
 export const requestExtraction = (conversationId: string) =>
   api.post<{ commandId: string }>(`/inbox/conversations/${enc(conversationId)}/extract`);
+
+// ---------- Zalo groups and recurring posts ----------
+/** Groups of the organization, optionally of one channel account. */
+export const listGroups = (account?: string) => api.get<ZaloGroup[]>(`/inbox/groups${account ? `?account=${enc(account)}` : ''}`);
+export const updateGroup = (id: string, input: ZaloGroupUpdate) => api.patch<ZaloGroup>(`/inbox/groups/${enc(id)}`, input);
+/** Schedules of the organization, newest first, optionally of one group. */
+export const listGroupSchedules = (conversationId?: string) =>
+  api.get<GroupSchedule[]>(`/inbox/group-schedules${conversationId ? `?conversationId=${enc(conversationId)}` : ''}`);
+export const createGroupSchedule = (input: GroupScheduleInput & { conversationId: string }) =>
+  api.post<GroupSchedule>('/inbox/group-schedules', input);
+export const updateGroupSchedule = (id: string, input: Partial<GroupScheduleInput>) =>
+  api.patch<GroupSchedule>(`/inbox/group-schedules/${enc(id)}`, input);
+export const deleteGroupSchedule = (id: string) => api.delete<{ id: string }>(`/inbox/group-schedules/${enc(id)}`);
+export type GroupScheduleAction = 'submit' | 'approve' | 'pause';
+export const moveGroupSchedule = (id: string, action: GroupScheduleAction) =>
+  api.post<GroupSchedule>(`/inbox/group-schedules/${enc(id)}/${action}`);
