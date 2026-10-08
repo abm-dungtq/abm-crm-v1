@@ -186,10 +186,11 @@ Người phụ trách gửi tin. Claude kiểm D1 sau mỗi kịch bản.
 
 - Steps:
   1. Gọi `tools/call search_leads` và `log_activity` tổng cộng ít nhất 50 lần qua bot hoặc bằng script cục bộ dùng token của một người test. Token đọc từ biến, không in ra.
-  2. Đọc CPU trong Workers observability. Ghi p50 và p99.
+  2. Đọc CPU trong Workers observability, lọc theo route `/api/mcp` (cron inbox chạy mỗi phút làm nhiễu số liệu). Ghi p50 và p99.
   3. Tập khôi phục (cần đồng ý):
      - `npx wrangler d1 time-travel info abm-crm-eval` để lấy bookmark hiện tại và ghi lại;
      - không khôi phục thật lên eval nếu user không đồng ý;
+     - khi inbox đợt A đã chạy trên eval (sidecar và hội thoại thật), **không** khôi phục thật dù được đồng ý: chỉ ghi bookmark (quyết định 2026-10-08);
      - nếu user đồng ý, khôi phục về bookmark ngay trước kịch bản 6, kiểm lead của kịch bản 6 trở lại trạng thái trước, rồi khôi phục tiến lại bookmark mới nhất.
 - Success criteria: CPU p99 < 10 ms. Có bookmark ghi trong báo cáo.
 - Verify: so số đo với ngưỡng.
