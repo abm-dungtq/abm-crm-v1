@@ -89,3 +89,10 @@ User đồng ý trong chat ("cook xong thì push lên cloudflare") cho backup, m
 - Scheduled Task: `install-startup-task.ps1` cần PowerShell chạy quyền Administrator và báo `Access is denied` trong phiên agent. Script đã được sửa để báo lỗi thay vì in "Registered" khi đăng ký thất bại.
 - Sidecar đang được chạy tạm bằng `start-zalo-bridge.ps1` trong phiên agent. `wrangler tail` thấy `/api/bridge/commands` trả 200 hai lần, log không có `commands.poll_failed`.
 - Cập nhật lúc 19:53: user đang remote nên không mở được PowerShell quyền Admin. Script cài có thêm tuỳ chọn `-AtLogOn` (trigger khi đăng nhập, `Interactive`, không cần Admin). Đã đăng ký task "ABM Zalo Bridge" theo cách này, dừng bản sidecar tạm, rồi `Start-ScheduledTask`. Task ở trạng thái `Running`, `/api/bridge/commands` trả 200 hai lần, không có `poll_failed`. Giới hạn: sidecar dừng khi tài khoản Windows đăng xuất và chỉ tự chạy lại khi đăng nhập lại (GoClaw cũng phải bật tay sau khi reboot).
+
+## Deploy 20:08: bố cục menu mới
+
+- Commit `d71640e`: menu trái gom thành 7 nhóm, có tab con ở đầu trang. Quản trị, Hàng chờ duyệt và tài khoản chuyển lên góc phải. Chỉ đổi giao diện, không có migration.
+- 455 test đạt. Version `0eb90126-cfba-4944-ac12-de6e091e5f4a`, hai cron vẫn đăng ký.
+- Smoke: `/api/health` `{"ok":true}`; `GET /` 200; bundle mới có `section-tabs`; `/api/bridge/commands` không chữ ký trả 401. Sidecar vẫn `Running`, không có `poll_failed`.
+- Rollback về `88f78b4c-d4b2-49bd-92b8-5eea8f5d431e`. Bản này có đủ API bridge, nên không cần dừng sidecar.
