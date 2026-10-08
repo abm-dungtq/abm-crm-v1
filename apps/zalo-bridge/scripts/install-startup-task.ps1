@@ -41,6 +41,6 @@ $settings = New-ScheduledTaskSettingsSet `
 $principal = New-ScheduledTaskPrincipal -UserId ("{0}\{1}" -f $env:USERDOMAIN, $env:USERNAME) -LogonType S4U -RunLevel Limited
 
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal `
-  -Description 'Runs the ABM CRM Zalo bridge sidecar (apps/zalo-bridge) at startup.' -Force | Out-Null
+  -Description 'Runs the ABM CRM Zalo bridge sidecar (apps/zalo-bridge) at startup.' -Force -ErrorAction Stop | Out-Null
 
 Write-Output ("Registered scheduled task '{0}' -> {1}" -f $TaskName, $startScript)

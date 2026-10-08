@@ -67,3 +67,24 @@ User đồng ý trong chat ("cook xong thì push lên cloudflare") cho backup, m
 - Mỗi lần `wrangler secret put` tạo ra một version Worker mới. Sau Task 10.2 cần ghi lại version id mới; mốc rollback `be2f8e11` vẫn dùng được.
 - `LARK_INBOX_CHAT_ID` là điều kiện bắt buộc trước khi quét QR ở Task 10.6.
 - Task 10.4 không phụ thuộc secret của CRM nên có thể chạy song song với Task 10.2. Không đổi `rate_limit_rpm` (việc này khởi động lại GoClaw) khi luồng 1457 đang test.
+
+## Task 10.4: GoClaw (2026-10-08, user đồng ý "cứ làm xong hết")
+
+- Backup: `D:\Goclaw\backups\goclaw-before-inbox-agents-20261008.dump` (pg_dump, 831 mục TOC) và `D:\Goclaw\backups\config.json.bak-20261008-inbox`.
+- Agent mới (provider/model `deepseek-flash`, self-evolve tắt):
+  - `sale-tu-van`: chỉ có tool `datetime`, bộ nhớ bật.
+  - `crm-extractor`, `group-summarizer`: không có tool, bộ nhớ tắt.
+  - Prompt lấy từ `docs/integrations/goclaw-inbox-agents.md` và nằm trong `SOUL.md` của từng agent.
+- `gateway.rate_limit_rpm`: 20 → 120, sửa ở cả system config và `D:\Goclaw\config.json`. Sau khi khởi động lại GoClaw, giá trị vẫn là 120.
+- API key `zalo-bridge`: scope `operator.read` + `operator.write`, không gắn owner. Script ghi thẳng key vào `apps/zalo-bridge/.env` (file bị git bỏ qua), không in ra.
+- Grant `abm-crm-poc`: đã có 0 grant từ trước, không cần gỡ. Agent `crm-sales-poc` vẫn giữ grant `abm-crm-main`.
+- GoClaw không có kênh native `zalo_personal` hay `facebook`; chỉ có `abm-lark` (feishu) và `tqd` (telegram).
+- **Chưa làm:** embedding `text-embedding-3-small`. GoClaw chưa có provider OpenAI, nên user cần tự thêm API key OpenAI trong Web UI GoClaw. Pilot hiện chưa nạp kiến thức nên việc này không chặn.
+- Verify: gọi `POST /v1/chat/completions` bằng key sidecar, `model = goclaw:crm-extractor`, transcript mẫu → HTTP 200, JSON có `name`, `phone`, `need`, `interest`, `note`.
+- Script dùng để cài đặt: `D:\Goclaw\plans\261008-inbox-agents\setup-inbox-agents.mjs` và `verify-inbox-agents.mjs`.
+
+## Task 10.2 (một phần) và 10.5
+
+- `BRIDGE_SECRET` được sinh ngẫu nhiên, ghi vào `apps/zalo-bridge/.env` và `wrangler secret put` qua stdin (không in). Version Worker mới là `88f78b4c-d4b2-49bd-92b8-5eea8f5d431e` (Secret Change). Hiện có các secret `BRIDGE_SECRET`, `LARK_APP_ID`, `LARK_APP_SECRET`. **Còn thiếu `LARK_INBOX_CHAT_ID`.**
+- Scheduled Task: `install-startup-task.ps1` cần PowerShell chạy quyền Administrator và báo `Access is denied` trong phiên agent. Script đã được sửa để báo lỗi thay vì in "Registered" khi đăng ký thất bại.
+- Sidecar đang được chạy tạm bằng `start-zalo-bridge.ps1` trong phiên agent. `wrangler tail` thấy `/api/bridge/commands` trả 200 hai lần, log không có `commands.poll_failed`.
