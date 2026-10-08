@@ -43,16 +43,17 @@ Không in token, secret, mã QR, cookie Zalo hay nội dung các file `*.local*`
 ### Task 10.1 — Backup và migration remote (Đợt A)
 
 - Steps:
+  0. Diễn tập: export D1 eval ra file mới, tạo D1 tạm `abm-crm-rehearsal`, nạp file export, áp 0012–0017 lên D1 tạm, `PRAGMA foreign_key_check` phải rỗng và số dòng `contact_point` không đổi, rồi xoá D1 tạm. Lý do: `0013` xoá và dựng lại `contact_point` trên dữ liệu thật.
   1. Hỏi user đồng ý. Backup D1 remote theo `docs/engineering/deployment-baseline.md` (lệnh export của wrangler); ghi tên file backup vào báo cáo.
   2. `cd apps/crm && npx wrangler d1 migrations apply abm-crm-eval --remote`.
-- Verify: lệnh exit 0 và in `0012_inbox.sql` tới migration mới nhất của plan; `npx wrangler d1 execute abm-crm-eval --remote --command "SELECT COUNT(*) AS n FROM customer_bot_switch"` in `n` = 1.
+- Verify: diễn tập đạt như bước 0; lệnh apply exit 0 và in đủ sáu file `0012_inbox.sql` … `0017_channel_account_last_error.sql`; `npx wrangler d1 execute abm-crm-eval --remote --command "SELECT COUNT(*) AS n FROM customer_bot_switch"` in `n` = 1.
 
 ### Task 10.2 — Secret Worker (Đợt A; Đợt B thêm FB)
 
 - Steps: nhắc user tự chạy, agent không thấy giá trị:
-  - Đợt A: `npx wrangler secret put BRIDGE_SECRET`, `… LARK_INBOX_CHAT_ID`, `… APP_URL`.
+  - Đợt A: user tạo nhóm Lark "Inbox" riêng (không dùng nhóm test của plan 1457), thêm bot vào nhóm, lấy `chat_id`; rồi `npx wrangler secret put BRIDGE_SECRET`, `… LARK_INBOX_CHAT_ID`. `APP_URL` không nhạy cảm: đặt trong `vars` của `apps/crm/wrangler.jsonc` (agent sửa, commit), không dùng secret.
   - Đợt B: `… FB_APP_SECRET`, `… FB_VERIFY_TOKEN`, `… FB_PAGE_TOKENS`.
-- Verify: `npx wrangler secret list` có đủ tên ở đợt tương ứng (chỉ so tên).
+- Verify: `npx wrangler secret list` có đủ tên ở đợt tương ứng (chỉ so tên); `wrangler.jsonc` có `APP_URL`.
 
 ### Task 10.3 — Deploy (mỗi đợt)
 
@@ -66,7 +67,8 @@ Không in token, secret, mã QR, cookie Zalo hay nội dung các file `*.local*`
   2. Thêm provider embedding OpenAI và đặt system config `embedding.provider`, `embedding.model = text-embedding-3-small`.
   3. Tạo API key ứng dụng mới cho sidecar (scope `operator.read`, `operator.write`, **không gắn owner**: key có owner ghi đè `X-GoClaw-User-Id` và mọi khách dùng chung một phiên); user lưu vào `apps/zalo-bridge/.env` là `GOCLAW_API_KEY`.
   4. Đảm bảo kênh `zalo_personal` và `facebook` native trong GoClaw đều **tắt**.
-  5. Đặt hoặc kiểm tra system config `gateway.rate_limit_rpm` (mặc định 20/phút mỗi token, burst 5) đủ cho sidecar, ví dụ 120; ghi lại giá trị trước và sau. Đây là thay đổi cấu hình GoClaw, nằm trong lần đồng ý của task này.
+  5. Đặt hoặc kiểm tra system config `gateway.rate_limit_rpm` (mặc định 20/phút mỗi token, burst 5) đủ cho sidecar, user chọn 120 (2026-10-08); sửa ở cả system config trong DB và `D:\Goclaw\config.json` (GoClaw đồng bộ file vào system config lúc khởi động), khởi động lại GoClaw rồi đọc lại để chắc giá trị còn; ghi lại giá trị trước và sau.
+  6. Gỡ grant MCP `abm-crm-poc` khỏi agent `crm-sales-poc` (user quyết 2026-10-08), trong cùng lần đồng ý và sau cùng bản backup. Đây là thay đổi cấu hình GoClaw, nằm trong lần đồng ý của task này.
 - Verify: gọi thử từ máy Windows `POST http://127.0.0.1:18790/v1/chat/completions` với `model = goclaw:crm-extractor` và một transcript mẫu không có dữ liệu thật → HTTP 200 và nội dung parse được JSON.
 
 ### Task 10.5 — Sidecar trên Windows (Đợt A)
@@ -110,7 +112,7 @@ Không in token, secret, mã QR, cookie Zalo hay nội dung các file `*.local*`
 
 ### Task 10.11 — Tài liệu
 
-- Steps: viết `docs/guides/inbox-operations.md`; cập nhật `docs/README.md`; cập nhật hai tài liệu GoClaw ở mục Files; chuyển ADR liên quan sang `accepted` nếu còn `proposed`.
+- Steps: viết `docs/guides/inbox-operations.md`; cập nhật `docs/README.md`; thêm `BRIDGE_SECRET`, `LARK_INBOX_CHAT_ID`, `APP_URL` vào `docs/engineering/environments.md`; cập nhật hai tài liệu GoClaw ở mục Files; chuyển ADR liên quan sang `accepted` nếu còn `proposed`.
 - `docs/guides/inbox-operations.md` phải ghi rõ (chỉ tên, không ghi giá trị):
   - URL webhook Messenger: `/api/channels/facebook/webhook` (đặt sau domain của Worker khi đăng ký webhook với Meta).
   - Secret của Worker cho Messenger: `FB_APP_SECRET`, `FB_VERIFY_TOKEN`, `FB_PAGE_TOKENS` (JSON page id → page token).
@@ -121,7 +123,7 @@ Không in token, secret, mã QR, cookie Zalo hay nội dung các file `*.local*`
 
 - Tắt bot ngay: bật `customer_bot_switch`.
 - Ngừng gửi một số: `send_paused = 1`; ngừng hẳn: lệnh `zalo_logout` từ trang Tài khoản kênh, dừng Scheduled Task.
-- Quay lại bản Worker trước: `npx wrangler rollback` (hỏi đồng ý). Migration chỉ thêm bảng/cột nên không cần gỡ; chỉ khôi phục D1 từ backup khi user đồng ý.
+- Không time-travel restore D1 khi đợt A đã chạy (sẽ cuốn ngược dữ liệu inbox). Quay lại bản Worker trước: dừng Scheduled Task "ABM Zalo Bridge" **trước**, rồi `npx wrangler rollback` (hỏi đồng ý). Migration chỉ thêm bảng/cột nên không cần gỡ; chỉ khôi phục D1 từ backup khi user đồng ý.
 
 ## Failure Protocol
 If any Verify step does not meet its stated pass condition, STOP this phase.

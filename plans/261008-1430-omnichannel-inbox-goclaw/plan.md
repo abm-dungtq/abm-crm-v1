@@ -6,7 +6,7 @@ priority: P1
 effort: 14-17d
 branch: main
 tags: [feature, agent, backend, frontend, database, integration, zalo, messenger, lark]
-blockedBy: [261004-1457-crm-bot-gateway, 261004-1300-crm-admin-user-auth]
+blockedBy: [261004-1300-crm-admin-user-auth]
 blocks: []
 created: 2026-10-08
 ---
@@ -99,7 +99,7 @@ Executor phải dùng đúng tên dưới đây ở mọi phase.
 
 | # | Phase | Giai đoạn | Phụ thuộc | Effort |
 |---|---|---|---|---|
-| 01 | [ADR và điều kiện trước](phase-01-adrs-and-gates.md) | P0 | plan 1457, 1300 xong phase 05 | 1d |
+| 01 | [ADR và điều kiện trước](phase-01-adrs-and-gates.md) | P0 | plan 1300 xong phase 05 (1457 chạy song song, quyết định 2026-10-08) | 1d |
 | 02 | [Schema, contracts, dispatcher lease](phase-02-schema-and-dispatcher.md) | P1 | 01 | 2d |
 | 03 | [API sidecar và luồng hội thoại trong Worker](phase-03-bridge-api-and-conversation-flow.md) | P1 | 02 | 2d |
 | 04 | [Sidecar `apps/zalo-bridge`](phase-04-zalo-bridge-sidecar.md) | P1 | 03 | 2d |
@@ -130,7 +130,7 @@ Phase 10 chạy nhiều lần: sau 02–07 cho P1/P2, sau 09 cho Messenger, sau 
 | Rủi ro | Giảm thiểu |
 |---|---|
 | Zalo khóa số chung (cao nhất ở tin định kỳ) | Pilot, nhịp gửi giống người, cap theo tài khoản, giờ yên lặng, `send_paused`, công tắc |
-| Va chạm với plan 1457/1300/1053 | Phase 01 chặn cho tới khi phase 05 của 1457/1300 xong; rebase trước mỗi phase |
+| Va chạm với plan 1457/1300/1053 | Phase 10 chờ 1300 xong phase 05; 1457 chạy song song nhưng không time-travel restore D1 và không rollback Worker khi sidecar còn chạy (xem `plans/reports/brainstorm-261008-1710-eval-rollout-sequence.md`) |
 | Máy Windows/tunnel rớt | Inbox vẫn đọc được; lệnh `bridge` chờ trong D1 và chạy khi sidecar về |
 | App Review Meta chậm | Phase 09 tách riêng, nộp hồ sơ từ phase 01 |
 | zca-js đổi giao thức / giấy phép | Phase 04 kiểm giấy phép trước khi cài; adapter tách `zalo-client.ts` |
