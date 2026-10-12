@@ -2,7 +2,7 @@ import { env } from 'cloudflare:test';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import seedSql from '../seed/demo.sql?raw';
 import worker from '../src/worker/index';
-import { enqueueCommand } from '../src/worker/inbox/dispatcher';
+import { claimCommands, enqueueCommand } from '../src/worker/inbox/dispatcher';
 import { ingestEvents } from '../src/worker/inbox/ingest';
 import { runScheduled } from '../src/worker/inbox/scheduled';
 import { resetDb } from './helpers/reset-db';
@@ -163,6 +163,129 @@ test('outgoing messages stuck in pending without a live send command are marked 
   expect(Object.fromEntries(rows.results.map((r) => [r.id, r.status]))).toEqual({
     'm-orphan': 'failed', 'm-gave-up': 'failed', 'm-queued': 'pending', 'm-recent': 'pending', 'm-sent': 'sent', 'm-in': 'received',
   });
+});
+
+test('a login or logout still unclaimed after 3 minutes fails and a waiting QR account returns to error', async () => {
+  const old = new Date(Date.now() - 3 * 60_000 - 1000).toISOString();
+  const recent = new Date().toISOString();
+  await db.prepare("UPDATE channel_account SET status = 'qr_pending', qr_image = 'data:image/png;base64,QQ==', qr_expires_at = ? WHERE id = 'ca-1'").bind(recent).run();
+  const insert = (id: string, kind: string, created: string, attempts = 0, status = 'pending') =>
+    db.prepare(`INSERT INTO channel_command (id, kind, target, channel_account_id, payload_json, status, attempts, next_run_at, created_at, updated_at)
+      VALUES (?, ?, 'bridge', 'ca-1', '{}', ?, ?, ?, ?, ?)`).bind(id, kind, status, attempts, created, created, created);
+  await db.batch([
+    insert('cmd-old-login', 'zalo_login', old),
+    insert('cmd-new-login', 'zalo_login', recent),
+    insert('cmd-old-send', 'send_zalo', old),
+    insert('cmd-retried-login', 'zalo_login', old, 1),
+    insert('cmd-claimed-login', 'zalo_login', old, 1, 'claimed'),
+    insert('cmd-old-logout', 'zalo_logout', old),
+  ]);
+  await runScheduled(scheduledEnv, '* * * * *');
+  const statusOf = (id: string) => db.prepare('SELECT status, result_json FROM channel_command WHERE id = ?')
+    .bind(id).first<{ status: string; result_json: string | null }>();
+  expect(await statusOf('cmd-old-login')).toEqual({ status: 'failed', result_json: '{"error":"BRIDGE_OFFLINE"}' });
+  expect(await statusOf('cmd-old-logout')).toEqual({ status: 'failed', result_json: '{"error":"BRIDGE_OFFLINE"}' });
+  expect(await statusOf('cmd-new-login')).toMatchObject({ status: 'pending' });
+  expect(await statusOf('cmd-old-send')).toMatchObject({ status: 'pending' });
+  expect(await statusOf('cmd-retried-login')).toMatchObject({ status: 'pending' });
+  expect(await statusOf('cmd-claimed-login')).toMatchObject({ status: 'claimed' });
+  // Newer logins for the account are still pending or running, so the waiting QR is kept.
+  expect(await db.prepare('SELECT status, last_error, qr_image FROM channel_account WHERE id = ?').bind('ca-1').first())
+    .toEqual({ status: 'qr_pending', last_error: null, qr_image: 'data:image/png;base64,QQ==' });
+});
+
+test('a lone unclaimed login after 3 minutes returns a waiting QR account to error', async () => {
+  const old = new Date(Date.now() - 3 * 60_000 - 1000).toISOString();
+  await db.prepare("UPDATE channel_account SET status = 'qr_pending', qr_image = 'data:image/png;base64,QQ==', qr_expires_at = ? WHERE id = 'ca-1'")
+    .bind(new Date().toISOString()).run();
+  await db.prepare(`INSERT INTO channel_command (id, kind, target, channel_account_id, payload_json, status, attempts, next_run_at, created_at, updated_at)
+    VALUES ('cmd-only-login', 'zalo_login', 'bridge', 'ca-1', '{}', 'pending', 0, ?, ?, ?)`).bind(old, old, old).run();
+  await runScheduled(scheduledEnv, '* * * * *');
+  expect(await db.prepare('SELECT status, last_error, qr_image, qr_expires_at FROM channel_account WHERE id = ?').bind('ca-1').first())
+    .toEqual({ status: 'error', last_error: 'BRIDGE_OFFLINE', qr_image: null, qr_expires_at: null });
+});
+
+test('a stale login marks a disconnected account as error and leaves a connected account connected', async () => {
+  const old = new Date(Date.now() - 3 * 60_000 - 1000).toISOString();
+  const qr = 'data:image/png;base64,QQ==';
+  const insertAccount = (id: string, externalId: string, name: string, status: string) =>
+    db.prepare(`INSERT INTO channel_account (id, organization_id, channel, external_id, display_name, agent_key, status,
+        qr_image, qr_expires_at, last_error, created_at, updated_at)
+      VALUES (?, 'org-abm', 'zalo', ?, ?, 'sales-bot', ?, ?, ?, 'KEEP', ?, ?)`).bind(id, externalId, name, status, qr, old, old, old);
+  const insertLogin = (id: string, accountId: string) =>
+    db.prepare(`INSERT INTO channel_command (id, kind, target, channel_account_id, payload_json, status, attempts, next_run_at, created_at, updated_at)
+      VALUES (?, 'zalo_login', 'bridge', ?, '{}', 'pending', 0, ?, ?, ?)`).bind(id, accountId, old, old, old);
+  await db.batch([
+    insertAccount('ca-off', 'zalo-off', 'Số chờ', 'disconnected'),
+    insertAccount('ca-on', 'zalo-on', 'Số đang nối', 'connected'),
+    insertLogin('cmd-off-login', 'ca-off'),
+    insertLogin('cmd-on-login', 'ca-on'),
+  ]);
+  await runScheduled(scheduledEnv, '* * * * *');
+  const account = (id: string) => db.prepare('SELECT status, last_error, qr_image, qr_expires_at FROM channel_account WHERE id = ?').bind(id).first();
+  expect(await account('ca-off')).toEqual({ status: 'error', last_error: 'BRIDGE_OFFLINE', qr_image: null, qr_expires_at: null });
+  expect(await account('ca-on')).toEqual({ status: 'connected', last_error: 'KEEP', qr_image: qr, qr_expires_at: old });
+  const statusOf = (id: string) => db.prepare('SELECT status, result_json FROM channel_command WHERE id = ?').bind(id).first();
+  expect(await statusOf('cmd-off-login')).toEqual({ status: 'failed', result_json: '{"error":"BRIDGE_OFFLINE"}' });
+  expect(await statusOf('cmd-on-login')).toEqual({ status: 'failed', result_json: '{"error":"BRIDGE_OFFLINE"}' });
+});
+
+test('a claimed login whose lease has passed fails offline and is not claimed again', async () => {
+  const old = new Date(Date.now() - 3 * 60_000 - 1000).toISOString();
+  const expiredLease = new Date(Date.now() - 1000).toISOString();
+  const futureLease = new Date(Date.now() + 120_000).toISOString();
+  await db.prepare("UPDATE channel_account SET status = 'disconnected', qr_image = 'data:image/png;base64,QQ==', qr_expires_at = ? WHERE id = 'ca-1'")
+    .bind(old).run();
+  const insert = (id: string, kind: string, status: string, lease: string | null) =>
+    db.prepare(`INSERT INTO channel_command (id, kind, target, channel_account_id, payload_json, status, attempts, claimed_at,
+        lease_expires_at, next_run_at, created_at, updated_at)
+      VALUES (?, ?, 'bridge', 'ca-1', '{}', ?, 1, ?, ?, ?, ?, ?)`).bind(id, kind, status, old, lease, old, old, old);
+  await db.batch([
+    insert('cmd-lease-over', 'zalo_login', 'claimed', expiredLease),
+    insert('cmd-lease-open', 'zalo_login', 'claimed', futureLease),
+    insert('cmd-logout-lease', 'zalo_logout', 'claimed', expiredLease),
+    insert('cmd-send-lease', 'send_zalo', 'claimed', expiredLease),
+    db.prepare(`INSERT INTO channel_command (id, kind, target, channel_account_id, payload_json, status, attempts, next_run_at, created_at, updated_at)
+      VALUES ('cmd-still-due', 'send_zalo', 'bridge', 'ca-1', '{}', 'pending', 0, ?, ?, ?)`).bind(old, old, old),
+  ]);
+  await runScheduled(scheduledEnv, '* * * * *');
+  const statusOf = (id: string) => db.prepare('SELECT status, result_json FROM channel_command WHERE id = ?').bind(id).first<{ status: string; result_json: string | null }>();
+  expect(await statusOf('cmd-lease-over')).toEqual({ status: 'failed', result_json: '{"error":"BRIDGE_OFFLINE"}' });
+  expect(await statusOf('cmd-lease-open')).toMatchObject({ status: 'claimed' });
+  expect(await statusOf('cmd-logout-lease')).toMatchObject({ status: 'claimed' });
+  expect(await statusOf('cmd-send-lease')).toMatchObject({ status: 'claimed' });
+  // cmd-lease-open is a newer login still running, so the old failure leaves its QR alone.
+  expect(await db.prepare('SELECT status, last_error, qr_image FROM channel_account WHERE id = ?').bind('ca-1').first())
+    .toEqual({ status: 'disconnected', last_error: null, qr_image: 'data:image/png;base64,QQ==' });
+
+  const claimed = await claimCommands(db, 'bridge', 20);
+  expect(claimed.map((command) => command.id)).toContain('cmd-still-due');
+  expect(claimed.map((command) => command.id)).not.toContain('cmd-lease-over');
+  expect(await statusOf('cmd-lease-over')).toEqual({ status: 'failed', result_json: '{"error":"BRIDGE_OFFLINE"}' });
+  expect(await statusOf('cmd-lease-open')).toMatchObject({ status: 'claimed' });
+});
+
+test('a lone login whose lease has passed fails offline and resets its account', async () => {
+  const old = new Date(Date.now() - 3 * 60_000 - 1000).toISOString();
+  await db.prepare("UPDATE channel_account SET status = 'qr_pending', qr_image = 'data:image/png;base64,QQ==', qr_expires_at = ? WHERE id = 'ca-1'")
+    .bind(old).run();
+  await db.prepare(`INSERT INTO channel_command (id, kind, target, channel_account_id, payload_json, status, attempts, claimed_at,
+      lease_expires_at, next_run_at, created_at, updated_at)
+    VALUES ('cmd-lone', 'zalo_login', 'bridge', 'ca-1', '{}', 'claimed', 1, ?, ?, ?, ?, ?)`)
+    .bind(old, new Date(Date.now() - 1000).toISOString(), old, old, old).run();
+  await runScheduled(scheduledEnv, '* * * * *');
+  expect(await db.prepare('SELECT status, last_error, qr_image FROM channel_account WHERE id = ?').bind('ca-1').first())
+    .toEqual({ status: 'error', last_error: 'BRIDGE_OFFLINE', qr_image: null });
+});
+
+test('the bridge never re-claims a login whose lease has passed, even before the scheduled job fails it', async () => {
+  const old = new Date(Date.now() - 60_000).toISOString();
+  await db.prepare(`INSERT INTO channel_command (id, kind, target, channel_account_id, payload_json, status, attempts, claimed_at,
+      lease_expires_at, next_run_at, created_at, updated_at)
+    VALUES ('cmd-login-expired', 'zalo_login', 'bridge', 'ca-1', '{}', 'claimed', 1, ?, ?, ?, ?, ?)`)
+    .bind(old, new Date(Date.now() - 1000).toISOString(), old, old, old).run();
+  const claimed = await claimCommands(db, 'bridge', 20);
+  expect(claimed.map((command) => command.id)).not.toContain('cmd-login-expired');
 });
 
 test('the scheduled handler hands its work to waitUntil and never rejects when the database fails', async () => {

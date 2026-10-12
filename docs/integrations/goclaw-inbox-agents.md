@@ -80,3 +80,11 @@ Trả về tối đa 8 gạch đầu dòng tiếng Việt, gồm:
 
 Không chép số điện thoại, email hay thông tin cá nhân khác vào bản tóm tắt. Không thêm lời chào hay kết luận ngoài các gạch đầu dòng.
 ```
+
+## Cài lại bridge
+
+Sidecar Zalo chạy bằng task "ABM Zalo Bridge" lúc đăng nhập Windows, cửa sổ ẩn, lặp mỗi 5 phút. Không cần quyền Admin và không cần chỉnh đồng hồ máy. Từ thư mục gốc repo:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File apps\zalo-bridge\scripts\install-startup-task.ps1
+```

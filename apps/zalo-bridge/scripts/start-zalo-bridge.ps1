@@ -57,11 +57,172 @@ if (-not (Test-Path -LiteralPath $pnpmPath)) {
 Add-Content -LiteralPath $logFile -Value ("{0} start-zalo-bridge: starting" -f (Get-Date).ToString('o'))
 Set-Location -LiteralPath $repoRoot
 # cmd.exe does the redirection so stderr lines are written as plain text, not turned into PowerShell errors.
-# A single ArgumentList string reaches cmd.exe verbatim; /s strips only the outer pair of quotes.
+# /s strips only the outer pair of quotes around the command.
 $cmdLine = '/d /s /c ""{0}" -F @abm/zalo-bridge start >> "{1}" 2>&1"' -f $pnpmPath, $logFile
-$process = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\cmd.exe') -ArgumentList $cmdLine -NoNewWindow -PassThru
-$null = $process.Handle  # keeps the handle so ExitCode is available after the process ends
-$process.WaitForExit()
-$exitCode = $process.ExitCode
+
+# The node process is a grandchild of this wrapper. cmd.exe is created suspended, assigned to a job
+# with KILL_ON_JOB_CLOSE, then resumed, so the whole tree dies when this PowerShell exits.
+if (-not ('ChildProcessJob' -as [type])) {
+  Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public class ChildProcessJob {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    static extern IntPtr CreateJobObject(IntPtr lpJobAttributes, string lpName);
+    [DllImport("kernel32.dll")]
+    static extern bool SetInformationJobObject(IntPtr hJob, int JobObjectInfoClass, IntPtr lpJobObjectInfo, uint cbJobObjectInfoLength);
+    [DllImport("kernel32.dll")]
+    static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool CreateProcess(string lpApplicationName, StringBuilder lpCommandLine, IntPtr lpProcessAttributes, IntPtr lpThreadAttributes, bool bInheritHandles, uint dwCreationFlags, IntPtr lpEnvironment, string lpCurrentDirectory, ref STARTUPINFO lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
+    [DllImport("kernel32.dll")]
+    static extern uint ResumeThread(IntPtr hThread);
+    [DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr hObject);
+    [DllImport("kernel32.dll")]
+    static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);
+    [DllImport("kernel32.dll")]
+    static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+    [DllImport("kernel32.dll")]
+    static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
+    const int JobObjectExtendedLimitInformation = 9;
+    const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
+    const uint CREATE_SUSPENDED = 0x00000004;
+    const uint CREATE_NO_WINDOW = 0x08000000;
+    [StructLayout(LayoutKind.Sequential)]
+    struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    struct IO_COUNTERS {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+        public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+        public IO_COUNTERS IoInfo;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct STARTUPINFO {
+        public int cb;
+        public string lpReserved;
+        public string lpDesktop;
+        public string lpTitle;
+        public int dwX;
+        public int dwY;
+        public int dwXSize;
+        public int dwYSize;
+        public int dwXCountChars;
+        public int dwYCountChars;
+        public int dwFillAttribute;
+        public int dwFlags;
+        public short wShowWindow;
+        public short cbReserved2;
+        public IntPtr lpReserved2;
+        public IntPtr hStdInput;
+        public IntPtr hStdOutput;
+        public IntPtr hStdError;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    struct PROCESS_INFORMATION {
+        public IntPtr hProcess;
+        public IntPtr hThread;
+        public int dwProcessId;
+        public int dwThreadId;
+    }
+    IntPtr handle;
+    IntPtr childProcess;
+    int processId;
+    public int Id { get { return processId; } }
+    public ChildProcessJob() {
+        handle = CreateJobObject(IntPtr.Zero, null);
+        if (handle == IntPtr.Zero) throw new InvalidOperationException("CreateJobObject failed");
+        var info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        int length = Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+        IntPtr ptr = Marshal.AllocHGlobal(length);
+        try {
+            Marshal.StructureToPtr(info, ptr, false);
+            if (!SetInformationJobObject(handle, JobObjectExtendedLimitInformation, ptr, (uint)length))
+                throw new InvalidOperationException("SetInformationJobObject failed");
+        } finally {
+            Marshal.FreeHGlobal(ptr);
+        }
+    }
+    public void AddProcess(IntPtr processHandle) {
+        if (!AssignProcessToJobObject(handle, processHandle))
+            throw new InvalidOperationException("AssignProcessToJobObject failed");
+    }
+    public void StartAssigned(string applicationName, string arguments, string currentDirectory) {
+        var si = new STARTUPINFO();
+        si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
+        var commandLine = new StringBuilder(32768);
+        commandLine.Append('"').Append(applicationName).Append('"').Append(' ').Append(arguments);
+        PROCESS_INFORMATION pi;
+        if (!CreateProcess(applicationName, commandLine, IntPtr.Zero, IntPtr.Zero, false, CREATE_SUSPENDED | CREATE_NO_WINDOW, IntPtr.Zero, currentDirectory, ref si, out pi))
+            throw new InvalidOperationException("CreateProcess failed: " + Marshal.GetLastWin32Error());
+        bool resumed = false;
+        try {
+            AddProcess(pi.hProcess);
+            if (ResumeThread(pi.hThread) == 0xFFFFFFFF)
+                throw new InvalidOperationException("ResumeThread failed: " + Marshal.GetLastWin32Error());
+            resumed = true;
+            childProcess = pi.hProcess;
+            processId = pi.dwProcessId;
+        } catch {
+            TerminateProcess(pi.hProcess, 1);
+            throw;
+        } finally {
+            CloseHandle(pi.hThread);
+            if (!resumed) CloseHandle(pi.hProcess);
+        }
+    }
+    public bool HasExited {
+        get { return childProcess == IntPtr.Zero || WaitForSingleObject(childProcess, 0) == 0; }
+    }
+    public void Wait() {
+        if (WaitForSingleObject(childProcess, 0xFFFFFFFF) != 0)
+            throw new InvalidOperationException("WaitForSingleObject failed: " + Marshal.GetLastWin32Error());
+    }
+    public int ExitCode {
+        get {
+            uint code;
+            if (!GetExitCodeProcess(childProcess, out code))
+                throw new InvalidOperationException("GetExitCodeProcess failed: " + Marshal.GetLastWin32Error());
+            return unchecked((int)code);
+        }
+    }
+}
+'@
+}
+$script:bridgeJob = New-Object ChildProcessJob
+$script:bridgeJob.StartAssigned((Join-Path $env:SystemRoot 'System32\cmd.exe'), $cmdLine, $repoRoot)
+
+try {
+  $script:bridgeJob.Wait()
+} finally {
+  if (-not $script:bridgeJob.HasExited) {
+    & taskkill.exe /PID $script:bridgeJob.Id /T /F 2>&1 | Out-Null
+  }
+}
+$exitCode = $script:bridgeJob.ExitCode
 Add-Content -LiteralPath $logFile -Value ("{0} start-zalo-bridge: exited with code {1}" -f (Get-Date).ToString('o'), $exitCode)
 exit $exitCode

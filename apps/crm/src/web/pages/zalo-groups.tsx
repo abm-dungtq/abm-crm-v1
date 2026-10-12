@@ -13,7 +13,7 @@ import { Alert, Badge, Empty, ErrorState, Field, FormError, Loading, Modal, fiel
 import { fmtDateTime } from '../format';
 import { WEEKDAYS, weekdaysLabel } from '../inbox-format';
 import type {
-  ChannelAccount, GroupSchedule, GroupScheduleInput, GroupScheduleStatus, InboxConversation, InboxSettings, ScheduleSkipReason, ZaloGroup,
+  ChannelAccountList, GroupSchedule, GroupScheduleInput, GroupScheduleStatus, InboxConversation, InboxSettings, ScheduleSkipReason, ZaloGroup,
   ZaloGroupUpdate,
 } from '../types';
 import { MANAGER_ROLES } from './inbox';
@@ -63,14 +63,14 @@ function useInboxMutation<I, T>(fn: (input: I) => Promise<T>) {
 /** `/zalo-groups`: groups by channel account with their switches, and every recurring-post schedule. */
 export function ZaloGroupsPage() {
   const [account, setAccount] = useState('');
-  const accounts = useQuery<ChannelAccount[], ApiFailure>({ queryKey: ['inbox', 'accounts'], queryFn: listAccounts, staleTime: 60_000 });
+  const accounts = useQuery<ChannelAccountList, ApiFailure>({ queryKey: ['inbox', 'accounts'], queryFn: listAccounts, staleTime: 60_000 });
   const groups = useQuery<ZaloGroup[], ApiFailure>({
     queryKey: groupsKey(account),
     queryFn: () => listGroups(account || undefined),
     refetchInterval: LIST_POLL_MS,
     refetchIntervalInBackground: false,
   });
-  const zaloAccounts = accounts.data?.filter((a) => a.channel === 'zalo') ?? [];
+  const zaloAccounts = accounts.data?.accounts.filter((a) => a.channel === 'zalo') ?? [];
   return (
     <div className="stack">
       <div className="page-head">

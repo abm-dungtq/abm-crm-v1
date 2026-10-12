@@ -45,9 +45,8 @@ export interface ZaloGroup { threadId: string; name: string }
 export interface SessionClose { code: string; fatal: boolean }
 
 export interface QrCode {
-  /** data:image/png;base64,... */
+  /** data:image/png;base64,... The Worker, not this PC, decides when the code expires. */
   imageDataUrl: string;
-  expiresAt: Date;
 }
 
 export interface ZaloSession {
@@ -68,10 +67,11 @@ export interface ZaloConnector {
   loginWithSaved(file: string): Promise<ZaloSession>;
 }
 
-/** A QR code is valid this long (zca-js expires it after 100 s). */
-const QR_TTL_MS = 100_000;
-/** A login offers this many QR codes before giving up, which keeps it inside the Worker's 300 s command lease. */
-const MAX_QR_CODES = 2;
+/**
+ * A login offers this many QR codes (zca-js expires each after about 100 s) before giving up.
+ * The Worker gives a zalo_login claim a 450 s lease so four codes and the result still fit.
+ */
+const MAX_QR_CODES = 4;
 const GROUP_INFO_BATCH = 50;
 const MAX_GROUPS = 1000;
 const MAX_TEXT = 20_000;
@@ -208,7 +208,7 @@ class ZcaSession implements ZaloSession {
 
 const newZalo = () => new Zalo({ selfListen: true, logging: false });
 
-/** Logs in by QR code. Offers up to two codes; a declined or unscanned login rejects with QR_DECLINED / QR_EXPIRED. */
+/** Logs in by QR code. Offers up to four codes; a declined or unscanned login rejects with QR_DECLINED / QR_EXPIRED. */
 export async function loginWithQr(onQr: (qr: QrCode) => void): Promise<ZaloSession> {
   let codes = 0;
   let failure: string | null = null;
@@ -217,7 +217,7 @@ export async function loginWithQr(onQr: (qr: QrCode) => void): Promise<ZaloSessi
       switch (event.type) {
         case LoginQRCallbackEventType.QRCodeGenerated:
           codes += 1;
-          onQr({ imageDataUrl: `data:image/png;base64,${event.data.image}`, expiresAt: new Date(Date.now() + QR_TTL_MS) });
+          onQr({ imageDataUrl: `data:image/png;base64,${event.data.image}` });
           return;
         case LoginQRCallbackEventType.QRCodeExpired:
           if (codes < MAX_QR_CODES) return event.actions.retry();

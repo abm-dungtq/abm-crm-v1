@@ -11,7 +11,11 @@ const message = (i: number): BridgeEvent => ({
   fromSelf: false, senderExternalId: 'cust-1', senderName: '', text: `hello ${i}`, sentAt: '2026-10-08T07:00:00.000Z',
 });
 
-const ok = (data: unknown) => new Response(JSON.stringify({ ok: true, data }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+const ok = (data: unknown, date?: string) => new Response(JSON.stringify({ ok: true, data }), {
+  status: 200, headers: { 'Content-Type': 'application/json', ...(date ? { Date: date } : {}) },
+});
+const timestampOf = (call: unknown[]) => ((call[1] as RequestInit).headers as Record<string, string>)['X-Bridge-Timestamp'];
+const serverDate = (offsetMs: number) => new Date(NOW_MS + offsetMs).toUTCString();
 
 function client(fetchImpl: typeof fetch, sleep = vi.fn(async (_ms: number) => {})) {
   return { sleep, crm: new CrmClient({ baseUrl: 'https://crm.test', secret: SECRET, pollWaitSeconds: 20, fetch: fetchImpl, sleep, now: () => NOW_MS }) };
@@ -113,6 +117,127 @@ describe('CrmClient', () => {
     expect(init!.method).toBe('GET');
     expect(init!.body).toBeUndefined();
     expect((init!.headers as Record<string, string>)['X-Bridge-Signature']).toBe(signBridgeRequest(SECRET, '1791400000', ''));
+  });
+
+  it('learns the Worker clock from Date and signs later requests with it, warning once per skew change', async () => {
+    const skewed = serverDate(120_000);
+    const fetchMock = vi.fn(async () => ok({ accepted: 1, rejected: 0 }, skewed));
+    const log = vi.fn();
+    const crm = new CrmClient({
+      baseUrl: 'https://crm.test', secret: SECRET, pollWaitSeconds: 20, fetch: fetchMock as unknown as typeof fetch,
+      sleep: vi.fn(async () => {}), now: () => NOW_MS, log,
+    });
+    await crm.pushEvents([message(1)]);
+    expect(timestampOf(fetchMock.mock.calls[0] as unknown[])).toBe(String(Math.floor(NOW_MS / 1000)));
+    await crm.pushEvents([message(2)]);
+    const offset = Date.parse(skewed) - NOW_MS;
+    expect(timestampOf(fetchMock.mock.calls[1] as unknown[])).toBe(String(Math.floor((NOW_MS + offset) / 1000)));
+    expect(log.mock.calls.filter((call) => call[1] === 'clock.skew')).toEqual([['warn', 'clock.skew', { offsetSeconds: Math.round(offset / 1000) }]]);
+    await crm.pushEvents([message(3)]);
+    expect(log.mock.calls.filter((call) => call[1] === 'clock.skew')).toHaveLength(1);
+
+    const later = serverDate(180_000);
+    fetchMock.mockImplementation(async () => ok({ accepted: 1, rejected: 0 }, later));
+    await crm.pushEvents([message(4)]);
+    const laterOffset = Date.parse(later) - NOW_MS;
+    expect(log.mock.calls.filter((call) => call[1] === 'clock.skew')).toEqual([
+      ['warn', 'clock.skew', { offsetSeconds: Math.round(offset / 1000) }],
+      ['warn', 'clock.skew', { offsetSeconds: Math.round(laterOffset / 1000) }],
+    ]);
+  });
+
+  it('logs clock.skew the first time it passes 30 s and again only after a move of 5 s', async () => {
+    const dates = [31_000, 34_000, 0, 32_000, 37_000].map((offset) => serverDate(offset));
+    let cursor = 0;
+    const fetchMock = vi.fn(async () => ok({ accepted: 1, rejected: 0 }, dates[cursor]));
+    const log = vi.fn();
+    const crm = new CrmClient({
+      baseUrl: 'https://crm.test', secret: SECRET, pollWaitSeconds: 20, fetch: fetchMock as unknown as typeof fetch,
+      sleep: vi.fn(async () => {}), now: () => NOW_MS, log,
+    });
+    const skews = () => log.mock.calls.filter((call) => call[1] === 'clock.skew').map((call) => call[2].offsetSeconds);
+    const rounded = (offset: number) => Math.round((Date.parse(serverDate(offset)) - NOW_MS) / 1000);
+
+    await crm.pushEvents([message(1)]);
+    expect(skews()).toEqual([rounded(31_000)]);
+    cursor = 1;
+    await crm.pushEvents([message(2)]);
+    expect(skews()).toEqual([rounded(31_000)]);
+    cursor = 2;
+    await crm.pushEvents([message(3)]);
+    expect(skews()).toEqual([rounded(31_000)]);
+    cursor = 3;
+    await crm.pushEvents([message(4)]);
+    expect(skews()).toEqual([rounded(31_000), rounded(32_000)]);
+    cursor = 4;
+    await crm.pushEvents([message(5)]);
+    expect(skews()).toEqual([rounded(31_000), rounded(32_000), rounded(37_000)]);
+    expect(Math.abs(rounded(34_000) - rounded(31_000))).toBeLessThan(5);
+    expect(Math.abs(rounded(37_000) - rounded(32_000))).toBeGreaterThanOrEqual(5);
+    expect(Math.abs(rounded(0))).toBeLessThanOrEqual(30);
+  });
+
+  it('stops resending a result once Worker time, not the raw PC clock, is inside 8 s of the deadline', async () => {
+    const skewed = serverDate(120_000);
+    const fetchMock = vi.fn(async () => {
+      if (fetchMock.mock.calls.length > 4) throw new Error('retried past the lease');
+      return new Response('{}', { status: 500, headers: { Date: skewed } });
+    });
+    const crm = new CrmClient({
+      baseUrl: 'https://crm.test', secret: SECRET, pollWaitSeconds: 20, fetch: fetchMock as unknown as typeof fetch,
+      sleep: vi.fn(async () => {}), now: () => NOW_MS,
+    });
+    const serverNow = Date.parse(skewed);
+    const retryUntil = serverNow + RETRY_DELAYS_MS[2] - 1;
+    expect(NOW_MS + RETRY_DELAYS_MS[2] < retryUntil).toBe(true);
+    expect(await crm.postResult('c1', { attempts: 1, ok: true }, retryUntil)).toBe('undelivered');
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it('retries a 401 once when the Worker Date shows more than 60 s of skew', async () => {
+    const skewed = serverDate(-114_000);
+    let calls = 0;
+    const fetchMock = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) return new Response('{}', { status: 401, headers: { Date: skewed } });
+      return ok({ accepted: 1, rejected: 0 }, skewed);
+    });
+    const log = vi.fn();
+    const crm = new CrmClient({
+      baseUrl: 'https://crm.test', secret: SECRET, pollWaitSeconds: 20, fetch: fetchMock as unknown as typeof fetch,
+      sleep: vi.fn(async () => {}), now: () => NOW_MS, log,
+    });
+    await crm.pushEvents([message(1)]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(timestampOf(fetchMock.mock.calls[0] as unknown[])).toBe(String(Math.floor(NOW_MS / 1000)));
+    const offset = Date.parse(skewed) - NOW_MS;
+    expect(timestampOf(fetchMock.mock.calls[1] as unknown[])).toBe(String(Math.floor((NOW_MS + offset) / 1000)));
+    expect(crm.pendingCount).toBe(0);
+    expect(Math.abs(offset)).toBeGreaterThan(60_000);
+  });
+
+  it('does not add a clock retry when the Date skew is 60 s or less, and does not retry the correction on later 401s', async () => {
+    const mild = serverDate(20_000);
+    const mildFetch = vi.fn(async () => new Response('{}', { status: 401, headers: { Date: mild } }));
+    const mildClient = new CrmClient({
+      baseUrl: 'https://crm.test', secret: SECRET, pollWaitSeconds: 20, fetch: mildFetch as unknown as typeof fetch,
+      sleep: vi.fn(async () => {}), now: () => NOW_MS, log: vi.fn(),
+    });
+    await mildClient.pushEvents([message(1)]);
+    expect(mildFetch).toHaveBeenCalledTimes(4);
+
+    const skewed = serverDate(114_000);
+    const hardFetch = vi.fn(async () => new Response('{}', { status: 401, headers: { Date: skewed } }));
+    const hardClient = new CrmClient({
+      baseUrl: 'https://crm.test', secret: SECRET, pollWaitSeconds: 20, fetch: hardFetch as unknown as typeof fetch,
+      sleep: vi.fn(async () => {}), now: () => NOW_MS, log: vi.fn(),
+    });
+    await hardClient.pushEvents([message(1)]);
+    expect(hardFetch).toHaveBeenCalledTimes(5);
+    const stamps = hardFetch.mock.calls.map((call) => timestampOf(call as unknown[]));
+    expect(stamps[0]).toBe(String(Math.floor(NOW_MS / 1000)));
+    expect(new Set(stamps.slice(1)).size).toBe(1);
+    expect(stamps[1]).not.toBe(stamps[0]);
   });
 
   it('posts a result once and does not retry a 404', async () => {

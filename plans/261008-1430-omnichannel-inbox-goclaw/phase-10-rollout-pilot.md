@@ -73,10 +73,19 @@ Không in token, secret, mã QR, cookie Zalo hay nội dung các file `*.local*`
 
 ### Task 10.5 — Sidecar trên Windows (Đợt A)
 
+- Thứ tự khi đưa bản có `bridge_last_seen_at` lên eval: áp migration `0018_bridge_last_seen.sql` trên eval → deploy Worker → cài lại hoặc khởi động lại bridge.
 - Steps:
   1. User điền `apps/zalo-bridge/.env` (`CRM_BASE_URL`, `BRIDGE_SECRET`, `GOCLAW_API_KEY`).
-  2. Hỏi đồng ý; chạy `apps/zalo-bridge/scripts/install-startup-task.ps1` (cần PowerShell quyền Admin). Không có quyền Admin thì thêm `-AtLogOn`: task chạy khi tài khoản Windows đăng nhập và dừng khi đăng xuất. Sau đó khởi động task.
+  2. Hỏi đồng ý; chạy lệnh ở mục "Cài lại bridge" bên dưới (không cần quyền Admin). Task chạy lúc tài khoản Windows đăng nhập, cửa sổ ẩn, và lặp mỗi 5 phút. Sau đó khởi động task.
 - Verify: `Get-ScheduledTask -TaskName "ABM Zalo Bridge"` có `State` là `Running` hoặc `Ready`; `apps/zalo-bridge/logs/bridge.log` có dòng poll thành công trong 2 phút.
+
+### Cài lại bridge
+
+Từ thư mục gốc repo, trên máy Windows đang đăng nhập:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File apps\zalo-bridge\scripts\install-startup-task.ps1
+```
 
 ### Task 10.6 — Kết nối 2 số pilot (Đợt A)
 

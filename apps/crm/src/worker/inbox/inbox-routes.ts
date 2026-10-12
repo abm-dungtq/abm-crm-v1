@@ -7,6 +7,7 @@ import {
   ASSIGNABLE_ROLES, MANAGER_ROLES, ROUND_ROBIN_ROLES, assignConversation, linkBase, loadInboxSettings, type AssignOutcome,
 } from './assignment';
 import { STAFF_TEXT_MAX, setMode, staffSend } from './conversation-flow';
+import { readBridgePresence } from './bridge-routes';
 import { enqueueCommand } from './dispatcher';
 import {
   SCHEDULE_TEXT_MAX, approveSchedule, deleteSchedule, getSchedule, listSchedules, pauseSchedule, saveSchedule, submitSchedule,
@@ -278,14 +279,24 @@ const ACCOUNT_SELECT = `SELECT id, channel, external_id AS externalId, display_n
     quiet_end AS quietEnd, status, qr_image AS qrImage, qr_expires_at AS qrExpiresAt, last_seen_at AS lastSeenAt,
     last_error AS lastError, created_at AS createdAt, updated_at AS updatedAt
   FROM channel_account`;
+/** Whole seconds until the QR expires, from Worker time. Zero when it has already expired; null when there is no QR. */
+function qrExpiresInSeconds(expiresAt: string | null, nowMs: number): number | null {
+  if (!expiresAt) return null;
+  const expiresMs = Date.parse(expiresAt);
+  if (!Number.isFinite(expiresMs)) return null;
+  return Math.max(0, Math.floor((expiresMs - nowMs) / 1000));
+}
+
 /**
  * The login QR signs a company number into the bridge, so only admins receive it. The bridge's last error code
- * is an operations detail for admins too.
+ * is an operations detail for admins too. `qrExpiresInSeconds` is computed here so the page can count down
+ * without comparing the browser clock to `qrExpiresAt`.
  */
-const presentAccount = (row: AccountRow, actor: Actor) => ({
+const presentAccount = (row: AccountRow, actor: Actor, nowMs = Date.now()) => ({
   ...row, botEnabled: row.botEnabled === 1, sendPaused: row.sendPaused === 1,
   qrImage: actor.role === 'admin' ? row.qrImage : null,
   lastError: actor.role === 'admin' ? row.lastError : null,
+  qrExpiresInSeconds: qrExpiresInSeconds(row.qrExpiresAt, nowMs),
 });
 const loadAccount = (db: D1Database, actor: Actor, id: string) =>
   db.prepare(`${ACCOUNT_SELECT} WHERE id = ? AND organization_id = ?`).bind(id, actor.organizationId).first<AccountRow>();
@@ -293,7 +304,8 @@ const loadAccount = (db: D1Database, actor: Actor, id: string) =>
 inboxRoutes.get('/accounts', async (c) => {
   const actor = c.get('actor');
   const rows = await c.env.DB.prepare(`${ACCOUNT_SELECT} WHERE organization_id = ? ORDER BY display_name`).bind(actor.organizationId).all<AccountRow>();
-  return c.json(ok(rows.results.map((r) => presentAccount(r, actor))));
+  const bridge = await readBridgePresence(c.env.DB);
+  return c.json(ok({ accounts: rows.results.map((r) => presentAccount(r, actor)), ...bridge }));
 });
 
 inboxRoutes.post('/accounts', adminOnly, async (c) => {

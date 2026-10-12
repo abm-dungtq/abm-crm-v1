@@ -332,7 +332,7 @@ test('admins manage channel accounts and the customer bot switch', async () => {
   const created = await web('u-admin', 'POST', '/inbox/accounts', { displayName: 'Số tư vấn 2', agentKey: 'sales-bot' });
   expect(created.status).toBe(200);
   const id = created.json.data.id;
-  expect(created.json.data).toMatchObject({ channel: 'zalo', status: 'disconnected', botEnabled: true, sendPaused: false });
+  expect(created.json.data).toMatchObject({ channel: 'zalo', status: 'disconnected', botEnabled: true, sendPaused: false, qrExpiresInSeconds: null });
   const patched = await web('u-admin', 'PATCH', `/inbox/accounts/${id}`, { sendPaused: true, quietStart: '21:00', quietEnd: '07:30' });
   expect(patched.json.data).toMatchObject({ sendPaused: true, quietStart: '21:00', quietEnd: '07:30' });
   expect((await web('u-admin', 'PATCH', `/inbox/accounts/${id}`, { quietEnd: null })).status).toBe(422);
@@ -346,11 +346,24 @@ test('admins manage channel accounts and the customer bot switch', async () => {
   await web('u-admin', 'POST', `/inbox/accounts/${id}/disconnect`);
   expect(await commands('zalo_logout')).toHaveLength(1);
 
-  await db.prepare("UPDATE channel_account SET qr_image = 'data:image/png;base64,QQ==' WHERE id = ?").bind(id).run();
-  const adminView = (await web('u-admin', 'GET', '/inbox/accounts')).json.data.find((a: { id: string }) => a.id === id);
-  const saleView = (await web('u-lan', 'GET', '/inbox/accounts')).json.data.find((a: { id: string }) => a.id === id);
+  const expiresAt = new Date(Date.now() + 75_000).toISOString();
+  await db.prepare("UPDATE channel_account SET qr_image = 'data:image/png;base64,QQ==', qr_expires_at = ? WHERE id = ?").bind(expiresAt, id).run();
+  const adminList = (await web('u-admin', 'GET', '/inbox/accounts')).json.data;
+  const saleList = (await web('u-lan', 'GET', '/inbox/accounts')).json.data;
+  const adminView = adminList.accounts.find((a: { id: string }) => a.id === id);
+  const saleView = saleList.accounts.find((a: { id: string }) => a.id === id);
+  expect(adminList.bridgeOnline).toBe(false);
+  expect(saleList).toMatchObject({ bridgeOnline: false, bridgeLastSeenAt: null });
   expect(adminView.qrImage).toBe('data:image/png;base64,QQ==');
   expect(saleView.qrImage).toBeNull();
+  expect(adminView.qrExpiresInSeconds).toBeGreaterThanOrEqual(70);
+  expect(adminView.qrExpiresInSeconds).toBeLessThanOrEqual(75);
+  expect(saleView.qrExpiresInSeconds).toBeGreaterThanOrEqual(70);
+  expect(saleView.qrExpiresInSeconds).toBeLessThanOrEqual(75);
+  expect(adminList.accounts.find((a: { id: string }) => a.id === 'ca-1').qrExpiresInSeconds).toBeNull();
+  await db.prepare('UPDATE channel_account SET qr_expires_at = ? WHERE id = ?').bind(new Date(Date.now() - 5_000).toISOString(), id).run();
+  const expiredView = (await web('u-admin', 'GET', '/inbox/accounts')).json.data.accounts.find((a: { id: string }) => a.id === id);
+  expect(expiredView.qrExpiresInSeconds).toBe(0);
 
   expect((await web('u-admin', 'PUT', '/inbox/customer-bot-switch', { enabled: true })).json.data.enabled).toBe(true);
   expect((await web('u-admin', 'GET', '/inbox/customer-bot-switch')).json.data.enabled).toBe(true);

@@ -11,10 +11,10 @@ CRM cần gom tin Zalo cá nhân (dưới 10 số chung của công ty) vào tra
 ## Quyết định
 
 - Thêm `apps/zalo-bridge` (Node 22, TypeScript) chạy trên máy Windows cạnh GoClaw. Sidecar giữ phiên zca-js, đẩy sự kiện tin Zalo vào Worker, nhận lệnh và thực thi.
-- Sidecar chỉ kéo lệnh: long-poll `GET /api/bridge/commands`, đẩy sự kiện bằng `POST /api/bridge/events`, trả kết quả bằng `POST /api/bridge/commands/:id/result`. Mọi request `/api/bridge/*` ký HMAC-SHA256 bằng `BRIDGE_SECRET` kèm timestamp; Worker từ chối khi lệch giờ quá 300 giây. Sidecar không mở cổng nào vào máy.
+- Sidecar chỉ kéo lệnh: long-poll `GET /api/bridge/commands`, đẩy sự kiện bằng `POST /api/bridge/events`, trả kết quả bằng `POST /api/bridge/commands/:id/result`. Mọi request `/api/bridge/*` ký HMAC-SHA256 bằng `BRIDGE_SECRET` kèm timestamp; Worker từ chối khi lệch giờ quá 300 giây. Sidecar đọc header `Date` của Worker và tự chỉnh timestamp, nên đồng hồ máy Windows lệch không cần chỉnh tay. Sidecar không mở cổng nào vào máy.
 - Sidecar không giữ trạng thái nghiệp vụ. Worker là nơi duy nhất ghi dữ liệu chuẩn (hội thoại, chế độ, chia việc, lead). Sidecar không tự quyết trả lời hay chuyển chế độ.
 - Sidecar gọi GoClaw qua `http://127.0.0.1:18790`, không đi qua tunnel.
-- Sidecar tự khởi động bằng Task Scheduler của Windows khi máy bật.
+- Sidecar tự khởi động bằng Task Scheduler của Windows khi tài khoản Windows đăng nhập: cửa sổ ẩn, lặp mỗi 5 phút, không cần quyền Admin. Mã QR hết hạn theo giờ của Worker (90 giây kể từ lúc nhận), không theo đồng hồ máy bridge.
 
 ## Phương án đã xét
 
@@ -30,3 +30,13 @@ CRM cần gom tin Zalo cá nhân (dưới 10 số chung của công ty) vào tra
 - Khi máy Windows tắt hoặc mất mạng, lệnh `target='bridge'` nằm chờ trong D1 và chạy khi sidecar kết nối lại; Inbox vẫn đọc được.
 - Đội vận hành thêm một tiến trình Node ngoài Cloudflare: cập nhật zca-js, kiểm giấy phép thư viện trước khi cài, theo dõi máy Windows.
 - `BRIDGE_SECRET` là secret của Worker và của sidecar; lộ secret thì phải xoay cả hai nơi.
+
+## Cài lại bridge
+
+Trên máy Windows đang đăng nhập (không cần quyền Admin), từ thư mục gốc repo:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File apps\zalo-bridge\scripts\install-startup-task.ps1
+```
+
+Lệnh này đăng ký lại task "ABM Zalo Bridge". Task chạy lúc đăng nhập, cửa sổ ẩn, và lặp mỗi 5 phút. Nếu bridge đang chạy, lần lặp sau không mở thêm tiến trình.

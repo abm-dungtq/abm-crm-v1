@@ -132,8 +132,8 @@ test('connecting with a Zalo id another account owns marks the account as error'
 test('the error code the bridge reports is kept until the account connects and shown only to admins', async () => {
   const accounts = async (user: string) => {
     const res = await app.fetch(new Request(`${ORIGIN}/api/inbox/accounts`, { headers: { 'X-Demo-User': user } }), { ...testEnv, DEMO_MODE: '1' });
-    const body = await res.json() as { data: { id: string; status: string; lastError: string | null }[] };
-    return body.data.find((a) => a.id === 'ca-1')!;
+    const body = await res.json() as { data: { accounts: { id: string; status: string; lastError: string | null }[] } };
+    return body.data.accounts.find((a) => a.id === 'ca-1')!;
   };
   const statusEvent = (status: string, extra: Record<string, unknown> = {}) =>
     bridge('/events', { body: { events: [{ type: 'account_status', accountId: 'ca-1', status, ...extra }] } });
@@ -153,16 +153,64 @@ test('the error code the bridge reports is kept until the account connects and s
 });
 
 test('qr and group list events update the account and its groups', async () => {
-  const expiresAt = new Date(Date.now() + 60_000).toISOString();
+  const before = Date.now();
+  const bridgeExpiry = new Date(before - 120_000).toISOString();
   const res = await bridge('/events', { body: { events: [
-    { type: 'qr', accountId: 'ca-2', imageDataUrl: 'data:image/png;base64,QUJD', expiresAt },
+    { type: 'qr', accountId: 'ca-2', imageDataUrl: 'data:image/png;base64,QUJD', expiresAt: bridgeExpiry },
     { type: 'group_list', accountExternalId: 'zalo-acc-1', groups: [{ threadId: 'g-1', name: 'Lớp IELTS K1' }] },
   ] } });
   expect(res.json.data).toEqual({ accepted: 2, rejected: 0 });
-  expect(await db.prepare("SELECT status, qr_image, qr_expires_at FROM channel_account WHERE id = 'ca-2'").first())
-    .toEqual({ status: 'qr_pending', qr_image: 'data:image/png;base64,QUJD', qr_expires_at: expiresAt });
+  const row = await db.prepare("SELECT status, qr_image, qr_expires_at FROM channel_account WHERE id = 'ca-2'")
+    .first<{ status: string; qr_image: string; qr_expires_at: string }>();
+  expect(row).toMatchObject({ status: 'qr_pending', qr_image: 'data:image/png;base64,QUJD' });
+  const expires = Date.parse(row!.qr_expires_at);
+  expect(expires).toBeGreaterThanOrEqual(before + 90_000);
+  expect(expires).toBeLessThanOrEqual(Date.now() + 90_000);
+  expect(row!.qr_expires_at).not.toBe(bridgeExpiry);
   expect(await db.prepare("SELECT kind, display_name FROM conversation WHERE external_thread_id = 'g-1'").first())
     .toEqual({ kind: 'group', display_name: 'Lớp IELTS K1' });
+
+  const again = Date.now();
+  expect((await bridge('/events', { body: { events: [
+    { type: 'qr', accountId: 'ca-2', imageDataUrl: 'data:image/png;base64,RkY=' },
+  ] } })).json.data).toEqual({ accepted: 1, rejected: 0 });
+  const fresh = await db.prepare("SELECT qr_image, qr_expires_at FROM channel_account WHERE id = 'ca-2'")
+    .first<{ qr_image: string; qr_expires_at: string }>();
+  expect(fresh!.qr_image).toBe('data:image/png;base64,RkY=');
+  expect(Date.parse(fresh!.qr_expires_at)).toBeGreaterThanOrEqual(again + 90_000);
+});
+
+test('an authenticated command poll marks the bridge online for 90 seconds', async () => {
+  const rejected = await bridge('/commands?wait=0', { signature: 'aa' });
+  expect(rejected.status).toBe(401);
+  expect(await db.prepare('SELECT bridge_last_seen_at FROM inbox_setting WHERE id = 1').first()).toEqual({ bridge_last_seen_at: null });
+
+  const before = Date.now();
+  expect((await bridge('/commands?wait=0')).status).toBe(200);
+  const seen = await db.prepare('SELECT bridge_last_seen_at FROM inbox_setting WHERE id = 1').first<{ bridge_last_seen_at: string }>();
+  const seenAt = Date.parse(seen!.bridge_last_seen_at);
+  expect(seenAt).toBeGreaterThanOrEqual(before);
+  expect(seenAt).toBeLessThanOrEqual(Date.now());
+
+  const list = async () => {
+    const res = await app.fetch(new Request(`${ORIGIN}/api/inbox/accounts`, { headers: { 'X-Demo-User': 'u-admin' } }), { ...testEnv, DEMO_MODE: '1' });
+    return (await res.json() as { data: { bridgeOnline: boolean; bridgeLastSeenAt: string | null } }).data;
+  };
+  expect(await list()).toMatchObject({ bridgeOnline: true, bridgeLastSeenAt: seen!.bridge_last_seen_at });
+
+  const stale = new Date(Date.now() - 91_000).toISOString();
+  await db.prepare('UPDATE inbox_setting SET bridge_last_seen_at = ? WHERE id = 1').bind(stale).run();
+  expect(await list()).toEqual({ bridgeOnline: false, bridgeLastSeenAt: stale, accounts: expect.any(Array) });
+});
+
+test('a zalo login claim lasts long enough for four QR codes; a send keeps the 300 s lease', async () => {
+  await enqueueCommand(db, { kind: 'zalo_login', target: 'bridge', channelAccountId: 'ca-2', payload: { accountId: 'ca-2' } });
+  await enqueueCommand(db, { kind: 'send_zalo', target: 'bridge', channelAccountId: 'ca-1', payload: { messageId: 'm-lease', text: 'a' } });
+  const res = await bridge('/commands?wait=0');
+  const byKind = Object.fromEntries(res.json.data.map((command: { kind: string; claimedAt: string; leaseExpiresAt: string }) => [command.kind, command]));
+  const span = (command: { claimedAt: string; leaseExpiresAt: string }) => Date.parse(command.leaseExpiresAt) - Date.parse(command.claimedAt);
+  expect(span(byKind.zalo_login)).toBe(450_000);
+  expect(span(byKind.send_zalo)).toBe(300_000);
 });
 
 test('a long poll with nothing due returns an empty list', async () => {

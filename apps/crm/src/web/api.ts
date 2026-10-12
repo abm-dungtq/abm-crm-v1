@@ -2,7 +2,7 @@ import { useRef } from 'react';
 import { useMutation, useQuery, useQueryClient, type UseQueryOptions } from '@tanstack/react-query';
 import type { ApiError, CommandName, ConversationMode } from '@abm/contracts';
 import type {
-  AssignResult, ChannelAccount, ChannelAccountUpdate, ClassifyIntakeResult, ConversationFilter, CustomerBotSwitch, GroupSchedule,
+  AssignResult, ChannelAccount, ChannelAccountList, ChannelAccountUpdate, ClassifyIntakeResult, ConversationFilter, CustomerBotSwitch, GroupSchedule,
   GroupScheduleInput, InboxConversation, InboxMessage, InboxSettings, InboxSettingsUpdate, IntakeField, IntakePipeline, IntakeStatus,
   IntakeValues, LeadIntake, RosterMember, SendMessageResult, SetModeResult, ZaloGroup, ZaloGroupUpdate,
 } from './types';
@@ -111,7 +111,7 @@ export const listMessages = (id: string, after?: string) =>
 export const sendMessage = (id: string, text: string, clientMessageId: string) =>
   api.post<SendMessageResult>(`/inbox/conversations/${enc(id)}/messages`, { text, clientMessageId });
 export const setMode = (id: string, mode: ConversationMode) => api.post<SetModeResult>(`/inbox/conversations/${enc(id)}/mode`, { mode });
-export const listAccounts = () => api.get<ChannelAccount[]>('/inbox/accounts');
+export const listAccounts = () => api.get<ChannelAccountList>('/inbox/accounts');
 /** A Facebook Page is added with `channel: 'facebook'` and its page id as `externalId`; without `channel` a Zalo number is added. */
 export const createAccount = (input: { displayName: string; agentKey: string; channel?: 'zalo' | 'facebook'; externalId?: string }) =>
   api.post<ChannelAccount>('/inbox/accounts', input);

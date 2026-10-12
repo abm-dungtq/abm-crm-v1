@@ -326,11 +326,19 @@ export interface ChannelAccount {
   /** Login QR as a data URL; only Admin receives it. */
   qrImage: string | null;
   qrExpiresAt: string | null;
+  /** Seconds of QR life left when the Worker built this response. Null when there is no QR. */
+  qrExpiresInSeconds: number | null;
   lastSeenAt: string | null;
   /** Error code the bridge last reported while the account is in error; only Admin receives it. */
   lastError: string | null;
   createdAt: string;
   updatedAt: string;
+}
+/** GET /inbox/accounts. `bridgeOnline` is computed on the Worker: the bridge polled within the last 90 seconds. */
+export interface ChannelAccountList {
+  accounts: ChannelAccount[];
+  bridgeOnline: boolean;
+  bridgeLastSeenAt: string | null;
 }
 export interface ChannelAccountUpdate {
   botEnabled?: boolean;

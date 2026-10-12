@@ -23,6 +23,13 @@ const MAX_WAIT_SECONDS = 25;
 const POLL_INTERVAL_MS = 1000;
 const CLAIM_LIMIT = 20;
 const SEND_KINDS = new Set(['send_zalo', 'send_messenger']);
+/**
+ * Four QR codes last about 100 s each. The shared claim lease is 300 s, which ends during the fourth
+ * code, so a zalo_login claim is extended to 450 s: four codes plus 50 s to report the result.
+ */
+const ZALO_LOGIN_LEASE_SECONDS = 450;
+/** A bridge that polled within this long is shown as online on the channel-accounts page. */
+export const BRIDGE_ONLINE_MS = 90_000;
 
 const ok = <T>(data: T) => ({ ok: true as const, data });
 const invalid = (fields: Record<string, string>) =>
@@ -39,6 +46,21 @@ function parseBody<S extends z.ZodType>(raw: string, schema: S): { data: z.infer
   const parsed = schema.safeParse(json);
   if (parsed.success) return { data: parsed.data };
   return { fields: Object.fromEntries(parsed.error.issues.map((i) => [i.path.join('.') || 'form', i.message])) };
+}
+
+/** Records that the bridge just authenticated a command poll. The page reads this as "bridge last seen". */
+export async function recordBridgeSeen(db: D1Database, now = new Date()): Promise<void> {
+  await db.prepare('UPDATE inbox_setting SET bridge_last_seen_at = ? WHERE id = 1').bind(now.toISOString()).run();
+}
+
+/** `bridgeOnline` is true when the last authenticated poll is within 90 s of Worker time. */
+export async function readBridgePresence(db: D1Database, now = new Date()): Promise<{ bridgeOnline: boolean; bridgeLastSeenAt: string | null }> {
+  const row = await db.prepare('SELECT bridge_last_seen_at FROM inbox_setting WHERE id = 1')
+    .first<{ bridge_last_seen_at: string | null }>();
+  const bridgeLastSeenAt = row?.bridge_last_seen_at ?? null;
+  const seen = bridgeLastSeenAt ? Date.parse(bridgeLastSeenAt) : NaN;
+  const age = now.getTime() - seen;
+  return { bridgeOnline: Number.isFinite(seen) && age >= -5_000 && age <= BRIDGE_ONLINE_MS, bridgeLastSeenAt };
 }
 
 /** A send that will not be retried leaves its message failed. */
@@ -60,6 +82,13 @@ async function failSend(db: D1Database, command: { id: string; kind: string; pay
  */
 async function claimDeliverable(db: D1Database): Promise<ClaimedCommand[]> {
   const claimed = await claimCommands(db, 'bridge', CLAIM_LIMIT);
+  for (const command of claimed) {
+    if (command.kind !== 'zalo_login') continue;
+    const leaseExpiresAt = new Date(Date.parse(command.claimedAt) + ZALO_LOGIN_LEASE_SECONDS * 1000).toISOString();
+    const extended = await db.prepare(`UPDATE channel_command SET lease_expires_at = ?
+      WHERE id = ? AND status = 'claimed' AND attempts = ?`).bind(leaseExpiresAt, command.id, command.attempts).run();
+    if (extended.meta.changes === 1) command.leaseExpiresAt = leaseExpiresAt;
+  }
   const sends = claimed.filter((c) => SEND_KINDS.has(c.kind) && c.channelAccountId);
   if (!sends.length) return claimed;
   const accountIds = [...new Set(sends.map((c) => c.channelAccountId!))];
@@ -94,6 +123,7 @@ bridgeRoutes.post('/events', async (c) => {
 });
 
 bridgeRoutes.get('/commands', async (c) => {
+  await recordBridgeSeen(c.env.DB);
   const raw = c.req.query('wait');
   const wait = raw === undefined || raw === '' ? 0 : Number(raw);
   if (!Number.isInteger(wait)) return c.json(invalid({ wait: 'Phải là số giây nguyên' }), 422);

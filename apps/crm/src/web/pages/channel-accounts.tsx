@@ -7,7 +7,7 @@ import {
 } from '../api';
 import { Alert, Badge, Empty, ErrorState, Field, FormError, Loading, Modal, fieldErrors, useToast, type Tone } from '../components/ui';
 import { fmtAgo, fmtDateTime } from '../format';
-import type { ChannelAccount, ChannelAccountUpdate, CustomerBotSwitch } from '../types';
+import type { ChannelAccount, ChannelAccountList, ChannelAccountUpdate, CustomerBotSwitch } from '../types';
 
 /** Polling while an admin waits for a login QR or the connection that follows it. */
 const CONNECT_POLL_MS = 2000;
@@ -32,7 +32,7 @@ export function ChannelAccountsPage() {
   const [connectingId, setConnectingId] = useState<string | null>(null);
   const [editing, setEditing] = useState<ChannelAccount | null>(null);
   const [disconnecting, setDisconnecting] = useState<ChannelAccount | null>(null);
-  const accounts = useQuery<ChannelAccount[], ApiFailure>({
+  const accounts = useQuery<ChannelAccountList, ApiFailure>({
     queryKey: ACCOUNTS_KEY,
     queryFn: listAccounts,
     enabled: isAdmin,
@@ -43,7 +43,9 @@ export function ChannelAccountsPage() {
   const connect = useAccountMutation(connectAccount);
   const startConnect = (id: string) => { setConnectingId(id); connect.mutate(id); };
   if (!isAdmin) return <Alert tone="warn">Chỉ Admin quản lý tài khoản kênh.</Alert>;
-  const connecting = accounts.data?.find((a) => a.id === connectingId) ?? null;
+  const rows = accounts.data?.accounts ?? [];
+  const connecting = rows.find((a) => a.id === connectingId) ?? null;
+  const bridgeOffline = accounts.data?.bridgeOnline === false;
 
   return (
     <>
@@ -56,13 +58,16 @@ export function ChannelAccountsPage() {
       <div className="stack">
         <CustomerBotSwitchCard />
         <AddAccountCard />
+        {bridgeOffline && rows.some((account) => account.channel === 'zalo') && (
+          <Alert tone="warn">{bridgeOfflineMessage(accounts.data?.bridgeLastSeenAt ?? null)}</Alert>
+        )}
         <section className="card">
           <div className="card-head"><h2>Danh sách tài khoản</h2></div>
           {accounts.isLoading && <div className="card-body"><Loading rows={3} /></div>}
           {accounts.error && <div className="card-body"><ErrorState error={accounts.error} onRetry={() => accounts.refetch()} /></div>}
-          {accounts.data && !accounts.data.length && <Empty title="Chưa có tài khoản kênh">Thêm số Zalo hoặc Fanpage ở trên để bắt đầu.</Empty>}
+          {accounts.data && !rows.length && <Empty title="Chưa có tài khoản kênh">Thêm số Zalo hoặc Fanpage ở trên để bắt đầu.</Empty>}
           {toggle.error && <div className="card-body"><FormError error={toggle.error} /></div>}
-          {!!accounts.data?.length && (
+          {rows.length > 0 && (
             <div className="table-wrap">
               <table className="table responsive">
                 <thead>
@@ -72,7 +77,7 @@ export function ChannelAccountsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {accounts.data.map((a) => (
+                  {rows.map((a) => (
                     <tr key={a.id}>
                       <td data-label="Tên"><div className="cell-title">{a.displayName}</div>{a.externalId && <div className="cell-sub mono">{a.externalId}</div>}</td>
                       <td data-label="Kênh">{a.channel === 'facebook' ? 'Fanpage' : 'Zalo'}</td>
@@ -119,7 +124,8 @@ export function ChannelAccountsPage() {
         </section>
       </div>
       {connectingId && (
-        <ConnectDialog account={connecting} connect={connect} onRetry={() => connect.mutate(connectingId)} onClose={() => setConnectingId(null)} />
+        <ConnectDialog account={connecting} bridgeOffline={bridgeOffline} bridgeLastSeenAt={accounts.data?.bridgeLastSeenAt ?? null}
+          receivedAt={accounts.dataUpdatedAt} connect={connect} onRetry={() => connect.mutate(connectingId)} onClose={() => setConnectingId(null)} />
       )}
       {editing && <EditAccountDialog account={editing} onClose={() => setEditing(null)} />}
       {disconnecting && <DisconnectDialog account={disconnecting} onClose={() => setDisconnecting(null)} />}
@@ -196,9 +202,18 @@ function useNow(active: boolean) {
 
 type ConnectState = Pick<UseMutationResult<unknown, ApiFailure, string>, 'isPending' | 'isSuccess' | 'isError' | 'error'>;
 
+function bridgeOfflineMessage(lastSeenAt: string | null): string {
+  const parsed = lastSeenAt ? Date.parse(lastSeenAt) : NaN;
+  const hm = Number.isFinite(parsed)
+    ? new Intl.DateTimeFormat('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(parsed)
+    : '—';
+  return `Máy chạy bridge đang tắt (lần cuối: ${hm}). Bật lại máy hoặc chạy lại 'ABM Zalo Bridge'.`;
+}
+
 /** Follows a queued bridge login (the account list polls every 2 s) through QR to connected. */
-function ConnectDialog({ account, connect, onRetry, onClose }: {
-  account: ChannelAccount | null; connect: ConnectState; onRetry: () => void; onClose: () => void;
+function ConnectDialog({ account, bridgeOffline, bridgeLastSeenAt, receivedAt, connect, onRetry, onClose }: {
+  account: ChannelAccount | null; bridgeOffline: boolean; bridgeLastSeenAt: string | null; receivedAt: number;
+  connect: ConnectState; onRetry: () => void; onClose: () => void;
 }) {
   const toast = useToast();
   const status = account?.status;
@@ -208,25 +223,28 @@ function ConnectDialog({ account, connect, onRetry, onClose }: {
   }, [connected, account?.displayName, onClose, toast]);
   const showQr = connect.isSuccess && status === 'qr_pending' && Boolean(account?.qrImage);
   const now = useNow(showQr);
-  const expiresIn = account?.qrExpiresAt ? Math.max(0, Math.floor((Date.parse(account.qrExpiresAt) - now) / 1000)) : null;
+  // Count down from the Worker's remaining seconds. Only the age of this response is subtracted, never the browser clock against qrExpiresAt.
+  const elapsed = receivedAt > 0 ? Math.floor(Math.max(0, now - receivedAt) / 1000) : 0;
+  const expiresIn = account?.qrExpiresInSeconds == null ? null : Math.max(0, account.qrExpiresInSeconds - elapsed);
   const expired = expiresIn === 0;
 
   return (
     <Modal open title={`Kết nối ${account?.displayName ?? 'Zalo'}`} onClose={onClose} footer={<>
-      {(expired || status === 'error' || connect.isError) && (
+      {(expired || status === 'error' || connect.isError || bridgeOffline) && (
         <button className="btn btn-primary" disabled={connect.isPending} onClick={onRetry}>Tạo mã mới</button>
       )}
       <button className="btn" onClick={onClose}>Đóng</button>
     </>}>
       <FormError error={connect.error} />
+      {bridgeOffline && <Alert tone="warn">{bridgeOfflineMessage(bridgeLastSeenAt)}</Alert>}
       {connect.isPending && <p className="text-2">Đang gửi yêu cầu đăng nhập…</p>}
       {connect.isSuccess && status === 'error' && (
         <Alert tone="danger">
           Bridge báo lỗi khi đăng nhập{account?.lastError ? <> (<span className="mono">{account.lastError}</span>)</> : null}. Kiểm tra máy chạy bridge rồi tạo mã mới.
         </Alert>
       )}
-      {connect.isSuccess && !showQr && status !== 'error' && (
-        <p className="text-2" role="status">Đang chờ bridge tạo mã QR… Nếu chờ lâu, kiểm tra máy chạy bridge có đang mở không.</p>
+      {connect.isSuccess && !showQr && status !== 'error' && !bridgeOffline && (
+        <p className="text-2" role="status">Đang chờ bridge tạo mã QR…</p>
       )}
       {showQr && account?.qrImage && (
         <div className="stack" style={{ alignItems: 'center' }}>

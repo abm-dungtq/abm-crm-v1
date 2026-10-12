@@ -769,11 +769,12 @@ const bridgeAccountStatusEvent = z.object({
   message: 'accountExternalId is required when status is connected',
   path: ['accountExternalId'],
 });
+// The Worker sets the QR expiry from its own clock when the event arrives. An `expiresAt` sent by an
+// older bridge is an unknown key and is ignored, so a drifting PC clock cannot expire a fresh code.
 const bridgeQrEvent = z.object({
   type: z.literal('qr'),
   accountId: id,
   imageDataUrl: z.string().startsWith('data:image/').max(500_000),
-  expiresAt: isoInstant,
 });
 const bridgeGroupListEvent = z.object({
   type: z.literal('group_list'),

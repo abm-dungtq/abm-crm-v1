@@ -11,6 +11,7 @@ import { CodedError, errorCode, silentLogger, type Logger } from './config';
  *   X-Bridge-Timestamp: Unix time in whole seconds
  *   X-Bridge-Signature: hex HMAC-SHA256(BRIDGE_SECRET, timestamp + "." + body); a GET signs timestamp + "."
  * The body is serialized once and that exact string is both signed and sent. No Origin header is sent.
+ * The timestamp uses Worker time once a response Date header has been seen, so a drifting PC clock still signs inside the allowed window.
  */
 
 /** Hex HMAC-SHA256 of `timestamp.body`, as the Worker verifies it. */
@@ -67,6 +68,10 @@ export class CrmClient {
   private readonly pending: BridgeEvent[] = [];
   /** Tail of the push chain: at most one pushEvents request is in flight. */
   private flushing: Promise<void> = Promise.resolve();
+  /** Worker time minus this PC's time, learned from response Date headers. Zero until the first Date is seen. */
+  private clockOffsetMs = 0;
+  /** Last skew, in whole seconds, already logged. Cleared once the skew falls back to 30 s or less. */
+  private loggedSkewSeconds: number | null = null;
 
   constructor(private readonly options: CrmClientOptions) {
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
@@ -144,14 +149,15 @@ export class CrmClient {
 
   /**
    * Reports a command result. Network errors, 5xx and auth failures are retried after 2, 4 and 8 seconds and then
-   * every 8 seconds while `retryUntil` (epoch ms, normally the lease expiry) has not passed. Any other 4xx is final.
+   * every 8 seconds while Worker time (this PC's clock plus the learned offset) is still more than 8 seconds
+   * before `retryUntil` (epoch ms, normally the lease expiry). Any other 4xx is final.
    * A stale result is answered with { ignored: true }: it needs no resend, but the Worker did not apply it.
    */
   async postResult(id: string, result: BridgeCommandResult, retryUntil = 0): Promise<ResultDelivery> {
     const body = JSON.stringify(result);
     const path = `/api/bridge/commands/${encodeURIComponent(id)}/result`;
     let outcome = await this.withRetry(() => this.request('POST', path, body));
-    while (outcome.kind === 'retryable' && this.now() + RETRY_DELAYS_MS[2] < retryUntil) {
+    while (outcome.kind === 'retryable' && this.now() + this.clockOffsetMs + RETRY_DELAYS_MS[2] < retryUntil) {
       await this.sleep(RETRY_DELAYS_MS[2]);
       outcome = await this.request('POST', path, body);
     }
@@ -175,8 +181,35 @@ export class CrmClient {
     return outcome;
   }
 
+  /**
+   * Stores Worker time minus local time. Logs `clock.skew` the first time the rounded offset passes 30 s,
+   * then again only when that logged offset moves by 5 s or more.
+   */
+  private noteServerDate(response: Response): void {
+    const raw = response.headers.get('Date');
+    if (!raw) return;
+    const serverMs = Date.parse(raw);
+    if (!Number.isFinite(serverMs)) return;
+    this.clockOffsetMs = serverMs - this.now();
+    const seconds = Math.round(this.clockOffsetMs / 1000);
+    if (Math.abs(seconds) <= 30) {
+      this.loggedSkewSeconds = null;
+      return;
+    }
+    if (this.loggedSkewSeconds !== null && Math.abs(seconds - this.loggedSkewSeconds) < 5) return;
+    this.loggedSkewSeconds = seconds;
+    this.log('warn', 'clock.skew', { offsetSeconds: seconds });
+  }
+
   private async request(method: 'GET' | 'POST', path: string, body: string, timeoutMs = REQUEST_TIMEOUT_MS): Promise<SendOutcome> {
-    const timestamp = String(Math.floor(this.now() / 1000));
+    return this.send(method, path, body, timeoutMs, false);
+  }
+
+  private async send(
+    method: 'GET' | 'POST', path: string, body: string, timeoutMs: number, clockRetried: boolean,
+  ): Promise<SendOutcome> {
+    const sentOffset = this.clockOffsetMs;
+    const timestamp = String(Math.floor((this.now() + sentOffset) / 1000));
     const headers: Record<string, string> = {
       'X-Bridge-Timestamp': timestamp,
       'X-Bridge-Signature': signBridgeRequest(this.options.secret, timestamp, body),
@@ -190,11 +223,18 @@ export class CrmClient {
     } catch (error) {
       return { kind: 'retryable', code: errorCode(error) === 'TimeoutError' ? 'CRM_TIMEOUT' : 'CRM_NETWORK' };
     }
+    this.noteServerDate(response);
+    // The first request uses local time. A 401 whose Date header shows more than 60 s of skew is sent once more
+    // with the corrected timestamp, before the usual auth retries.
+    if (response.status === 401 && !clockRetried && Math.abs(this.clockOffsetMs - sentOffset) > 60_000) {
+      await response.body?.cancel().catch(() => {});
+      return this.send(method, path, body, timeoutMs, true);
+    }
     if (response.status >= 500) {
       await response.body?.cancel().catch(() => {});
       return { kind: 'retryable', code: `CRM_HTTP_${response.status}` };
     }
-    // Authentication failed: nothing was processed, and it lasts until an operator fixes the secret or the clock.
+    // Authentication failed: nothing was processed, and it lasts until an operator fixes the secret.
     if (response.status === 401 || response.status === 403) {
       await response.body?.cancel().catch(() => {});
       this.log('error', 'crm.auth_failed', { code: 'CRM_AUTH', status: response.status, path: path.split('?')[0] });

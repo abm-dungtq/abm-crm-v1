@@ -78,7 +78,9 @@ export async function enqueueCommand(db: D1Database, input: EnqueueCommandInput)
   return existing.id;
 }
 
-const CLAIMABLE = `((status = 'pending' AND next_run_at <= ?) OR (status = 'claimed' AND lease_expires_at < ?))`;
+// A login whose lease ran out is not run again: its QR codes are long gone and nobody may be watching.
+// The scheduled job fails it with BRIDGE_OFFLINE instead.
+const CLAIMABLE = `((status = 'pending' AND next_run_at <= ?) OR (status = 'claimed' AND lease_expires_at < ? AND kind <> 'zalo_login'))`;
 
 /**
  * Claims up to `limit` due commands for `target`: pending ones whose run time has come and claimed ones

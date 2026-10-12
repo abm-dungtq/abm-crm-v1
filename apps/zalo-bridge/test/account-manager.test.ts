@@ -48,7 +48,7 @@ async function loggedIn() {
   const session = new FakeSession();
   const connector: ZaloConnector = {
     loginWithQr: vi.fn(async (onQr: (qr: QrCode) => void) => {
-      onQr({ imageDataUrl: 'data:image/png;base64,AAAA', expiresAt: new Date('2026-10-08T07:01:40.000Z') });
+      onQr({ imageDataUrl: 'data:image/png;base64,AAAA' });
       return session;
     }),
     loginWithSaved: vi.fn(async () => session),
@@ -64,7 +64,7 @@ const messages = () => events.filter((e): e is Extract<BridgeEvent, { type: 'mes
 describe('AccountManager', () => {
   it('QR login pushes the QR, connected with the own uid, and the group list, and saves the session', async () => {
     await loggedIn();
-    expect(events[0]).toEqual({ type: 'qr', accountId: 'acc-1', imageDataUrl: 'data:image/png;base64,AAAA', expiresAt: '2026-10-08T07:01:40.000Z' });
+    expect(events[0]).toEqual({ type: 'qr', accountId: 'acc-1', imageDataUrl: 'data:image/png;base64,AAAA' });
     expect(events).toContainEqual({ type: 'account_status', accountId: 'acc-1', accountExternalId: 'own-uid', status: 'connected' });
     expect(events).toContainEqual({ type: 'group_list', accountExternalId: 'own-uid', groups: [{ threadId: 'g1', name: 'Nhóm 1' }] });
     expect(await readdir(dir)).toEqual(['acc-1.json']);

@@ -158,6 +158,8 @@ export function accountErrorReason(lastError: string | undefined): string | null
 
 /** How long after an admin asks for a Zalo login a `connected` status still counts as that admin's reconnect. */
 export const ADMIN_RECONNECT_WINDOW_MS = 15 * 60_000;
+/** How long a login QR stays scannable after the Worker receives it. The bridge clock is not used. */
+export const QR_IMAGE_TTL_MS = 90_000;
 
 async function ingestAccountStatus(db: D1Database, event: AccountStatusEvent, now: string) {
   const connected = event.status === 'connected';
@@ -191,8 +193,9 @@ async function ingestAccountStatus(db: D1Database, event: AccountStatusEvent, no
 }
 
 async function ingestQr(db: D1Database, event: QrEvent, now: string) {
+  const expiresAt = new Date(Date.parse(now) + QR_IMAGE_TTL_MS).toISOString();
   const res = await db.prepare(`UPDATE channel_account SET qr_image = ?, qr_expires_at = ?, status = 'qr_pending', last_seen_at = ?, updated_at = ?
-    WHERE id = ?`).bind(event.imageDataUrl, event.expiresAt, now, now, event.accountId).run();
+    WHERE id = ?`).bind(event.imageDataUrl, expiresAt, now, now, event.accountId).run();
   return res.meta.changes === 1;
 }
 

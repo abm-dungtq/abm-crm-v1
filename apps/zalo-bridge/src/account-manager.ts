@@ -81,7 +81,7 @@ export class AccountManager {
     this.closeSession(account);
     try {
       const session = await this.options.connector.loginWithQr((qr) => {
-        this.options.emit([{ type: 'qr', accountId, imageDataUrl: qr.imageDataUrl, expiresAt: qr.expiresAt.toISOString() }]);
+        this.options.emit([{ type: 'qr', accountId, imageDataUrl: qr.imageDataUrl }]);
       });
       if (this.stopped) {
         session.close();

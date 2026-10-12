@@ -10,7 +10,7 @@ import { IntakeCard } from '../components/intake-card';
 import { roleLabel } from '../components/layout';
 import { Empty, ErrorState, FormError, Loading, useDebounced, useToast } from '../components/ui';
 import { fmtDateTime } from '../format';
-import type { AssignResult, ChannelAccount, ConversationFilter, InboxConversation, RosterMember, SetModeResult } from '../types';
+import type { AssignResult, ChannelAccountList, ConversationFilter, InboxConversation, RosterMember, SetModeResult } from '../types';
 import { INBOX_SETTINGS_ROLES, ROSTER_KEY } from './inbox-settings';
 
 /** Conversation list polling interval. */
@@ -79,7 +79,7 @@ function ConversationList({ selectedId }: { selectedId: string | null }) {
   const [mode, setModeFilter] = useState<ConversationMode | ''>('');
   const [search, setSearch] = useState('');
   const q = useDebounced(search.trim(), 300);
-  const accounts = useQuery<ChannelAccount[], ApiFailure>({ queryKey: ['inbox', 'accounts'], queryFn: listAccounts, staleTime: 60_000 });
+  const accounts = useQuery<ChannelAccountList, ApiFailure>({ queryKey: ['inbox', 'accounts'], queryFn: listAccounts, staleTime: 60_000 });
 
   const filter: ConversationFilter = {
     assignee: tab === 'mine' ? actor.id : tab === 'none' ? 'none' : undefined,
@@ -115,7 +115,7 @@ function ConversationList({ selectedId }: { selectedId: string | null }) {
         <div className="row">
           <select aria-label="Lọc theo tài khoản kênh" value={account} onChange={(e) => setAccount(e.target.value)}>
             <option value="">Mọi tài khoản</option>
-            {accounts.data?.map((a) => <option key={a.id} value={a.id}>{a.channel === 'facebook' ? 'Fanpage' : 'Zalo'} · {a.displayName}</option>)}
+            {accounts.data?.accounts.map((a) => <option key={a.id} value={a.id}>{a.channel === 'facebook' ? 'Fanpage' : 'Zalo'} · {a.displayName}</option>)}
           </select>
           <select aria-label="Lọc theo chế độ" value={mode} onChange={(e) => setModeFilter(e.target.value as ConversationMode | '')}>
             <option value="">Mọi chế độ</option>
