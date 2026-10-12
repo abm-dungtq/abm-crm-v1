@@ -96,3 +96,28 @@ User đồng ý trong chat ("cook xong thì push lên cloudflare") cho backup, m
 - 455 test đạt. Version `0eb90126-cfba-4944-ac12-de6e091e5f4a`, hai cron vẫn đăng ký.
 - Smoke: `/api/health` `{"ok":true}`; `GET /` 200; bundle mới có `section-tabs`; `/api/bridge/commands` không chữ ký trả 401. Sidecar vẫn `Running`, không có `poll_failed`.
 - Rollback về `88f78b4c-d4b2-49bd-92b8-5eea8f5d431e`. Bản này có đủ API bridge, nên không cần dừng sidecar.
+
+## Deploy 2026-10-12 17:44: đăng nhập QR Zalo không phụ thuộc giờ máy bridge
+
+- **Nguyên nhân:**
+  - Đồng hồ máy chạy bridge bị lệch: chậm 114 giây ngày 10/10, chậm 21 giây ngày 12/10. Dịch vụ Windows Time bị tắt, và không có quyền Admin để bật lại.
+  - Vì vậy mã QR lên CRM thì đã hết hạn.
+  - Cửa sổ bridge bị đóng bằng Ctrl+C và không tự chạy lại.
+- **Cách sửa:**
+  - Hạn mã QR do Worker đặt theo giờ của Worker.
+  - Bridge ký request theo độ lệch so với giờ Worker.
+  - Giao diện đếm ngược tính từ lúc nhận phản hồi.
+  - Lệnh đăng nhập mà bridge không chạy sẽ hỏng với lỗi `BRIDGE_OFFLINE` sau 3 phút.
+  - Lệnh đăng nhập hết lease không bao giờ được claim lại.
+- **Commit:** `119f29e`.
+- **Backup:** `D:\TQD\crm-backups-private\abm-crm-eval-before-0018-20261012.sql` (539 174 byte). Bookmark trước migration: `00000087-00000000-00005102-5548f0e62dfe92233e5c8a6efd2a8826`.
+- **Migration và Worker:** đã áp `0018_bridge_last_seen.sql`. Worker version `02786ac2-e250-43c5-809b-39a88750ce72`, hai cron vẫn đăng ký.
+- **Task "ABM Zalo Bridge":**
+  - Đã cài lại bằng lệnh `powershell.exe -NoProfile -ExecutionPolicy Bypass -File apps\zalo-bridge\scripts\install-startup-task.ps1`.
+  - Chạy bằng `conhost.exe --headless`, lặp mỗi 5 phút, chế độ `IgnoreNew`.
+  - Đang `Running`, có 1 tiến trình bridge.
+- **Kiểm tra:**
+  - `bridge_last_seen_at` đã cập nhật, lần gần nhất cách lúc kiểm 20 giây.
+  - Lệnh `zalo_logout` đang chờ đã chạy xong.
+  - Mã QR mới có `qr_expires_at` còn 35 giây khi đọc. Trước đây mã nào lên cũng đã quá hạn.
+- **Rollback Worker:** chỉ `npx wrangler rollback` về `0eb90126-cfba-4944-ac12-de6e091e5f4a` sau khi đã dừng task bridge. Lý do: bridge mới gửi sự kiện QR không có `expiresAt`, Worker cũ sẽ từ chối.
