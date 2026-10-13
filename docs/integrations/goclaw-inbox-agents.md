@@ -19,27 +19,50 @@ Thay đổi cấu hình GoClaw (tạo agent, sửa prompt, đổi model) cần u
 
 ## 1. Agent khách hàng
 
-Vai trò: tư vấn viên và chăm sóc khách hàng của ABM trên Zalo/Fanpage.
+Agent `sale-tu-van`: chuyên viên tư vấn và hỗ trợ khách của ABM trên Zalo/Fanpage. Từ 13/10/2026, agent này dùng bộ nạp chatbot ABM v8.0 (06/10/2026). Bộ nạp nằm ở `exports/bo-nap-chatbot-v8/`; thư mục `exports/` không đưa lên git.
 
-Prompt hệ thống:
+| Context file | Nội dung |
+| --- | --- |
+| `SOUL.md` | `SYSTEM-INSTRUCTION.md` của bộ v8, cộng phần vận hành kênh CRM. Phần CRM gồm: văn bản thuần không Markdown; không hỏi khu vực hay múi giờ; cách đọc `[Tệp đính kèm]` và `[Nhân viên đã trao đổi: ...]`; danh sách trường hợp HANDOFF |
+| `CAPABILITIES.md` | Chín tài liệu KB01–KB09 đã bỏ front matter, khoảng 102.000 ký tự. Đây là phần prompt ổn định nên được cache |
+| `AGENTS.md` | Quy trình trả lời mỗi lượt |
+| `IDENTITY.md`, `USER_PREDEFINED.md` | Tên Long, lời chào tin đầu, cách trả lời câu "người hay A.I", nhóm khách của kênh |
 
-```text
-Bạn là tư vấn viên chăm sóc khách hàng của ABM, trả lời khách trên Zalo và Fanpage bằng tiếng Việt, lịch sự, ngắn gọn.
+**Danh tính.** Bot tên Long, giới thiệu là "chuyên viên hỗ trợ kĩ thuật của ABM". Khi khách hỏi thẳng là người hay A.I, bot trả lời trung thực rằng mình là trợ lý A.I.
 
-Quy tắc:
-- Chỉ trả lời theo kiến thức đã được duyệt mà bạn tra được. Không bịa giá, học phí, lịch học, ưu đãi hay chính sách.
-- Nếu không chắc, nói rằng bạn sẽ nhờ nhân viên kiểm tra, rồi chuyển cho nhân viên.
-- Không hỏi hay nhắc lại thông tin nhạy cảm ngoài những gì khách tự cung cấp.
-- Tin nhắn bắt đầu bằng "[Nhân viên đã trao đổi: ...]" là phần nhân viên đã nói với khách; dùng nó làm ngữ cảnh, không nhắc lại nguyên văn.
+**Xưng hô theo hồ sơ Zalo.**
 
-Chuyển cho nhân viên khi khách: cần gặp người thật, hỏi điều ngoài kiến thức đã duyệt, phàn nàn, muốn chốt đơn hoặc đăng ký, hoặc yêu cầu gặp nhân viên.
-Khi chuyển, viết câu trả lời ngắn cho khách (ví dụ: em đã báo nhân viên, nhân viên sẽ liên hệ ngay), rồi kết thúc bằng MỘT DÒNG RIÊNG đúng mẫu:
-[HANDOFF: <lý do ngắn>]
+- Với hội thoại Zalo 1-1, payload `run_completion` (`purpose: 'reply'`) có thêm `zaloUserId`, là mã thread của khách.
+- Sidecar gọi `getUserInfo` của zca-js để lấy tên hiển thị và giới tính (`0` là nam, `1` là nữ). Kết quả được nhớ 24 giờ, không có hồ sơ thì nhớ 1 giờ, mỗi lần tra chờ tối đa 5 giây.
+- Sidecar thêm một dòng `[Hồ sơ Zalo của khách: tên "..."; giới tính: nam|nữ|không rõ]` vào đầu tin gửi GoClaw.
+- Tra lỗi thì sidecar gửi tin như cũ, không thêm dòng này. Facebook và nhóm không có dòng này.
 
-Không bao giờ viết chữ HANDOFF ở bất kỳ câu nào khác.
-```
+**Tài khoản Zalo là nick cá nhân.** Khi nhường việc cho người thật, bot không bao giờ nói với khách là "chuyển cho nhân viên/chuyên viên". Bot đưa một lý do đúng thực tế, ví dụ "em kiểm tra lại lịch rồi nhắn Anh/Chị", "em đối soát giao dịch rồi xác nhận lại", rồi kết thúc tin bằng một dòng riêng `[HANDOFF: <lý do ngắn>]`.
 
 Worker nhận dòng khớp `^\[HANDOFF:\s*(.+?)\]\s*$`, bỏ dòng đó khỏi tin gửi khách, chuyển hội thoại sang `human` và báo nhóm Lark.
+
+Các trường hợp bot nhường cho người:
+
+- Khách chốt đăng ký hoặc báo đã chuyển khoản. Bot gửi trước giá, cọc và tài khoản MB đúng KB03.
+- Khách hỏi lịch, link, địa điểm (bộ v8 chưa có lịch được xác nhận).
+- Khách đặt lịch Zoom tư vấn.
+- Báo giá Inhouse/DWY/LMS.
+- Giảm giá, trả góp, ngoại lệ.
+- Khiếu nại, lỗi truy cập.
+- Các dữ kiện bộ v8 ghi "cần cập nhật" (quà tặng, đầu mối, SLA, case theo ngành).
+- Khách muốn gặp người thật.
+
+**Dựng, áp dụng và thử.** Các script nằm ở `D:\Goclaw\plans\261013-sale-tu-van-kb\`:
+
+- Chạy `node apply-kb-v8.mjs` để xem bản dựng trong `out/`.
+- Chạy `node apply-kb-v8.mjs --apply` để ghi lên GoClaw, ghi xong tự đọc lại để kiểm.
+- Chạy `node run-kb-tests.mjs [mã ca...]` để chạy 71 ca của bộ v8 cùng các ca kênh CRM. Mỗi ca dùng một user thử riêng, phiên thử bị xoá sau khi chạy, kết quả ghi ra `test-results-*.md`.
+- Rollback bằng bản sao `D:\Goclaw\backups\sale-tu-van-before-kb-v8-20261013.json`.
+- Script dựng ban đầu `setup-inbox-agents.mjs` không còn ghi context file của `sale-tu-van`.
+
+**Chi phí.** Mỗi lượt trả lời tốn khoảng 57.000 token đầu vào, phần lớn là bộ kiến thức đã được cache.
+
+**Cập nhật kiến thức.** Sửa tệp KB trong bộ nạp rồi chạy lại apply và test. GoClaw tự gắn kịch bản "làm quen người dùng mới" (BOOTSTRAP) cho 3 lượt đầu của mỗi khách. Phần CRM trong `SOUL.md` ghi đè việc hỏi khu vực, múi giờ và ngôn ngữ.
 
 ## 2. `crm-extractor`
 
