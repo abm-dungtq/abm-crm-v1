@@ -2,7 +2,7 @@ import { readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { BridgeEvent } from '@abm/contracts';
 import { CodedError, errorCode, silentLogger, type Logger } from './config';
-import type { IncomingMessage, ThreadKind, ZaloConnector, ZaloSession } from './zalo-client';
+import type { IncomingMessage, ThreadKind, ZaloConnector, ZaloSession, ZaloUserProfile } from './zalo-client';
 
 /**
  * Session lifecycle of every Zalo account the bridge holds. One session file per CRM account id lives in
@@ -128,6 +128,13 @@ export class AccountManager {
     for (const [msgId, entry] of this.sent) if (now - entry.at > SENT_ID_TTL_MS) this.sent.delete(msgId);
     this.sent.set(result.msgId, { commandId, at: now });
     return result;
+  }
+
+  /** Profile of a Zalo user on this account. Null when the account has no live session. */
+  async profile(accountId: string, zaloUserId: string): Promise<ZaloUserProfile | null> {
+    const session = this.accounts.get(accountId)?.session;
+    if (!session) return null;
+    return session.getUserProfile(zaloUserId);
   }
 
   /** Stops every session and timer; used on shutdown. */

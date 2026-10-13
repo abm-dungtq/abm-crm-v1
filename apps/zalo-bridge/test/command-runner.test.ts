@@ -1,6 +1,7 @@
 import type { BridgeCommandResult } from '@abm/contracts';
 import { describe, expect, it, vi } from 'vitest';
 import { CommandRunner, splitIntoChunks, type RunnerAccounts } from '../src/command-runner';
+import type { ZaloUserProfile } from '../src/zalo-client';
 import type { BridgeCommand, ResultDelivery } from '../src/crm-client';
 
 function deferred<T>() {
@@ -24,6 +25,7 @@ function setup(overrides: { complete?: (r: { text: string }) => Promise<string>;
     login: vi.fn(async () => {}),
     logout: vi.fn(async () => {}),
     send: vi.fn(overrides.send ?? (async () => ({ msgId: String(msgId++) }))),
+    profile: vi.fn(async (): Promise<ZaloUserProfile | null> => null),
   };
   const sleep = vi.fn(async (_ms: number) => {});
   const runner = new CommandRunner({ crm, goclaw, accounts, sendMinDelayMs: 1500, sendMaxDelayMs: 4000, sleep, random: () => 0.5 });
@@ -226,5 +228,79 @@ describe('CommandRunner', () => {
     await runner.idle();
     expect(sleep).toHaveBeenCalledWith(5000);
     expect(crm.postResult).toHaveBeenCalledTimes(1);
+  });
+
+  it('prepends the Zalo profile line and maps gender to nam, nữ, or không rõ', async () => {
+    const cases = [
+      { name: 'Hùng', gender: 'male' as const, label: 'nam' },
+      { name: 'Lan', gender: 'female' as const, label: 'nữ' },
+      { name: 'An', gender: null, label: 'không rõ' },
+    ];
+    for (const [index, item] of cases.entries()) {
+      const { runner, goclaw, accounts } = setup();
+      accounts.profile.mockResolvedValue({ name: item.name, gender: item.gender });
+      runner.dispatch(command(`c${index}`, 'run_completion', { agentKey: 'bot', userId: 'u', text: 'xin chào', zaloUserId: 'uid-1' }));
+      await runner.idle();
+      expect(accounts.profile).toHaveBeenCalledTimes(1);
+      expect(accounts.profile).toHaveBeenCalledWith('acc-1', 'uid-1');
+      expect(goclaw.complete).toHaveBeenCalledWith({
+        agentKey: 'bot',
+        userId: 'u',
+        text: `[Hồ sơ Zalo của khách: tên "${item.name}"; giới tính: ${item.label}]\nxin chào`,
+      });
+    }
+  });
+
+  it('keeps the text unchanged when the profile lookup throws and still completes', async () => {
+    const { runner, goclaw, accounts, results } = setup();
+    accounts.profile.mockRejectedValue(Object.assign(new Error('ZALO_DOWN'), { code: 'ZALO_DOWN' }));
+    runner.dispatch(command('c1', 'run_completion', { agentKey: 'bot', userId: 'u', text: 'xin chào', zaloUserId: 'uid-1' }));
+    await runner.idle();
+    expect(goclaw.complete).toHaveBeenCalledWith({ agentKey: 'bot', userId: 'u', text: 'xin chào' });
+    expect(results).toEqual([{ id: 'c1', result: { attempts: 1, ok: true, text: 'reply' } }]);
+  });
+
+  it('does not look up the same profile twice', async () => {
+    const { runner, goclaw, accounts } = setup();
+    accounts.profile.mockResolvedValue({ name: 'Hùng', gender: 'male' });
+    runner.dispatch(command('c1', 'run_completion', { agentKey: 'bot', userId: 'u', text: 'một', zaloUserId: 'uid-1' }));
+    await runner.idle();
+    runner.dispatch(command('c2', 'run_completion', { agentKey: 'bot', userId: 'u', text: 'hai', zaloUserId: 'uid-1' }));
+    await runner.idle();
+    expect(accounts.profile).toHaveBeenCalledTimes(1);
+    expect(goclaw.complete).toHaveBeenNthCalledWith(1, {
+      agentKey: 'bot', userId: 'u', text: '[Hồ sơ Zalo của khách: tên "Hùng"; giới tính: nam]\nmột',
+    });
+    expect(goclaw.complete).toHaveBeenNthCalledWith(2, {
+      agentKey: 'bot', userId: 'u', text: '[Hồ sơ Zalo của khách: tên "Hùng"; giới tính: nam]\nhai',
+    });
+  });
+
+  it('does not look up a profile when zaloUserId or the account is absent', async () => {
+    const { runner, goclaw, accounts } = setup();
+    runner.dispatch(command('c1', 'run_completion', { agentKey: 'bot', userId: 'u', text: 'xin chào' }));
+    await runner.idle();
+    runner.dispatch({ ...command('c2', 'run_completion', { agentKey: 'bot', userId: 'u', text: 'xin chào', zaloUserId: 'uid-1' }, 'conv-2'), channelAccountId: null });
+    await runner.idle();
+    expect(accounts.profile).not.toHaveBeenCalled();
+    expect(goclaw.complete).toHaveBeenNthCalledWith(1, { agentKey: 'bot', userId: 'u', text: 'xin chào' });
+    expect(goclaw.complete).toHaveBeenNthCalledWith(2, { agentKey: 'bot', userId: 'u', text: 'xin chào' });
+  });
+
+  it('treats a profile lookup that exceeds 5 seconds as no profile and still completes', async () => {
+    vi.useFakeTimers();
+    try {
+      const { runner, goclaw, accounts, results } = setup();
+      accounts.profile.mockReturnValue(new Promise(() => {}));
+      runner.dispatch(command('c1', 'run_completion', { agentKey: 'bot', userId: 'u', text: 'xin chào', zaloUserId: 'uid-1' }));
+      await vi.advanceTimersByTimeAsync(4999);
+      expect(goclaw.complete).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await runner.idle();
+      expect(goclaw.complete).toHaveBeenCalledWith({ agentKey: 'bot', userId: 'u', text: 'xin chào' });
+      expect(results).toEqual([{ id: 'c1', result: { attempts: 1, ok: true, text: 'reply' } }]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

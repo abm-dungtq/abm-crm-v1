@@ -97,7 +97,13 @@ export async function scheduleCompletion(db: D1Database, conversationId: string,
   if (extended.meta.changes === 0) {
     await enqueueCommand(db, {
       kind: 'run_completion', target: 'bridge', channelAccountId: conv.channel_account_id, conversationId,
-      payload: { agentKey: conv.agent_key, userId: goclawUserId(conv), text: turn, conversationId, purpose: 'reply' },
+      payload: {
+        agentKey: conv.agent_key, userId: goclawUserId(conv), text: turn, conversationId, purpose: 'reply',
+        // Only a Zalo 1-1 thread has a user id the bridge can resolve to a profile name and gender.
+        ...(conv.channel === 'zalo' && conv.kind === 'direct' && conv.external_thread_id
+          ? { zaloUserId: conv.external_thread_id }
+          : {}),
+      },
       dedupeKey: `completion:${messageId}`, runAt,
     });
   }

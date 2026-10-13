@@ -116,6 +116,7 @@ test('a wrong or missing signature is rejected; a signed message enters the inbo
   const [completion] = await commands('run_completion');
   expect(completion).toMatchObject({ target: 'bridge', conversation_id: conv.id });
   expect(completion.payload).toMatchObject({ agentKey: 'sales-bot', userId: `facebook:${PAGE_ID}:${PSID}`, purpose: 'reply' });
+  expect(completion.payload.zaloUserId).toBeUndefined();
 });
 
 test('the same webhook delivered twice stores one message', async () => {

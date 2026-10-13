@@ -74,7 +74,7 @@ test('a customer message in ai mode queues one delayed reply that later messages
   const [first] = await messages(conv.id);
   const [command] = await commands('run_completion');
   expect(command).toMatchObject({ target: 'bridge', status: 'pending', channel_account_id: 'ca-1', conversation_id: conv.id, dedupe_key: `completion:${first.id}` });
-  expect(command.payload).toEqual({ agentKey: 'sales-bot', userId: 'zalo:zalo-acc-1:cust-1', text: 'Cho em hỏi lịch học', conversationId: conv.id, purpose: 'reply' });
+  expect(command.payload).toEqual({ agentKey: 'sales-bot', userId: 'zalo:zalo-acc-1:cust-1', text: 'Cho em hỏi lịch học', conversationId: conv.id, purpose: 'reply', zaloUserId: 'cust-1' });
   const runAt = Date.parse(command.next_run_at);
   expect(runAt).toBeGreaterThanOrEqual(before + 8000);
   expect(runAt).toBeLessThanOrEqual(after + 8000);
@@ -83,6 +83,7 @@ test('a customer message in ai mode queues one delayed reply that later messages
   const all = await commands('run_completion');
   expect(all).toHaveLength(1);
   expect(all[0].payload.text).toBe('Cho em hỏi lịch học\nTối thứ mấy ạ');
+  expect(all[0].payload.zaloUserId).toBe('cust-1');
   expect(Date.parse(all[0].next_run_at)).toBeGreaterThanOrEqual(runAt);
 });
 
@@ -98,7 +99,9 @@ test('no reply is queued while the customer bot is off, the account bot is off, 
 
   await db.prepare("UPDATE channel_account SET bot_enabled = 1 WHERE id = 'ca-1'").run();
   await ingest(message({ threadId: 'grp-1', threadKind: 'group', senderExternalId: 'member-1' }));
-  expect(await commands('run_completion')).toHaveLength(0);
+  const groupReplies = await commands('run_completion');
+  expect(groupReplies).toHaveLength(0);
+  expect(groupReplies.some((command) => command.payload.zaloUserId !== undefined)).toBe(false);
   expect(await db.prepare("SELECT kind, mode FROM conversation WHERE external_thread_id = 'grp-1'").first()).toEqual({ kind: 'group', mode: 'ai' });
 });
 

@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { CodedError, errorCode, silentLogger, type Logger } from './config';
 import type { BridgeCommand, ResultDelivery } from './crm-client';
 import type { CompletionRequest } from './goclaw-client';
-import type { ThreadKind } from './zalo-client';
+import type { ThreadKind, ZaloUserProfile } from './zalo-client';
 
 /**
  * Executes bridge commands. Commands of one conversation run strictly one after another (never two GoClaw runs
@@ -18,8 +18,18 @@ const MAX_ERROR_CHARS = 2000;
 const POLL_ERROR_DELAY_MS = 5000;
 /** Send commands whose delivered chunks are remembered; the oldest is forgotten beyond this. */
 const MAX_SEND_PROGRESS = 1000;
+/** Successful Zalo profile lookups are reused for a day; a miss is reused for an hour. */
+const PROFILE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const PROFILE_NULL_TTL_MS = 60 * 60 * 1000;
+const PROFILE_LOOKUP_TIMEOUT_MS = 5000;
+const MAX_PROFILE_CACHE = 2000;
 
-const completionPayload = z.object({ agentKey: z.string().min(1), userId: z.string().min(1), text: z.string() });
+const completionPayload = z.object({
+  agentKey: z.string().min(1),
+  userId: z.string().min(1),
+  text: z.string(),
+  zaloUserId: z.string().min(1).optional(),
+});
 const sendPayload = z.object({ threadId: z.string().min(1), threadKind: z.enum(['direct', 'group']), text: z.string() });
 const sessionPayload = z.object({ accountId: z.string().min(1) }).partial();
 
@@ -34,6 +44,8 @@ export interface RunnerAccounts {
   login(accountId: string): Promise<void>;
   logout(accountId: string): Promise<void>;
   send(accountId: string, threadId: string, threadKind: ThreadKind, text: string, commandId: string): Promise<{ msgId: string }>;
+  /** Zalo profile of a direct customer. Null when the account has no live session or Zalo has no profile. */
+  profile(accountId: string, zaloUserId: string): Promise<ZaloUserProfile | null>;
 }
 
 export interface CommandRunnerOptions {
@@ -85,6 +97,8 @@ export function splitIntoChunks(text: string, max = MAX_CHUNK_CHARS): string[] {
 
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+const profileFound = (profile: ZaloUserProfile | null) => (profile && (profile.name.length > 0 || profile.gender !== null) ? 1 : 0);
+
 export class CommandRunner {
   private readonly queues = new Map<string, Promise<void>>();
   /** Commands queued or running, with the attempts of their latest claim. */
@@ -96,6 +110,8 @@ export class CommandRunner {
    * memory: one bridge instance runs the commands, and a restart loses at most a duplicate of sent chunks.
    */
   private readonly sendProgress = new Map<string, SendProgress>();
+  /** Zalo profile per `accountId:zaloUserId`. A found profile lasts 24 h; a null result lasts 1 h. Failures are not cached. */
+  private readonly profileCache = new Map<string, { profile: ZaloUserProfile | null; expiresAt: number }>();
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly random: () => number;
   private readonly log: Logger;
@@ -174,8 +190,11 @@ export class CommandRunner {
       case 'run_completion': {
         const payload = completionPayload.safeParse(command.payload);
         if (!payload.success) return { ok: false, error: 'INVALID_PAYLOAD' };
-        const text = await this.options.goclaw.complete(payload.data);
-        return { ok: true, text: text.slice(0, MAX_RESULT_TEXT) };
+        const text = await this.completionText(command, payload.data);
+        const reply = await this.options.goclaw.complete({
+          agentKey: payload.data.agentKey, userId: payload.data.userId, text,
+        });
+        return { ok: true, text: reply.slice(0, MAX_RESULT_TEXT) };
       }
       case 'send_zalo':
         return this.sendZalo(command);
@@ -188,6 +207,64 @@ export class CommandRunner {
       }
       default:
         return { ok: false, error: 'UNSUPPORTED_COMMAND' };
+    }
+  }
+
+  /**
+   * Prepends one Zalo profile line when this completion names a direct customer and the account's session
+   * can resolve them. A lookup that fails or takes longer than 5 s leaves the text unchanged.
+   */
+  private async completionText(command: BridgeCommand, payload: { text: string; zaloUserId?: string }): Promise<string> {
+    const { zaloUserId, text } = payload;
+    if (!zaloUserId || !command.channelAccountId) return text;
+    const profile = await this.lookupProfile(command.channelAccountId, zaloUserId);
+    if (!profile || (profile.name.length === 0 && profile.gender === null)) return text;
+    const gender = profile.gender === 'male' ? 'nam' : profile.gender === 'female' ? 'nữ' : 'không rõ';
+    return `[Hồ sơ Zalo của khách: tên "${profile.name}"; giới tính: ${gender}]\n${text}`;
+  }
+
+  private async lookupProfile(accountId: string, zaloUserId: string): Promise<ZaloUserProfile | null> {
+    const key = `${accountId}:${zaloUserId}`;
+    const cached = this.profileCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) {
+      this.profileCache.delete(key);
+      this.profileCache.set(key, cached);
+      this.log('info', 'profile.lookup', { cached: 1, found: profileFound(cached.profile) });
+      return cached.profile;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const pending = this.options.accounts.profile(accountId, zaloUserId);
+      // A lookup that loses the race must not surface later as an unhandled rejection.
+      void pending.catch(() => {});
+      const profile = await Promise.race([
+        pending.then((value) => value ?? null),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new CodedError('PROFILE_TIMEOUT')), PROFILE_LOOKUP_TIMEOUT_MS);
+        }),
+      ]);
+      this.rememberProfile(key, profile);
+      this.log('info', 'profile.lookup', { cached: 0, found: profileFound(profile) });
+      return profile;
+    } catch (error) {
+      // A blip must not hide the customer's name for an hour; the next reply looks it up again.
+      this.log('warn', 'profile.lookup_failed', { code: errorCode(error) });
+      return null;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private rememberProfile(key: string, profile: ZaloUserProfile | null) {
+    this.profileCache.delete(key);
+    this.profileCache.set(key, {
+      profile,
+      expiresAt: Date.now() + (profile ? PROFILE_CACHE_TTL_MS : PROFILE_NULL_TTL_MS),
+    });
+    while (this.profileCache.size > MAX_PROFILE_CACHE) {
+      const oldest = this.profileCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.profileCache.delete(oldest);
     }
   }
 

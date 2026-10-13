@@ -15,10 +15,12 @@
  *   api.sendMessage({ msg }, threadId, ThreadType)    -> { message: { msgId: number } | null, attachment: [...] }
  *   api.getAllGroups()                                -> { gridVerMap: { [groupId]: version } }
  *   api.getGroupInfo(ids)                             -> { gridInfoMap: { [groupId]: { name, ... } } }
+ *   api.getUserInfo(userId)                           -> { changed_profiles: { [userId | userId_0]: User } }
+ *                                                     User.displayName, else User.zaloName; Gender.Male = 0, Gender.Female = 1
  */
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { CloseReason, LoginQRCallbackEventType, ThreadType, Zalo, type API, type Credentials, type Message } from 'zca-js';
+import { CloseReason, Gender, LoginQRCallbackEventType, ThreadType, Zalo, type API, type Credentials, type Message, type UserInfoResponse } from 'zca-js';
 import { z } from 'zod';
 import { CodedError } from './config';
 
@@ -41,6 +43,14 @@ export interface IncomingMessage {
 
 export interface ZaloGroup { threadId: string; name: string }
 
+export type ZaloGender = 'male' | 'female' | null;
+
+/** Display name and gender taken from a Zalo user profile. `name` is already clipped and cleaned. */
+export interface ZaloUserProfile {
+  name: string;
+  gender: ZaloGender;
+}
+
 /** How a session ended. `fatal` means reconnecting with the same credentials will not help. */
 export interface SessionClose { code: string; fatal: boolean }
 
@@ -53,6 +63,8 @@ export interface ZaloSession {
   /** Zalo uid of the logged-in number. */
   readonly ownId: string;
   send(threadId: string, threadKind: ThreadKind, text: string): Promise<{ msgId: string }>;
+  /** Profile of one Zalo user. Null when `changed_profiles` has no entry for that id. */
+  getUserProfile(userId: string): Promise<ZaloUserProfile | null>;
   listGroups(): Promise<ZaloGroup[]>;
   onMessage(cb: (message: IncomingMessage) => void): void;
   /** Called once when the connection ends for good; not called after close(). */
@@ -85,6 +97,50 @@ const savedSessionSchema = z.object({
 });
 
 const clip = (value: string, max: number) => (value.length > max ? value.slice(0, max) : value);
+const PROFILE_NAME_MAX = 100;
+
+interface RawChangedProfile {
+  displayName?: unknown;
+  zaloName?: unknown;
+  gender?: unknown;
+}
+
+/** Gender.Male = 0 and Gender.Female = 1 in zca-js. Any other value is unknown. */
+function mapGender(value: unknown): ZaloGender {
+  if (value === Gender.Male) return 'male';
+  if (value === Gender.Female) return 'female';
+  return null;
+}
+
+function profileName(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  // The name is quoted inside a one-line marker for the agent, so line breaks, brackets and quotes are dropped.
+  return clip(value.replace(/[\r\n[\]"]/g, ''), PROFILE_NAME_MAX).trim();
+}
+
+function suffixedProfile(profiles: Readonly<Record<string, RawChangedProfile>>, userId: string): RawChangedProfile | undefined {
+  const prefix = `${userId}_`;
+  for (const [key, value] of Object.entries(profiles)) {
+    if (key.startsWith(prefix)) return value;
+  }
+  return undefined;
+}
+
+/**
+ * Picks the changed profile for `userId`. zca-js asks Zalo for `${userId}_0` when the id has no `_`,
+ * and the response map may be keyed by either form. `displayName` wins over `zaloName`.
+ */
+export function zaloProfileFromInfo(
+  userId: string,
+  changedProfiles: Readonly<Record<string, RawChangedProfile>> | null | undefined,
+): ZaloUserProfile | null {
+  if (!userId || !changedProfiles) return null;
+  const profile = changedProfiles[userId] ?? changedProfiles[`${userId}_0`] ?? suffixedProfile(changedProfiles, userId);
+  if (!profile) return null;
+  const display = profileName(profile.displayName);
+  const zalo = profileName(profile.zaloName);
+  return { name: display || zalo, gender: mapGender(profile.gender) };
+}
 
 function isHttpUrl(value: unknown): value is string {
   if (typeof value !== 'string' || value.length > 2000) return false;
@@ -163,6 +219,12 @@ class ZcaSession implements ZaloSession {
     const msgId = result.message?.msgId;
     if (msgId === undefined || msgId === null) throw new CodedError('ZALO_SEND_NO_MSG_ID');
     return { msgId: String(msgId) };
+  }
+
+  async getUserProfile(userId: string): Promise<ZaloUserProfile | null> {
+    if (!userId) return null;
+    const info: UserInfoResponse = await this.api.getUserInfo(userId);
+    return zaloProfileFromInfo(userId, info?.changed_profiles);
   }
 
   async listGroups(): Promise<ZaloGroup[]> {

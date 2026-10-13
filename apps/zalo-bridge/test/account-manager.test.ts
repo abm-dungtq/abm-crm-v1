@@ -5,7 +5,7 @@ import type { BridgeEvent } from '@abm/contracts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AccountManager, ECHO_HOLD_MS, MAX_RECONNECT_FAILURES, reconnectDelayMs } from '../src/account-manager';
 import { CodedError } from '../src/config';
-import type { IncomingMessage, QrCode, SessionClose, ZaloConnector, ZaloSession } from '../src/zalo-client';
+import type { IncomingMessage, QrCode, SessionClose, ZaloConnector, ZaloSession, ZaloUserProfile } from '../src/zalo-client';
 
 class FakeSession implements ZaloSession {
   readonly ownId = 'own-uid';
@@ -14,6 +14,7 @@ class FakeSession implements ZaloSession {
   closed = false;
   nextMsgId = 1000;
   send = vi.fn(async () => ({ msgId: String(this.nextMsgId++) }));
+  getUserProfile = vi.fn(async (_userId: string): Promise<ZaloUserProfile | null> => null);
   listGroups = vi.fn(async () => [{ threadId: 'g1', name: 'Nhóm 1' }]);
   onMessage(cb: (m: IncomingMessage) => void) { this.messageCb = cb; }
   onClose(cb: (c: SessionClose) => void) { this.closeCb = cb; }
@@ -68,6 +69,15 @@ describe('AccountManager', () => {
     expect(events).toContainEqual({ type: 'account_status', accountId: 'acc-1', accountExternalId: 'own-uid', status: 'connected' });
     expect(events).toContainEqual({ type: 'group_list', accountExternalId: 'own-uid', groups: [{ threadId: 'g1', name: 'Nhóm 1' }] });
     expect(await readdir(dir)).toEqual(['acc-1.json']);
+  });
+
+  it('reads a customer profile from the live session and returns null without one', async () => {
+    const { accounts, session } = await loggedIn();
+    session.getUserProfile.mockResolvedValueOnce({ name: 'Hùng', gender: 'male' });
+    expect(await accounts.profile('acc-1', 'uid-9')).toEqual({ name: 'Hùng', gender: 'male' });
+    expect(session.getUserProfile).toHaveBeenCalledWith('uid-9');
+    expect(await accounts.profile('other', 'uid-9')).toBeNull();
+    expect(session.getUserProfile).toHaveBeenCalledTimes(1);
   });
 
   it('tags an own message whose id the bridge just sent with the command id', async () => {
