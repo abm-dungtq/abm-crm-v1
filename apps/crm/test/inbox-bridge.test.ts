@@ -213,6 +213,20 @@ test('a zalo login claim lasts long enough for four QR codes; a send keeps the 3
   expect(span(byKind.send_zalo)).toBe(300_000);
 });
 
+test('a failed zalo login is final on its first attempt while a failed send is retried', async () => {
+  await db.prepare('DELETE FROM channel_command').run();
+  await enqueueCommand(db, { kind: 'zalo_login', target: 'bridge', channelAccountId: 'ca-2', payload: { accountId: 'ca-2' } });
+  await enqueueCommand(db, { kind: 'send_zalo', target: 'bridge', channelAccountId: 'ca-1', payload: { messageId: 'm-retry', text: 'a' } });
+  const claimed = (await bridge('/commands?wait=0')).json.data as { id: string; kind: string; attempts: number }[];
+  for (const command of claimed) {
+    const error = command.kind === 'zalo_login' ? 'QR_EXPIRED' : 'ZALO_REJECTED';
+    await bridge(`/commands/${command.id}/result`, { body: { attempts: command.attempts, ok: false, error } });
+  }
+  const statusOf = (kind: string) => db.prepare('SELECT status, attempts FROM channel_command WHERE kind = ?').bind(kind).first();
+  expect(await statusOf('zalo_login')).toEqual({ status: 'failed', attempts: 1 });
+  expect(await statusOf('send_zalo')).toEqual({ status: 'pending', attempts: 1 });
+});
+
 test('a long poll with nothing due returns an empty list', async () => {
   const started = Date.now();
   const res = await bridge('/commands?wait=1');

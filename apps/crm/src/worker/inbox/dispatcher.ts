@@ -132,11 +132,11 @@ export async function completeCommand(db: D1Database, id: string, attempts: numb
 
 /**
  * Records a failed attempt of a claimed command: after the last allowed attempt it becomes `failed`,
- * otherwise it returns to `pending` and runs again after 2^attempts minutes.
+ * otherwise it returns to `pending` and runs again after 2^attempts minutes. A `final` failure is never retried.
  * False means the claim no longer owns the command and nothing changed.
  */
-export async function failCommand(db: D1Database, id: string, attempts: number, error: string, now = new Date()): Promise<boolean> {
-  const exhausted = attempts >= MAX_COMMAND_ATTEMPTS;
+export async function failCommand(db: D1Database, id: string, attempts: number, error: string, now = new Date(), final = false): Promise<boolean> {
+  const exhausted = final || attempts >= MAX_COMMAND_ATTEMPTS;
   const nextRunAt = new Date(now.getTime() + 2 ** attempts * 60_000).toISOString();
   const nowIso = now.toISOString();
   const res = await db.prepare(`UPDATE channel_command

@@ -63,9 +63,12 @@ export async function readBridgePresence(db: D1Database, now = new Date()): Prom
   return { bridgeOnline: Number.isFinite(seen) && age >= -5_000 && age <= BRIDGE_ONLINE_MS, bridgeLastSeenAt };
 }
 
+/** Logins and logouts are never retried: a later retry would show QR codes nobody is watching. */
+const SESSION_KINDS = new Set(['zalo_login', 'zalo_logout']);
+
 /** A send that will not be retried leaves its message failed. */
 async function failSend(db: D1Database, command: { id: string; kind: string; payload: unknown }, attempts: number, error: string) {
-  const moved = await failCommand(db, command.id, attempts, error);
+  const moved = await failCommand(db, command.id, attempts, error, new Date(), SESSION_KINDS.has(command.kind));
   if (moved && attempts >= MAX_COMMAND_ATTEMPTS && SEND_KINDS.has(command.kind)) {
     const messageId = (command.payload as { messageId?: unknown } | null)?.messageId;
     if (typeof messageId === 'string') {
