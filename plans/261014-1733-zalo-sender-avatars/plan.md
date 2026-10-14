@@ -29,7 +29,8 @@ Status: in progress · Owner: Opus (giám sát) · Executor: Grok 4.7 qua Paseo 
 - Áp 0022, deploy Worker `8b264eb4`, sau đó `108f22bc` (thêm log mã lỗi tra hồ sơ OA, chỉ tên trường, không giá trị).
 - Bridge chạy trên máy Windows của owner, không phải VPS. Khởi động lại bằng `pnpm -F @abm/zalo-bridge start` sau khi nạp biến từ `apps/zalo-bridge/.env` vào môi trường; thiếu bước nạp thì bridge thoát vì thiếu `CRM_BASE_URL`.
 - Kết quả: thành viên nhóm 29/29 có ảnh.
-- Zalo OA: `user/detail` trả lỗi `-212` cho mọi khách, nên chưa có ảnh OA nào. Cần owner cấp quyền "thông tin người dùng" cho ứng dụng OA trên Zalo Developers và kết nối lại OA. Sau đó đặt `avatar_checked_at = NULL` cho hội thoại OA để cron bù lại.
+- Zalo OA: `user/detail` trả `-212` ("App has not registered this api") cho mọi khách, dù owner xác nhận quyền đã bật. Theo cách của app chatbot cũ, khi gặp `-212` Worker lấy tên + ảnh từ lịch sử hội thoại v2 `oa/conversation`. Deploy `1bd5e188` (14/10 20:55), bookmark trước khi đặt lại `000000aa-00000368-00005104-c193a40096e295ec800686ba1e8c02ba`. Đặt `avatar_checked_at = NULL` cho 47 hội thoại OA chưa có ảnh; 10 hội thoại đầu có ảnh ngay.
+- Bridge tự khởi động: Task Scheduler "ABM Zalo Bridge" chạy `%LOCALAPPDATA%\abm-zalo-bridge\start-bridge.ps1` khi đăng nhập Windows và mỗi 5 phút. Script bỏ qua nếu bridge đang chạy. Log ở `%LOCALAPPDATA%\abm-zalo-bridge\zalo-bridge.log`.
 
 Chi tiết giao việc: `%TEMP%\grok-crm\task-zalo-avatars.md`.
 
