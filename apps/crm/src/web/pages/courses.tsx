@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Link } from '@tanstack/react-router';
-import type { UpsertClassInput, UpsertCourseInput } from '@abm/contracts';
+import { COMMANDS, type UpsertClassInput, type UpsertCourseInput } from '@abm/contracts';
+import { useActor } from '../actor-context';
 import { useApi, useCommand } from '../api';
 import { Badge, Empty, ErrorState, Field, FormError, Loading, fieldErrors, useToast } from '../components/ui';
 import { fmtDate } from '../format';
@@ -13,6 +14,9 @@ interface ManageClass {
 interface ManageCourse {
   id: string; name: string; status: string; version: number; productId: string; productName: string; classes: ManageClass[];
 }
+interface EditableCourse {
+  id: string; name: string; status: string; version: number; productId: string;
+}
 interface Overdue {
   id: string; deferredUntil: string; contactId: string; contactName: string; classId: string; className: string; courseName: string;
 }
@@ -21,39 +25,130 @@ type CoursePayload = { scope: 'manage'; courses: ManageCourse[] } | { scope: 'op
 const classLabel = (status: string) => status === 'open' ? 'Đang mở' : status === 'cancelled' ? 'Đã hủy' : 'Đã kết thúc';
 
 export function CoursesPage() {
+  const actor = useActor();
   const list = useApi<CoursePayload>('/courses');
   const overdue = useApi<Overdue[]>(list.data?.scope === 'manage' ? '/enrollments/overdue-deferrals' : null);
+  const canEditCourse = (COMMANDS.upsertCourse.roles as readonly string[]).includes(actor.role);
+  const canEditClass = (COMMANDS.upsertClass.roles as readonly string[]).includes(actor.role);
   if (list.isLoading) return <Loading rows={6} />;
   if (list.error || !list.data) return <ErrorState error={list.error} onRetry={() => list.refetch()} />;
-  if (list.data.scope === 'open') return <OpenList classes={list.data.classes} />;
-  return <Manage courses={list.data.courses} overdue={overdue.data ?? []} overdueError={overdue.error} onRetryOverdue={() => overdue.refetch()} />;
-}
-
-function OpenList({ classes }: { classes: Extract<CoursePayload, { scope: 'open' }>['classes'] }) {
+  if (list.data.scope === 'open') {
+    return <OpenList classes={list.data.classes} canEditCourse={canEditCourse} />;
+  }
   return (
-    <>
-      <div className="page-head"><div><h1>Lớp đang mở</h1><p className="sub">Dùng khi giữ chỗ cho học viên đã thắng.</p></div></div>
-      <div className="card">
-        {classes.length === 0 ? <Empty title="Chưa có lớp đang mở" /> : (
-          <ul className="list">
-            {classes.map((c) => <li key={c.id}><strong>{c.courseName}</strong> · {c.name}{c.scheduleText ? ` · ${c.scheduleText}` : ''}</li>)}
-          </ul>
-        )}
-      </div>
-    </>
+    <Manage
+      courses={list.data.courses}
+      overdue={overdue.data ?? []}
+      overdueError={overdue.error}
+      onRetryOverdue={() => overdue.refetch()}
+      canEditCourse={canEditCourse}
+      canEditClass={canEditClass}
+    />
   );
 }
 
-function Manage({ courses, overdue, overdueError, onRetryOverdue }: {
-  courses: ManageCourse[]; overdue: Overdue[]; overdueError: unknown; onRetryOverdue: () => void;
+function OpenList({
+  classes,
+  canEditCourse,
+}: {
+  classes: Extract<CoursePayload, { scope: 'open' }>['classes'];
+  canEditCourse: boolean;
 }) {
-  const products = useApi<ProductItem[]>('/products');
+  const products = useApi<ProductItem[]>(canEditCourse ? '/products' : null);
+  const [editing, setEditing] = useState<EditableCourse | null>(null);
+  const allCourses = (products.data ?? []).flatMap((p) =>
+    (p.courses ?? []).map((c) => ({ ...c, productName: p.name })),
+  );
+
+  if (!canEditCourse) {
+    return (
+      <>
+        <div className="page-head"><div><h1>Lớp đang mở</h1><p className="sub">Dùng khi giữ chỗ cho học viên đã thắng.</p></div></div>
+        <div className="card">
+          {classes.length === 0 ? <Empty title="Chưa có lớp đang mở" /> : (
+            <ul className="list">
+              {classes.map((c) => <li key={c.id}><strong>{c.courseName}</strong> · {c.name}{c.scheduleText ? ` · ${c.scheduleText}` : ''}</li>)}
+            </ul>
+          )}
+        </div>
+      </>
+    );
+  }
+
   return (
     <>
       <div className="page-head">
         <div>
           <h1>Khóa và lớp</h1>
-          <p className="sub">Mỗi khóa thuộc một sản phẩm. Số học viên chỉ đếm ghi danh đã xác nhận và đang học.</p>
+          <p className="sub">Leader có thể tạo và sửa khóa học thuộc chương trình. Mở lớp học thuộc quyền Học vụ / Admin.</p>
+        </div>
+      </div>
+      <div className="cols-main">
+        <div className="grid">
+          <section className="card">
+            <div className="card-head"><h2>Danh sách khóa học</h2></div>
+            {allCourses.length === 0 ? <Empty title="Chưa có khóa học" /> : (
+              <div className="table-wrap">
+                <table className="table responsive">
+                  <thead><tr><th>Tên khóa</th><th>Chương trình</th><th>Trạng thái</th><th /></tr></thead>
+                  <tbody>
+                    {allCourses.map((c) => (
+                      <tr key={c.id}>
+                        <td><div className="cell-title">{c.name}</div></td>
+                        <td data-label="Chương trình">{c.productName}</td>
+                        <td data-label="Trạng thái">
+                          <Badge tone={c.status === 'active' ? 'ok' : 'neutral'}>{c.status === 'active' ? 'Đang mở' : 'Đã đóng'}</Badge>
+                        </td>
+                        <td className="right">
+                          <button type="button" className="btn btn-sm" onClick={() => setEditing(c)}>Sửa</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+          <section className="card">
+            <div className="card-head"><h2>Lớp đang mở</h2></div>
+            {classes.length === 0 ? <Empty title="Chưa có lớp đang mở" /> : (
+              <ul className="list">
+                {classes.map((c) => <li key={c.id}><strong>{c.courseName}</strong> · {c.name}{c.scheduleText ? ` · ${c.scheduleText}` : ''}</li>)}
+              </ul>
+            )}
+          </section>
+        </div>
+        <div className="grid">
+          <CourseForm key={editing?.id ?? 'new'} products={products.data ?? []} course={editing} onSaved={() => setEditing(null)} />
+        </div>
+      </div>
+    </>
+  );
+}
+
+function Manage({
+  courses,
+  overdue,
+  overdueError,
+  onRetryOverdue,
+  canEditCourse,
+  canEditClass,
+}: {
+  courses: ManageCourse[];
+  overdue: Overdue[];
+  overdueError: unknown;
+  onRetryOverdue: () => void;
+  canEditCourse: boolean;
+  canEditClass: boolean;
+}) {
+  const products = useApi<ProductItem[]>('/products');
+  const [editing, setEditing] = useState<EditableCourse | null>(null);
+  return (
+    <>
+      <div className="page-head">
+        <div>
+          <h1>Khóa và lớp</h1>
+          <p className="sub">Mỗi khóa thuộc một chương trình. Số học viên chỉ đếm ghi danh đã xác nhận và đang học.</p>
         </div>
       </div>
       <div className="cols-main">
@@ -75,15 +170,18 @@ function Manage({ courses, overdue, overdueError, onRetryOverdue }: {
                 </ul>
               )}
           </section>
-          {courses.length === 0 && <Empty title="Chưa có khóa">Tạo khóa từ một sản phẩm, rồi mở lớp.</Empty>}
+          {courses.length === 0 && <Empty title="Chưa có khóa">Tạo khóa từ một chương trình, rồi mở lớp.</Empty>}
           {courses.map((course) => (
             <section key={course.id} className="card">
               <div className="card-head">
                 <h2>{course.name}</h2>
                 <span className="spacer" />
                 <Badge tone={course.status === 'active' ? 'ok' : 'neutral'}>{course.status === 'active' ? 'Đang mở' : 'Đã đóng'}</Badge>
+                {canEditCourse && (
+                  <button type="button" className="btn btn-sm" onClick={() => setEditing(course)}>Sửa khóa</button>
+                )}
               </div>
-              <div className="card-body small muted">Sản phẩm: {course.productName}</div>
+              <div className="card-body small muted">Chương trình: {course.productName}</div>
               {course.classes.length === 0 ? <Empty title="Chưa có lớp" /> : (
                 <div className="table-wrap">
                   <table className="table responsive">
@@ -106,27 +204,59 @@ function Manage({ courses, overdue, overdueError, onRetryOverdue }: {
           ))}
         </div>
         <div className="grid">
-          <CourseForm products={products.data ?? []} />
-          <ClassForm courses={courses} />
+          {canEditCourse && <CourseForm key={editing?.id ?? 'new'} products={products.data ?? []} course={editing} onSaved={() => setEditing(null)} />}
+          {canEditClass && <ClassForm courses={courses} />}
         </div>
       </div>
     </>
   );
 }
 
-function CourseForm({ products }: { products: ProductItem[] }) {
+function CourseForm({
+  products,
+  course = null,
+  onSaved,
+}: {
+  products: ProductItem[];
+  course?: EditableCourse | null;
+  onSaved?: () => void;
+}) {
   const toast = useToast();
-  const [form, setForm] = useState({ productId: '', name: '', status: 'active' as 'active' | 'closed' });
+  const [form, setForm] = useState({
+    productId: course?.productId ?? '',
+    name: course?.name ?? '',
+    status: (course?.status === 'closed' ? 'closed' : 'active') as 'active' | 'closed',
+  });
   const m = useCommand<UpsertCourseInput>('upsertCourse');
   const errors = fieldErrors(m.error);
-  const submit = () => m.mutate(form, { onSuccess: () => { toast('Đã tạo khóa'); setForm({ productId: '', name: '', status: 'active' }); } });
+  const submit = () => m.mutate({
+    id: course?.id,
+    version: course?.version,
+    productId: form.productId,
+    name: form.name,
+    status: form.status,
+  }, {
+    onSuccess: () => {
+      toast(course ? 'Đã lưu khóa' : 'Đã tạo khóa');
+      if (!course) setForm({ productId: '', name: '', status: 'active' });
+      onSaved?.();
+    },
+  });
   return (
     <section className="card">
-      <div className="card-head"><h2>Tạo khóa</h2></div>
+      <div className="card-head">
+        <h2>{course ? 'Sửa khóa' : 'Tạo khóa'}</h2>
+        {course && onSaved && (
+          <>
+            <span className="spacer" />
+            <button type="button" className="btn btn-ghost btn-sm" onClick={onSaved}>Tạo mới</button>
+          </>
+        )}
+      </div>
       <form className="card-body stack" onSubmit={(e) => { e.preventDefault(); submit(); }}>
-        <Field label="Sản phẩm" htmlFor="co-product" required error={errors.productId}>
+        <Field label="Chương trình" htmlFor="co-product" required error={errors.productId}>
           <select id="co-product" value={form.productId} onChange={(e) => setForm({ ...form, productId: e.target.value })} required>
-            <option value="">Chọn sản phẩm</option>
+            <option value="">Chọn chương trình</option>
             {products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
         </Field>
@@ -140,7 +270,7 @@ function CourseForm({ products }: { products: ProductItem[] }) {
           </select>
         </Field>
         <FormError error={m.error && !Object.keys(errors).length ? m.error : null} />
-        <button className="btn btn-primary" disabled={m.isPending}>Tạo khóa</button>
+        <button className="btn btn-primary" disabled={m.isPending}>{course ? 'Lưu khóa' : 'Tạo khóa'}</button>
       </form>
     </section>
   );

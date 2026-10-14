@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient, type UseQueryOptions } from '@ta
 import type { ApiError, CommandName, ConversationMode } from '@abm/contracts';
 import type {
   AssignResult, ChannelAccount, ChannelAccountList, ChannelAccountUpdate, ClassifyIntakeResult, ConversationFilter, CustomerBotSwitch, GroupSchedule,
-  GroupScheduleInput, InboxConversation, InboxMessage, InboxSettings, InboxSettingsUpdate, IntakeField, IntakePipeline, IntakeStatus,
+  GroupScheduleInput, InboxContactCrm, InboxConversation, InboxMessage, InboxSettings, InboxSettingsUpdate, IntakeField, IntakePipeline, IntakeStatus,
   IntakeValues, LeadIntake, RegistrationPolicyUpdate, RosterMember, SendMessageResult, SetModeResult, ZaloGroup, ZaloGroupMember, ZaloGroupUpdate,
 } from './types';
 import { conversationsPath } from './inbox-format';
@@ -153,6 +153,8 @@ export const linkIntakeContact = (id: string, contactId: string) =>
 /** "Cập nhật CRM": queues an extraction of a direct conversation now. */
 export const requestExtraction = (conversationId: string) =>
   api.post<{ commandId: string }>(`/inbox/conversations/${enc(conversationId)}/extract`);
+export const getInboxContactCrm = (contactId: string) =>
+  api.get<InboxContactCrm>(`/inbox/contacts/${enc(contactId)}`);
 
 // ---------- Zalo groups and recurring posts ----------
 /** Groups of the organization, optionally of one channel account. */

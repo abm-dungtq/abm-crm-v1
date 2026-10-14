@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useSearch } from '@tanstack/react-router';
-import { ACTIVE_STAGES, sourceLabel, stageLabel } from '@abm/contracts';
+import { ACTIVE_STAGES, LEARNER_STAGES, learnerStageLabel, sourceLabel, stageLabel } from '@abm/contracts';
 import { useActor } from '../actor-context';
 import { useApi } from '../api';
 import { AssignDialog } from '../components/lead-actions';
-import { Alert, Avatar, Empty, ErrorState, HealthBadges, Loading, StageBadge } from '../components/ui';
+import { Alert, Avatar, Empty, ErrorState, HealthBadges, Loading, PipelineBadge, SegmentedControl, StageBadge } from '../components/ui';
 import { leadListPath } from '../list-query';
 import { fmtAgo, fmtDue, fmtMoney } from '../format';
 import type { LeadItem, LeadPage, Member } from '../types';
@@ -17,11 +17,18 @@ const TABS = [
   { id: 'all', label: 'Tất cả', status: '' },
 ] as const;
 
+const PIPELINE_OPTIONS: { value: 'all' | 'b2b' | 'learner'; label: string }[] = [
+  { value: 'all', label: 'Tất cả' },
+  { value: 'b2b', label: 'B2B' },
+  { value: 'learner', label: 'Học viên' },
+];
+
 export function LeadsPage() {
   const actor = useActor();
   const search = useSearch({ from: '/leads' });
   const navigate = useNavigate({ from: '/leads' });
   const tab = search.tab ?? 'active';
+  const pipeline = search.pipeline ?? 'all';
   const [text, setText] = useState(search.q ?? '');
   useEffect(() => {
     const t = setTimeout(() => { if ((search.q ?? '') !== text.trim()) void navigate({ search: (s) => ({ ...s, q: text.trim() || undefined }), replace: true }); }, 250);
@@ -34,15 +41,21 @@ export function LeadsPage() {
   const rows = all.data?.items ?? [];
   const countFor = (s: string) => all.data?.counts?.[s || 'all'] ?? '';
   const visibleTabs = TABS.filter((t) => t.id !== 'queue' || actor.role !== 'sale');
+  const stageOptions = pipeline === 'learner'
+    ? LEARNER_STAGES.map((s) => ({ value: s.code, label: learnerStageLabel(s.code) }))
+    : [...ACTIVE_STAGES, 'won', 'lost'].map((s) => ({ value: s, label: stageLabel(s) }));
 
   return (
     <>
       <div className="page-head">
         <div>
           <h1>Lead</h1>
-          <p className="sub">Lead đang mở luôn có Owner + Next Action + hạn (QĐ13).</p>
+          <p className="sub">Toàn bộ lead B2B và Học viên trong phạm vi của bạn. Lead đang mở luôn có Owner + Next Action + hạn (QĐ13).</p>
         </div>
-        <Link to="/leads/new" className="btn btn-primary hide-sm">Tạo lead</Link>
+        <div className="row" style={{ gap: 8 }}>
+          <Link to="/learners/new" className="btn hide-sm">Tạo lead học viên</Link>
+          <Link to="/leads/new" className="btn btn-primary hide-sm">Tạo lead B2B</Link>
+        </div>
       </div>
       <div className="tabs" role="tablist" aria-label="Trạng thái lead">
         {visibleTabs.map((t) => (
@@ -52,6 +65,12 @@ export function LeadsPage() {
         ))}
       </div>
       <div className="row-wrap" style={{ marginBottom: 12 }}>
+        <SegmentedControl
+          ariaLabel="Lọc theo luồng lead"
+          value={pipeline}
+          onChange={(next) => void navigate({ search: (s) => ({ ...s, pipeline: next === 'all' ? undefined : next, stage: undefined }) })}
+          options={PIPELINE_OPTIONS}
+        />
         {search.department && (
           <button type="button" className="btn btn-sm" onClick={() => void navigate({ search: (s) => ({ ...s, department: undefined }) })}>
             Đang lọc một phòng ban · Bỏ lọc
@@ -65,7 +84,7 @@ export function LeadsPage() {
           <label htmlFor="stage-filter" className="visually-hidden">Stage</label>
           <select id="stage-filter" value={search.stage ?? ''} onChange={(e) => void navigate({ search: (s) => ({ ...s, stage: e.target.value || undefined }) })}>
             <option value="">Mọi stage</option>
-            {[...ACTIVE_STAGES, 'won', 'lost'].map((s) => <option key={s} value={s}>{stageLabel(s)}</option>)}
+            {stageOptions.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
           </select>
         </div>
       </div>
@@ -84,32 +103,52 @@ export function LeadsPage() {
             <table className="table responsive">
               <thead>
                 <tr>
-                  <th>Lead</th><th>Stage</th><th>{tab === 'queue' ? 'Nguồn' : 'Owner'}</th>
-                  <th>{tab === 'queue' ? 'Vào lúc' : 'Next Action'}</th><th className="right">Giá trị</th><th className="hide-sm">Cảnh báo</th>
+                  <th>Lead</th>
+                  <th>Chương trình</th>
+                  <th>Stage</th>
+                  <th>{tab === 'queue' ? 'Nguồn' : 'Owner'}</th>
+                  <th>{tab === 'queue' ? 'Vào lúc' : 'Next Action'}</th>
+                  <th className="right">Giá trị</th>
+                  <th className="hide-sm">Cảnh báo</th>
                   {tab === 'queue' && actor.role === 'leader' && <th><span className="visually-hidden">Thao tác</span></th>}
                 </tr>
               </thead>
               <tbody>
-                {rows.map((l) => (
-                  <tr key={l.id}>
-                    <td>
-                      <Link to="/leads/$leadId" params={{ leadId: l.id }} className="cell-title">{l.contactName}</Link>
-                      <div className="cell-sub"><span className="mono">{l.code}</span>{l.account ? ` · ${l.account.name}` : ''}</div>
-                    </td>
-                    <td data-label="Stage"><StageBadge stage={l.stage} /></td>
-                    {tab === 'queue'
-                      ? <td data-label="Nguồn">{sourceLabel(l.source)}</td>
-                      : <td data-label="Owner">{l.owner ? <span className="row"><Avatar name={l.owner.name} /><span className="truncate">{l.owner.name}</span></span> : <span className="muted">Chưa giao</span>}</td>}
-                    {tab === 'queue'
-                      ? <td data-label="Vào lúc" className="nowrap">{fmtAgo(l.createdAt)}</td>
-                      : <td data-label="Next Action">{l.nextAction ? <><div className="truncate" style={{ maxWidth: 260 }}>{l.nextAction.title}</div><div className="cell-sub" style={l.health.nextActionOverdue ? { color: 'var(--danger)' } : undefined}>{fmtDue(l.nextAction.dueAt)}</div></> : <span className="muted">—</span>}</td>}
-                    <td className="right num" data-label="Giá trị">{fmtMoney(l.expectedValue)}</td>
-                    <td className="hide-sm"><HealthBadges health={l.health} compact /></td>
-                    {tab === 'queue' && actor.role === 'leader' && (
-                      <td><button className="btn btn-sm btn-primary" onClick={() => setAssigning(l)}>Giao</button></td>
-                    )}
-                  </tr>
-                ))}
+                {rows.map((l) => {
+                  const programText = [l.productName, l.courseName].filter(Boolean).join(' · ');
+                  return (
+                    <tr key={l.id}>
+                      <td>
+                        <div className="row" style={{ gap: 6 }}>
+                          <Link to="/leads/$leadId" params={{ leadId: l.id }} className="cell-title">{l.contactName}</Link>
+                          <PipelineBadge pipeline={l.pipeline} />
+                        </div>
+                        <div className="cell-sub">
+                          <span className="mono">{l.code}</span>
+                          {l.account ? ` · ${l.account.name}` : ''}
+                          {l.pipeline === 'learner' && l.contactId && (
+                            <> · <Link to="/learners/$contactId" params={{ contactId: l.contactId }}>Hồ sơ học viên</Link></>
+                          )}
+                        </div>
+                      </td>
+                      <td data-label="Chương trình">
+                        {programText ? <span className="small">{programText}</span> : <span className="muted">—</span>}
+                      </td>
+                      <td data-label="Stage"><StageBadge stage={l.stage} pipeline={l.pipeline} /></td>
+                      {tab === 'queue'
+                        ? <td data-label="Nguồn">{sourceLabel(l.source)}</td>
+                        : <td data-label="Owner">{l.owner ? <span className="row"><Avatar name={l.owner.name} /><span className="truncate">{l.owner.name}</span></span> : <span className="muted">Chưa giao</span>}</td>}
+                      {tab === 'queue'
+                        ? <td data-label="Vào lúc" className="nowrap">{fmtAgo(l.createdAt)}</td>
+                        : <td data-label="Next Action">{l.nextAction ? <><div className="truncate" style={{ maxWidth: 260 }}>{l.nextAction.title}</div><div className="cell-sub" style={l.health.nextActionOverdue ? { color: 'var(--danger)' } : undefined}>{fmtDue(l.nextAction.dueAt)}</div></> : <span className="muted">—</span>}</td>}
+                      <td className="right num" data-label="Giá trị">{fmtMoney(l.expectedValue)}</td>
+                      <td className="hide-sm"><HealthBadges health={l.health} compact /></td>
+                      {tab === 'queue' && actor.role === 'leader' && (
+                        <td><button className="btn btn-sm btn-primary" onClick={() => setAssigning(l)}>Giao</button></td>
+                      )}
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

@@ -4,7 +4,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { ROLES, type RoleCode } from '@abm/contracts';
 import { currentAuthMode, setDemoUser, useApi } from '../api';
 import { LogoutButton } from '../pages/change-password';
-import type { AccountItem, Actor, ApprovalItem, DemoUser, LeadItem } from '../types';
+import type { AccountItem, Actor, ApprovalItem, DemoUser, LeadIntake, LeadItem } from '../types';
 import { Icon, type IconName } from './icons';
 import { Avatar, ErrorState, Loading, StageBadge } from './ui';
 
@@ -51,6 +51,9 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
   const seesMoney = actor.role === 'accountant' || actor.role === 'admin' || actor.role === 'director';
   const unmatched = useApi<{ id: string }[]>(seesMoney ? '/fees/payments?unallocated=1' : null);
   const unmatchedCount = unmatched.data?.length ?? 0;
+  const canUseInbox = INBOX_ROLES.includes(actor.role);
+  const intakes = useApi<LeadIntake[]>(canUseInbox ? '/inbox/intakes?status=pending' : null);
+  const pendingIntakes = intakes.data?.length ?? 0;
 
   const groups: NavGroup[] = [
     { label: 'Tổng quan', icon: 'home', items: [
@@ -64,7 +67,7 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
     ] },
     { label: 'Inbox', icon: 'message', items: [
       { to: '/inbox', label: 'Hội thoại', roles: INBOX_ROLES },
-      { to: '/intakes', label: 'Lead chờ phân loại', roles: INBOX_ROLES },
+      { to: '/intakes', label: 'Lead chờ phân loại', roles: INBOX_ROLES, badge: pendingIntakes, badgeLabel: `${pendingIntakes} lead chờ phân loại` },
       { to: '/zalo-groups', label: 'Nhóm Zalo', roles: INBOX_ROLES },
     ] },
     { label: 'Khách hàng', icon: 'building', items: [
@@ -73,9 +76,9 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
       { to: '/partners', label: 'Đối tác', roles: LEARNER_ROLES },
     ] },
     { label: 'Đào tạo', icon: 'file', items: [
-      { to: '/courses', label: 'Khóa & lớp', roles: ['academic', 'admin'] },
+      { to: '/courses', label: 'Khóa & lớp', roles: ['leader', 'academic', 'admin'] },
       { to: '/my-classes', label: 'Lớp của tôi', roles: ['teacher', 'academic', 'admin'] },
-      { to: '/products', label: 'Sản phẩm', roles: ['academic', 'admin', 'sale', 'leader'] },
+      { to: '/products', label: 'Chương trình', roles: ['academic', 'admin', 'sale', 'leader'] },
     ] },
     { label: 'Học phí', icon: 'inbox', items: [
       { to: '/fees', label: 'Học phí', roles: ['accountant', 'admin', 'director'] },
@@ -102,13 +105,14 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
   const leaf = currentLeaf(pathname, [...shownGroups.flatMap((g) => g.items), ...shownAdmin, approvalsItem]);
   const activeGroup = shownGroups.find((g) => leaf && g.items.includes(leaf));
   const passwordMode = currentAuthMode() === 'password';
+  const isInboxScreen = under(pathname, '/inbox');
 
   return (
     <div className="shell">
       <aside className="sidebar" data-open={open} aria-label="Điều hướng chính">
         <div className="brand">
           <div className="brand-mark">ABM</div>
-          <div><div className="brand-name">ABM CRM</div><div className="brand-sub">MVP1 · bản đánh giá</div></div>
+          <div><div className="brand-name">ABM CRM</div><div className="brand-sub">Omnichannel · v2</div></div>
         </div>
         <nav className="nav">
           {shownGroups.map((g) => {
@@ -163,7 +167,7 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
             </Dropdown>
           </div>
         </header>
-        <main className="content" id="main">
+        <main className={`content${isInboxScreen ? ' content-inbox' : ''}`} id="main">
           {activeGroup && activeGroup.items.length > 1 && leaf && pathname === leaf.to && <SectionTabs group={activeGroup} />}
           {children}
         </main>
@@ -275,7 +279,7 @@ function GlobalSearch() {
             <Link key={l.id} to="/leads/$leadId" params={{ leadId: l.id }}>
               <span className="mono muted">{l.code}</span>
               <span className="truncate" style={{ flex: 1 }}>{l.contactName}{l.account ? ` · ${l.account.name}` : ''}</span>
-              <StageBadge stage={l.stage} />
+              <StageBadge stage={l.stage} pipeline={l.pipeline} />
             </Link>
           ))}
           {!!result.data?.accounts.length && <div className="group">Khách hàng</div>}
@@ -300,7 +304,7 @@ export function RolePicker() {
     head: 'Xem toàn phòng ban, dashboard theo Sale.',
     director: 'Xem toàn công ty.',
     admin: 'Xem và cập nhật dữ liệu toàn công ty (không duyệt yêu cầu), quản lý người dùng và cấu hình.',
-    academic: 'Quản lý danh mục sản phẩm, khóa, lớp và ghi danh học viên.',
+    academic: 'Quản lý danh mục chương trình, khóa, lớp và ghi danh học viên.',
     teacher: 'Điểm danh các lớp được gán; chỉ thấy tên học viên.',
     accountant: 'Ghi khoản phải thu, ghi tiền vào và phân bổ học phí.',
   };
@@ -335,4 +339,3 @@ export function RolePicker() {
     </div>
   );
 }
-

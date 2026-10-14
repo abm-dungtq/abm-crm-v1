@@ -1,14 +1,15 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useParams } from '@tanstack/react-router';
-import { ACTIVE_STAGES, activityLabel, lostReasonLabel, sourceLabel, stageLabel, ACTIVITY_TYPES, type StageCode } from '@abm/contracts';
-import { useApi } from '../api';
+import { ACTIVE_STAGES, COMMANDS, LEARNER_STAGES, activityLabel, learnerStageLabel, lostReasonLabel, sourceLabel, stageLabel, ACTIVITY_TYPES, type SetLeadProgramInput, type StageCode } from '@abm/contracts';
+import { useActor } from '../actor-context';
+import { useApi, useCommand } from '../api';
 import { Icon, type IconName } from '../components/icons';
 import {
   AssignDialog, ChangeStageDialog, CompleteTaskDialog, DecideButtons, LogActivityForm, ReleaseDialog, RequestOwnerDialog, approvalTitle,
 } from '../components/lead-actions';
-import { Avatar, Badge, Empty, ErrorState, HealthBadges, Loading, StageBadge, StatusBadge } from '../components/ui';
+import { Avatar, Badge, Empty, ErrorState, FormError, HealthBadges, Loading, PipelineBadge, StageBadge, StatusBadge, useToast } from '../components/ui';
 import { fmtDateTime, fmtDue, fmtHours, fmtMoney } from '../format';
-import type { AuditItem, LeadDetail, LeadTask } from '../types';
+import type { AuditItem, LeadDetail, LeadItem, LeadTask, ProductItem } from '../types';
 
 const ACTIVITY_ICON: Record<string, IconName> = {
   call: 'phone', meeting: 'meeting', email: 'mail', message: 'message', customer_reply: 'message', file_sent: 'file',
@@ -26,6 +27,7 @@ export function LeadDetailPage() {
 type DialogName = 'stage' | 'assign' | 'release' | 'request' | null;
 
 function LeadView({ detail }: { detail: LeadDetail }) {
+  const actor = useActor();
   const { lead, permissions: can } = detail;
   const [dialog, setDialog] = useState<DialogName>(null);
   const [completing, setCompleting] = useState<LeadTask | null>(null);
@@ -34,6 +36,7 @@ function LeadView({ detail }: { detail: LeadDetail }) {
   const doneTasks = detail.tasks.filter((t) => t.status !== 'open');
   const pendingApprovals = detail.approvals.filter((a) => a.status === 'pending');
   const leadRef = { id: lead.id, code: lead.code, version: lead.version, status: lead.status, ownerId: lead.owner?.id ?? null };
+  const canEditProgram = (COMMANDS.setLeadProgram.roles as readonly string[]).includes(actor.role) && can.logActivity;
 
   return (
     <>
@@ -42,9 +45,15 @@ function LeadView({ detail }: { detail: LeadDetail }) {
           <div className="small"><Link to="/leads">Lead</Link> / <span className="mono">{lead.code}</span></div>
           <h1 className="truncate">{lead.contactName}</h1>
           <div className="row-wrap" style={{ marginTop: 6 }}>
+            <PipelineBadge pipeline={lead.pipeline} />
             <StatusBadge status={lead.status} />
-            <StageBadge stage={lead.stage} />
+            <StageBadge stage={lead.stage} pipeline={lead.pipeline} />
             {lead.account && <Link to="/customers/$accountId" params={{ accountId: lead.account.id }} className="row small"><Icon name="building" style={{ width: 14, height: 14 }} />{lead.account.name}</Link>}
+            {lead.pipeline === 'learner' && lead.contactId && (
+              <Link to="/learners/$contactId" params={{ contactId: lead.contactId }} className="row small">
+                <Icon name="external-link" style={{ width: 14, height: 14 }} />Hồ sơ học viên
+              </Link>
+            )}
             <span className="small muted">Nguồn: {sourceLabel(lead.source)}</span>
           </div>
         </div>
@@ -58,7 +67,7 @@ function LeadView({ detail }: { detail: LeadDetail }) {
 
       <div className="card" style={{ marginBottom: 16 }}>
         <div className="card-body">
-          <Stepper stage={lead.stage} />
+          <Stepper stage={lead.stage} pipeline={lead.pipeline} />
         </div>
       </div>
 
@@ -152,6 +161,8 @@ function LeadView({ detail }: { detail: LeadDetail }) {
             <div className="card-body stack">
               <dl className="dl">
                 <dt>Nhu cầu</dt><dd>{lead.needSummary}</dd>
+                <dt>Chương trình</dt>
+                <dd>{[lead.productName, lead.courseName].filter(Boolean).join(' · ') || <span className="muted">Chưa chọn</span>}</dd>
                 <dt>Giá trị dự kiến</dt><dd className="num">{fmtMoney(lead.expectedValue, false)}</dd>
                 <dt>Owner</dt><dd>{lead.owner ? <span className="row"><Avatar name={lead.owner.name} />{lead.owner.name}</span> : 'Chưa giao'}</dd>
                 <dt>Team</dt><dd>{lead.team?.name ?? '—'}</dd>
@@ -162,6 +173,7 @@ function LeadView({ detail }: { detail: LeadDetail }) {
                 <dt>Liên hệ đầu</dt><dd>{lead.firstContactAt ? fmtDateTime(lead.firstContactAt) : <span className="muted">Chưa có</span>}</dd>
                 <dt>Vào stage</dt><dd>{fmtDateTime(lead.stageEnteredAt)}</dd>
               </dl>
+              {canEditProgram && <LeadProgramEditor lead={lead} />}
               <SlaPanel detail={detail} />
             </div>
           </section>
@@ -205,6 +217,71 @@ function LeadView({ detail }: { detail: LeadDetail }) {
   );
 }
 
+export function LeadProgramEditor({
+  lead,
+}: {
+  lead: Pick<LeadItem, 'id' | 'version' | 'productId' | 'courseId'>;
+}) {
+  const toast = useToast();
+  const products = useApi<ProductItem[]>('/products');
+  const activeProducts = (products.data ?? []).filter((p) => Boolean(p.active) || p.id === lead.productId);
+  const [productId, setProductId] = useState(lead.productId ?? '');
+  const [courseId, setCourseId] = useState(lead.courseId ?? '');
+  useEffect(() => {
+    setProductId(lead.productId ?? '');
+    setCourseId(lead.courseId ?? '');
+  }, [lead.id, lead.productId, lead.courseId]);
+  const selectedProduct = activeProducts.find((p) => p.id === productId);
+  const availableCourses = (selectedProduct?.courses ?? []).filter((c) => c.status === 'active' || c.id === lead.courseId);
+  const save = useCommand<SetLeadProgramInput>('setLeadProgram');
+  const dirty = (productId || null) !== (lead.productId ?? null) || (courseId || null) !== (lead.courseId ?? null);
+
+  return (
+    <div className="stack-xs" style={{ paddingTop: 8, borderTop: '1px solid var(--border)' }}>
+      <span className="field-label">Cập nhật chương trình &amp; khóa học</span>
+      <div className="grid-2" style={{ gap: 8 }}>
+        <select
+          aria-label="Chọn chương trình cho lead"
+          value={productId}
+          onChange={(e) => { setProductId(e.target.value); setCourseId(''); }}
+        >
+          <option value="">Chưa chọn chương trình</option>
+          {activeProducts.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name} ({p.priceVnd === 0 ? 'Miễn phí / báo giá riêng' : fmtMoney(p.priceVnd, false)})
+            </option>
+          ))}
+        </select>
+        <select
+          aria-label="Chọn khóa học cho lead"
+          value={courseId}
+          onChange={(e) => setCourseId(e.target.value)}
+          disabled={!productId || !availableCourses.length}
+        >
+          <option value="">{!productId ? 'Chọn chương trình trước' : availableCourses.length ? 'Chưa chọn khóa học' : 'Không có khóa đang mở'}</option>
+          {availableCourses.map((c) => (
+            <option key={c.id} value={c.id}>{c.name}</option>
+          ))}
+        </select>
+      </div>
+      <div className="row">
+        <button
+          type="button"
+          className="btn btn-sm btn-primary"
+          disabled={!dirty || save.isPending}
+          onClick={() => save.mutate(
+            { leadId: lead.id, expectedVersion: lead.version, productId: productId || null, courseId: courseId || null },
+            { onSuccess: () => toast('Đã lưu chương trình cho lead') },
+          )}
+        >
+          {save.isPending ? 'Đang lưu…' : 'Lưu chương trình'}
+        </button>
+      </div>
+      <FormError error={save.error} />
+    </div>
+  );
+}
+
 function ContactPoint({ type, value }: { type: string; value: string }) {
   return (
     <>
@@ -214,18 +291,22 @@ function ContactPoint({ type, value }: { type: string; value: string }) {
   );
 }
 
-function Stepper({ stage }: { stage: string }) {
-  const terminal = stage === 'won' || stage === 'lost';
-  const current = terminal ? ACTIVE_STAGES.length : ACTIVE_STAGES.indexOf(stage as StageCode);
+const ACTIVE_LEARNER_STAGES = LEARNER_STAGES.filter((s) => !['won', 'lost', 'not_fit'].includes(s.code)).map((s) => s.code);
+
+function Stepper({ stage, pipeline }: { stage: string; pipeline?: string }) {
+  const isLearner = pipeline === 'learner';
+  const activeStages = isLearner ? ACTIVE_LEARNER_STAGES : ACTIVE_STAGES;
+  const terminal = stage === 'won' || stage === 'lost' || stage === 'not_fit';
+  const current = terminal ? activeStages.length : activeStages.indexOf(stage as never);
   return (
     <div className="stepper" role="list" aria-label="Tiến trình stage">
-      {ACTIVE_STAGES.map((s, i) => (
+      {activeStages.map((s, i) => (
         <div key={s} role="listitem" className="step" data-state={i < current ? 'done' : i === current ? 'current' : 'todo'} aria-current={i === current ? 'step' : undefined}>
-          <span className="bar" /><span>{stageLabel(s)}</span>
+          <span className="bar" /><span>{isLearner ? learnerStageLabel(s) : stageLabel(s)}</span>
         </div>
       ))}
-      <div role="listitem" className="step" data-state={stage === 'won' ? 'won' : stage === 'lost' ? 'lost' : 'todo'} aria-current={terminal ? 'step' : undefined}>
-        <span className="bar" /><span>{stage === 'lost' ? 'Lost' : 'Won'}</span>
+      <div role="listitem" className="step" data-state={stage === 'won' ? 'won' : stage === 'lost' || stage === 'not_fit' ? 'lost' : 'todo'} aria-current={terminal ? 'step' : undefined}>
+        <span className="bar" /><span>{stage === 'lost' || stage === 'not_fit' ? (isLearner ? learnerStageLabel(stage) : 'Lost') : (isLearner ? learnerStageLabel('won') : 'Won')}</span>
       </div>
     </div>
   );
@@ -249,7 +330,7 @@ function SlaPanel({ detail }: { detail: LeadDetail }) {
 
 const COMMAND_LABEL: Record<string, string> = {
   createLead: 'Tạo lead', assignLead: 'Giao lead', releaseLead: 'Nhả lead', logActivity: 'Ghi hoạt động', completeTask: 'Hoàn thành việc',
-  changeStage: 'Đổi stage', requestOwnerChange: 'Yêu cầu chuyển owner', decideApproval: 'Quyết định duyệt',
+  changeStage: 'Đổi stage', requestOwnerChange: 'Yêu cầu chuyển owner', decideApproval: 'Quyết định duyệt', setLeadProgram: 'Gắn chương trình',
 };
 export const commandLabel = (c: string) => COMMAND_LABEL[c] ?? c;
 

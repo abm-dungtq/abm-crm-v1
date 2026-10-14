@@ -3,7 +3,7 @@ import { lostReasonLabel, stageLabel } from '@abm/contracts';
 import { useActor } from '../actor-context';
 import { useApi } from '../api';
 import { SCOPE_LABEL } from '../components/layout';
-import { Alert, Avatar, Badge, Empty, ErrorState, HealthBadges, Kpi, Loading, StageBadge } from '../components/ui';
+import { Alert, Avatar, Badge, Empty, ErrorState, HealthBadges, Kpi, Loading, PipelineBadge, StageBadge } from '../components/ui';
 import { fmtDue, fmtMoney } from '../format';
 import type { Dashboard } from '../types';
 
@@ -38,8 +38,12 @@ function DashboardHome() {
 
 function DashboardBody({ data, isSale, canQueue }: { data: Dashboard; isSale: boolean; canQueue: boolean }) {
   const { kpi } = data;
+  const byPipe = kpi.byPipeline ?? data.byPipeline;
   const partialHealth = Boolean(data.truncated.leads);
   const maxCount = Math.max(1, ...data.pipeline.map((p) => p.count));
+  const activeNote = byPipe
+    ? `B2B: ${byPipe.b2b.activeLeads} · Học viên: ${byPipe.learner.activeLeads} · ${fmtMoney(kpi.pipelineValue)}`
+    : `Pipeline ${fmtMoney(kpi.pipelineValue)}`;
   return (
     <>
       {(data.truncated.leads || data.truncated.tasks || data.truncated.attention || data.truncated.upcoming) && <Alert tone="warn">
@@ -47,7 +51,7 @@ function DashboardBody({ data, isSale, canQueue }: { data: Dashboard; isSale: bo
         {partialHealth && ' Số trễ liên hệ lần đầu và quá SLA là số tối thiểu trên 500 lead gần nhất, kể cả cột Quá SLA theo Sale.'}
       </Alert>}
       <div className="kpis">
-        <Kpi label={isSale ? 'Lead đang mở của tôi' : 'Lead đang mở'} value={kpi.activeLeads} note={`Pipeline ${fmtMoney(kpi.pipelineValue)}`} to="/leads" />
+        <Kpi label={isSale ? 'Lead đang mở của tôi' : 'Lead đang mở'} value={kpi.activeLeads} note={activeNote} to="/leads" />
         <Kpi label="Việc hôm nay" value={kpi.tasksToday} to="/tasks" />
         <Kpi label="Việc quá hạn" value={kpi.overdueTasks} tone={kpi.overdueTasks ? 'danger' : undefined} to="/tasks" />
         <Kpi label="Trễ liên hệ lần đầu" value={`${partialHealth ? '≥ ' : ''}${kpi.firstContactBreaches}`} note="SLA 4 giờ làm việc" tone={kpi.firstContactBreaches ? 'danger' : undefined} />
@@ -70,13 +74,18 @@ function DashboardBody({ data, isSale, canQueue }: { data: Dashboard; isSale: bo
                         <div className="stack-sm" style={{ gap: 4, flex: 1, minWidth: 0 }}>
                           <div className="row">
                             <span className="mono muted">{l.code}</span>
-                            <Link to="/leads/$leadId" params={{ leadId: l.id }} className="cell-title truncate">{l.contactName}{l.account ? ` · ${l.account.name}` : ''}</Link>
+                            {l.pipeline === 'learner' && l.contactId ? (
+                              <Link to="/learners/$contactId" params={{ contactId: l.contactId }} className="cell-title truncate">{l.contactName}</Link>
+                            ) : (
+                              <Link to="/leads/$leadId" params={{ leadId: l.id }} className="cell-title truncate">{l.contactName}{l.account ? ` · ${l.account.name}` : ''}</Link>
+                            )}
+                            <PipelineBadge pipeline={l.pipeline} />
                           </div>
                           <HealthBadges health={l.health} />
                           {l.nextAction && <span className="small text-2 truncate">Next: {l.nextAction.title} · {fmtDue(l.nextAction.dueAt)}</span>}
                         </div>
                         <div className="stack-sm hide-sm" style={{ alignItems: 'flex-end', gap: 4 }}>
-                          <StageBadge stage={l.stage} />
+                          <StageBadge stage={l.stage} pipeline={l.pipeline} />
                           {!isSale && <span className="small muted">{l.owner?.name}</span>}
                         </div>
                       </div>

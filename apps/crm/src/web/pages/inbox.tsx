@@ -3,15 +3,21 @@ import { Link, Outlet, useParams, useRouterState } from '@tanstack/react-router'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ConversationMode } from '@abm/contracts';
 import { useActor } from '../actor-context';
-import { ApiFailure, assignConversation, getConversation, listAccounts, listConversations, listRoster, setMode } from '../api';
+import {
+  ApiFailure, assignConversation, getConversation, getInboxContactCrm, listAccounts, listConversations, listIntakes, listRoster, setMode,
+} from '../api';
 import { Icon } from '../components/icons';
 import { InboxThread, MODE_LABEL, ModeBadge, conversationName, fmtShortTime } from '../components/inbox-thread';
 import { IntakeCard } from '../components/intake-card';
 import { roleLabel } from '../components/layout';
-import { Empty, ErrorState, FormError, Loading, useDebounced, useToast } from '../components/ui';
+import {
+  Avatar, Badge, ChannelBadge, CopyableText, Empty, ErrorState, FormError, KpiCard, LinkedLeadCard, Loading, SegmentedControl, useDebounced, useToast,
+} from '../components/ui';
 import { fmtDateTime } from '../format';
 import { channelKindLabel, conversationChannelLabel } from '../inbox-format';
-import type { AssignResult, ChannelAccountList, ConversationFilter, InboxConversation, RosterMember, SetModeResult } from '../types';
+import type {
+  AssignResult, ChannelAccountList, ConversationFilter, InboxContactCrm, InboxConversation, LeadIntake, RosterMember, SetModeResult,
+} from '../types';
 import { INBOX_SETTINGS_ROLES, ROSTER_KEY } from './inbox-settings';
 
 /** Conversation list polling interval. */
@@ -29,20 +35,132 @@ export const MANAGER_ROLES: readonly string[] = ['leader', 'head', 'director', '
 export const SETTINGS_ROLES: readonly string[] = ['leader', 'admin'];
 
 type AssigneeTab = 'mine' | 'none' | 'all';
-const ASSIGNEE_TABS: [AssigneeTab, string][] = [['mine', 'Của tôi'], ['none', 'Chưa giao'], ['all', 'Tất cả']];
+const ASSIGNEE_TABS: { value: AssigneeTab; label: string }[] = [
+  { value: 'all', label: 'Tất cả' },
+  { value: 'mine', label: 'Của tôi' },
+  { value: 'none', label: 'Chưa giao' },
+];
 
 const SENDER_PREFIX: Record<string, string> = { bot: 'Bot: ', staff_web: 'Nhân viên: ', staff_phone: 'Điện thoại: ', system: '' };
 
 /** `/inbox` and `/inbox/$conversationId`: the list stays mounted so its filters survive opening a conversation. */
 export function InboxPage() {
+  const actor = useActor();
   const { conversationId } = useParams({ strict: false });
-  // On small screens only one column shows: the list at /inbox, the open conversation or settings below it.
   const atList = useRouterState({ select: (s) => /^\/inbox\/?$/.test(s.location.pathname) });
+  const [account, setAccount] = useState('');
+  const [channelsCollapsed, setChannelsCollapsed] = useState(false);
+
+  const accounts = useQuery<ChannelAccountList, ApiFailure>({
+    queryKey: ['inbox', 'accounts'],
+    queryFn: listAccounts,
+    staleTime: 60_000,
+  });
+  const pendingIntakes = useQuery<LeadIntake[], ApiFailure>({
+    queryKey: ['inbox', 'intakes', { status: 'pending' }],
+    queryFn: () => listIntakes({ status: 'pending' }),
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
+  });
+  const overviewList = useQuery<InboxConversation[], ApiFailure>({
+    queryKey: ['inbox', 'conversations', 'overview'],
+    queryFn: () => listConversations({}),
+    refetchInterval: LIST_POLL_MS,
+    refetchIntervalInBackground: false,
+  });
+
+  const overviewRows = overviewList.data ?? [];
+  const nowMs = Date.now();
+  const humanCount = overviewRows.filter((c) => c.mode === 'human').length;
+  const aiCount = overviewRows.filter((c) => c.mode === 'ai').length;
+  const overdueCount = overviewRows.filter((c) => c.slaDueAt !== null && Date.parse(c.slaDueAt) < nowMs).length;
+  const pendingIntakeCount = pendingIntakes.data?.length ?? 0;
+
+  const countByAccount = new Map<string, number>();
+  for (const c of overviewRows) {
+    countByAccount.set(c.channelAccountId, (countByAccount.get(c.channelAccountId) ?? 0) + 1);
+  }
+
   return (
-    <div className="inbox" data-view={atList ? 'list' : 'thread'}>
+    <div className="inbox-workspace">
       <h1 className="visually-hidden">Inbox</h1>
-      <ConversationList selectedId={conversationId ?? null} />
-      <div className="inbox-main"><Outlet /></div>
+      <div className="inbox-kpi-strip" role="region" aria-label="Chỉ số hội thoại">
+        <KpiCard compact label="Hội thoại gần nhất" value={overviewRows.length} sub={`${accounts.data?.accounts.length ?? 0} kênh kết nối`} />
+        <KpiCard compact label="Chờ nhân viên" value={humanCount} tone={humanCount > 0 ? 'brand' : 'neutral'} sub="Đang ở chế độ Nhân viên" />
+        <KpiCard compact label="AI đang trực" value={aiCount} tone={aiCount > 0 ? 'ai' : 'neutral'} sub="Phản hồi tự động" />
+        <KpiCard compact label="Lead chờ phân loại" value={pendingIntakeCount} tone={pendingIntakeCount > 0 ? 'warn' : 'neutral'} sub="Từ trích xuất tự động" />
+        <KpiCard compact label="Quá hạn SLA" value={overdueCount} tone={overdueCount > 0 ? 'danger' : 'neutral'} sub="Cần phản hồi ngay" />
+      </div>
+
+      <div className={`inbox ${channelsCollapsed ? 'inbox-channels-collapsed' : ''}`} data-view={atList ? 'list' : 'thread'}>
+        <aside className="inbox-channels" aria-label="Danh sách kênh">
+          <div className="row" style={{ padding: '4px 8px 6px' }}>
+            <div className="inbox-channels-head" style={{ padding: 0 }}>Kênh kết nối</div>
+            <span className="spacer" />
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm icon-btn"
+              onClick={() => setChannelsCollapsed((v) => !v)}
+              title="Thu gọn cột kênh"
+              aria-label="Thu gọn cột kênh"
+              style={{ color: '#94A3B8', width: 24, height: 24 }}
+            >
+              <Icon name="layers" />
+            </button>
+          </div>
+          <button
+            type="button"
+            className="inbox-channel-btn"
+            aria-current={account === '' ? 'true' : undefined}
+            onClick={() => setAccount('')}
+          >
+            <Icon name="inbox" />
+            <span className="truncate">Tất cả kênh</span>
+            <span className="count">{overviewRows.length}</span>
+          </button>
+          {accounts.data?.accounts.map((a) => (
+            <button
+              key={a.id}
+              type="button"
+              className="inbox-channel-btn"
+              aria-current={account === a.id ? 'true' : undefined}
+              onClick={() => setAccount(a.id)}
+              title={`${channelKindLabel(a.channel)} · ${a.displayName}`}
+            >
+              <Icon name={a.channel === 'facebook' ? 'facebook' : a.channel === 'zalo_oa' ? 'zalo-oa' : 'zalo'} />
+              <span className="truncate">{a.displayName}</span>
+              <span className="count">{countByAccount.get(a.id) ?? 0}</span>
+            </button>
+          ))}
+          <span className="spacer" />
+          <div className="inbox-channels-head"> Điều hướng nhanh</div>
+          <Link to="/zalo-groups" className="inbox-channel-btn">
+            <Icon name="users" />
+            <span className="truncate">Nhóm Zalo</span>
+          </Link>
+          <Link to="/intakes" className="inbox-channel-btn">
+            <Icon name="bot" />
+            <span className="truncate">Chờ phân loại</span>
+            {pendingIntakeCount > 0 && <span className="count">{pendingIntakeCount}</span>}
+          </Link>
+          {INBOX_SETTINGS_ROLES.includes(actor.role) && (
+            <Link to="/inbox/settings" className="inbox-channel-btn">
+              <Icon name="settings" />
+              <span className="truncate">Cài đặt chia việc</span>
+            </Link>
+          )}
+        </aside>
+
+        <ConversationList
+          selectedId={conversationId ?? null}
+          account={account}
+          onAccountChange={setAccount}
+          accounts={accounts.data?.accounts ?? []}
+          channelsCollapsed={channelsCollapsed}
+          onExpandChannels={() => setChannelsCollapsed(false)}
+        />
+        <div className="inbox-main"><Outlet /></div>
+      </div>
     </div>
   );
 }
@@ -53,6 +171,7 @@ export function InboxIndexPage() {
 
 export function InboxConversationPage() {
   const { conversationId } = useParams({ from: '/inbox/$conversationId' });
+  const [sideOpen, setSideOpen] = useState(false);
   const conversation = useQuery<InboxConversation, ApiFailure>({
     queryKey: ['inbox', 'conversation', conversationId],
     queryFn: () => getConversation(conversationId),
@@ -70,20 +189,40 @@ export function InboxConversationPage() {
   }
   return (
     <div className="inbox-chat">
-      <InboxThread conversation={conversation.data} />
-      <ConversationPanel conversation={conversation.data} />
+      <InboxThread
+        conversation={conversation.data}
+        sideOpen={sideOpen}
+        onToggleSide={() => setSideOpen((v) => !v)}
+      />
+      <ConversationPanel
+        conversation={conversation.data}
+        isOpen={sideOpen}
+        onClose={() => setSideOpen(false)}
+      />
     </div>
   );
 }
 
-function ConversationList({ selectedId }: { selectedId: string | null }) {
+function ConversationList({
+  selectedId,
+  account,
+  onAccountChange,
+  accounts,
+  channelsCollapsed,
+  onExpandChannels,
+}: {
+  selectedId: string | null;
+  account: string;
+  onAccountChange: (accountId: string) => void;
+  accounts: ChannelAccountList['accounts'];
+  channelsCollapsed: boolean;
+  onExpandChannels: () => void;
+}) {
   const actor = useActor();
   const [tab, setTab] = useState<AssigneeTab>('all');
-  const [account, setAccount] = useState('');
   const [mode, setModeFilter] = useState<ConversationMode | ''>('');
   const [search, setSearch] = useState('');
   const q = useDebounced(search.trim(), 300);
-  const accounts = useQuery<ChannelAccountList, ApiFailure>({ queryKey: ['inbox', 'accounts'], queryFn: listAccounts, staleTime: 60_000 });
 
   const filter: ConversationFilter = {
     assignee: tab === 'mine' ? actor.id : tab === 'none' ? 'none' : undefined,
@@ -107,19 +246,37 @@ function ConversationList({ selectedId }: { selectedId: string | null }) {
   return (
     <section className="inbox-list" aria-label="Danh sách hội thoại">
       <div className="inbox-filters">
-        {INBOX_SETTINGS_ROLES.includes(actor.role) && (
-          <Link to="/inbox/settings" className="btn btn-ghost btn-sm" style={{ alignSelf: 'flex-end' }}><Icon name="settings" />Cài đặt chia việc</Link>
-        )}
-        <div className="tabs" role="tablist" aria-label="Lọc theo người được giao" style={{ marginBottom: 0 }}>
-          {ASSIGNEE_TABS.map(([value, label]) => (
-            <button key={value} role="tab" aria-selected={tab === value} onClick={() => setTab(value)}>{label}</button>
-          ))}
+        <div className="row" style={{ gap: 6 }}>
+          {channelsCollapsed && (
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm icon-btn"
+              onClick={onExpandChannels}
+              title="Mở danh sách kênh"
+              aria-label="Mở danh sách kênh"
+            >
+              <Icon name="layers" />
+            </button>
+          )}
+          <SegmentedControl
+            size="sm"
+            ariaLabel="Lọc theo người được giao"
+            value={tab}
+            onChange={setTab}
+            options={ASSIGNEE_TABS}
+          />
+          <span className="spacer" />
+          {INBOX_SETTINGS_ROLES.includes(actor.role) && (
+            <Link to="/inbox/settings" className="btn btn-ghost btn-sm icon-btn" title="Cài đặt chia việc" aria-label="Cài đặt chia việc">
+              <Icon name="settings" />
+            </Link>
+          )}
         </div>
         <input type="search" aria-label="Tìm hội thoại theo tên khách" placeholder="Tìm theo tên khách…" value={search} onChange={(e) => setSearch(e.target.value)} />
         <div className="row">
-          <select aria-label="Lọc theo tài khoản kênh" value={account} onChange={(e) => setAccount(e.target.value)}>
+          <select aria-label="Lọc theo tài khoản kênh" value={account} onChange={(e) => onAccountChange(e.target.value)}>
             <option value="">Mọi tài khoản</option>
-            {accounts.data?.accounts.map((a) => <option key={a.id} value={a.id}>{channelKindLabel(a.channel)} · {a.displayName}</option>)}
+            {accounts.map((a) => <option key={a.id} value={a.id}>{channelKindLabel(a.channel)} · {a.displayName}</option>)}
           </select>
           <select aria-label="Lọc theo chế độ" value={mode} onChange={(e) => setModeFilter(e.target.value as ConversationMode | '')}>
             <option value="">Mọi chế độ</option>
@@ -147,20 +304,39 @@ function ConversationList({ selectedId }: { selectedId: string | null }) {
 }
 
 function ConversationRow({ conversation: c, selected }: { conversation: InboxConversation; selected: boolean }) {
+  const name = conversationName(c);
   const preview = c.lastMessageBody ? `${SENDER_PREFIX[c.lastMessageSenderKind ?? ''] ?? ''}${c.lastMessageBody}` : '';
+  const unread = c.unreadCount ?? 0;
+  const overdue = c.slaDueAt !== null && Date.parse(c.slaDueAt) < Date.now();
   return (
     <li>
       <Link to="/inbox/$conversationId" params={{ conversationId: c.id }} className="conv-row" aria-current={selected ? 'true' : undefined}>
-        <div className="row">
-          <span className="truncate conv-name">{conversationName(c)}</span>
-          <span className="spacer" />
-          <time className="small muted nowrap" dateTime={c.lastMessageAt ?? undefined} title={fmtDateTime(c.lastMessageAt, true)}>{fmtShortTime(c.lastMessageAt)}</time>
-        </div>
-        {preview && <div className="small text-2 truncate">{preview}</div>}
-        <div className="row-wrap conv-meta">
-          <span className="small muted truncate">{conversationChannelLabel(c)}{c.kind === 'group' ? ' · Nhóm' : ''}</span>
-          <ModeBadge mode={c.mode} />
-          <span className="small muted truncate">{c.assigneeName ?? 'Chưa giao'}</span>
+        <div className="row" style={{ alignItems: 'flex-start', gap: 10 }}>
+          <Avatar name={name} />
+          <div className="stack-xs" style={{ flex: 1, minWidth: 0 }}>
+            <div className="row" style={{ gap: 6 }}>
+              <span className="truncate conv-name">{name}</span>
+              <ChannelBadge channel={c.channel} compact />
+              <span className="spacer" />
+              <time className="small muted nowrap" dateTime={c.lastMessageAt ?? undefined} title={fmtDateTime(c.lastMessageAt, true)}>
+                {fmtShortTime(c.lastMessageAt)}
+              </time>
+            </div>
+            <div className="row" style={{ gap: 6 }}>
+              {preview ? (
+                <div className="small text-2 truncate" style={{ flex: 1, fontWeight: unread > 0 ? 600 : 400 }}>{preview}</div>
+              ) : (
+                <div className="small muted truncate" style={{ flex: 1 }}>Chưa có tin nhắn</div>
+              )}
+              {unread > 0 && <span className="conv-unread-badge" aria-label={`${unread} tin chưa đọc`}>{unread}</span>}
+            </div>
+            <div className="row-wrap conv-meta">
+              <ModeBadge mode={c.mode} />
+              {c.leadCode && <Badge tone="info">{c.leadCode}</Badge>}
+              {overdue && <Badge tone="danger">Quá hạn SLA</Badge>}
+              <span className="small muted truncate">{c.assigneeName ?? 'Chưa giao'}</span>
+            </div>
+          </div>
         </div>
       </Link>
     </li>
@@ -173,8 +349,16 @@ const MODE_ACTIONS: { mode: ConversationMode; label: string; done: string; prima
   { mode: 'paused', label: 'Tạm dừng', done: 'Đã tạm dừng hội thoại' },
 ];
 
-/** Right column: who handles the conversation, its mode, the handoff reason and mode actions. */
-function ConversationPanel({ conversation: c }: { conversation: InboxConversation }) {
+/** Right column ("Khách trong CRM"): customer record, linked leads, pending intake, assignee, and mode controls. */
+function ConversationPanel({
+  conversation: c,
+  isOpen,
+  onClose,
+}: {
+  conversation: InboxConversation;
+  isOpen?: boolean;
+  onClose?: () => void;
+}) {
   const client = useQueryClient();
   const toast = useToast();
   const change = useMutation<SetModeResult, ApiFailure, ConversationMode>({
@@ -182,8 +366,83 @@ function ConversationPanel({ conversation: c }: { conversation: InboxConversatio
     onSuccess: (_data, mode) => toast(MODE_ACTIONS.find((a) => a.mode === mode)?.done ?? 'Đã đổi chế độ'),
     onSettled: () => client.invalidateQueries({ queryKey: ['inbox'] }),
   });
+  const crm = useQuery<InboxContactCrm, ApiFailure>({
+    queryKey: ['inbox', 'contact', c.contactId],
+    queryFn: () => getInboxContactCrm(c.contactId!),
+    enabled: Boolean(c.contactId),
+    refetchInterval: LIST_POLL_MS,
+    refetchIntervalInBackground: false,
+  });
+
+  const contact = crm.data?.contact ?? null;
+  const leads = crm.data?.leads ?? [];
+  const hasOpenLead = crm.data?.hasOpenLead ?? false;
+  const openLeadCode = crm.data?.openLeadCode ?? null;
+
   return (
-    <aside className="inbox-side" aria-label="Thông tin hội thoại">
+    <aside className={`inbox-side ${isOpen ? 'is-open' : ''}`} aria-label="Khách trong CRM">
+      <div className="row">
+        <strong style={{ fontSize: 14 }}>Khách trong CRM</strong>
+        <span className="spacer" />
+        {onClose && isOpen && (
+          <button type="button" className="btn btn-ghost btn-sm icon-btn" onClick={onClose} aria-label="Đóng cột Khách trong CRM">
+            <Icon name="close" />
+          </button>
+        )}
+      </div>
+
+      {c.contactId ? (
+        <div className="stack-sm">
+          {crm.isLoading && <Loading rows={2} />}
+          {crm.error && <ErrorState error={crm.error} onRetry={() => crm.refetch()} />}
+          {contact ? (
+            <div className="crm-contact-card">
+              <div className="row" style={{ gap: 8 }}>
+                <Avatar name={contact.displayName} />
+                <div className="truncate" style={{ flex: 1, minWidth: 0 }}>
+                  <div className="truncate" style={{ fontWeight: 600 }}>{contact.displayName}</div>
+                  <div className="small muted truncate">
+                    Người giữ khách: <strong>{contact.ownerName ?? 'Chưa có'}</strong>
+                  </div>
+                </div>
+                <Link to="/learners/$contactId" params={{ contactId: contact.id }} className="btn btn-ghost btn-sm" title="Mở hồ sơ khách">
+                  <Icon name="external-link" />Hồ sơ
+                </Link>
+              </div>
+              <div className="row" style={{ justifyContent: 'space-between', fontSize: 12.5 }}>
+                <span className="muted">Số điện thoại</span>
+                {contact.phone ? <CopyableText value={contact.phone} mono /> : <span className="muted">Chưa có</span>}
+              </div>
+              {contact.email && (
+                <div className="row" style={{ justifyContent: 'space-between', fontSize: 12.5 }}>
+                  <span className="muted">Email</span>
+                  <span className="truncate">{contact.email}</span>
+                </div>
+              )}
+            </div>
+          ) : (
+            !crm.isLoading && <p className="small muted">Khách thuộc phạm vi của nhân sự khác.</p>
+          )}
+
+          <div className="stack-xs">
+            <div className="field-label">Lead của khách ({leads.length})</div>
+            {leads.length > 0 ? (
+              <div className="stack-xs">
+                {leads.map((l) => <LinkedLeadCard key={l.id} lead={l} />)}
+              </div>
+            ) : (
+              <p className="small muted">Chưa có lead nào trong phạm vi của bạn.</p>
+            )}
+          </div>
+        </div>
+      ) : (
+        <p className="small muted">Hội thoại này chưa gắn với hồ sơ khách nào trong CRM.</p>
+      )}
+
+      {c.kind === 'direct' && (
+        <IntakeCard conversation={c} hasOpenLead={hasOpenLead} openLeadCode={openLeadCode} />
+      )}
+
       <AssigneeSection conversation={c} />
       <PanelSection title="Chế độ">
         <span><ModeBadge mode={c.mode} /></span>
@@ -198,7 +457,6 @@ function ConversationPanel({ conversation: c }: { conversation: InboxConversatio
           </button>
         ))}
       </div>
-      {c.kind === 'direct' && <IntakeCard conversation={c} />}
       <PanelSection title="Kênh">
         <span className="small">{conversationChannelLabel(c)}{c.kind === 'group' ? ' · Nhóm' : ''}</span>
         {c.lastInboundAt && <span className="small muted">Khách nhắn lần cuối {fmtDateTime(c.lastInboundAt)}</span>}

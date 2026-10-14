@@ -13,6 +13,7 @@ import { LogActivityForm } from '../components/lead-actions';
 import { Alert, Badge, Empty, ErrorState, Field, FormError, Loading, Modal, fieldErrors, useToast } from '../components/ui';
 import { fmtDate, fmtDateTime, fmtDue, fmtMoney } from '../format';
 import type { LearnerContact, LearnerDetail, LearnerLead, LearnerPermissions, LearnerProduct, ProductItem } from '../types';
+import { LeadProgramEditor } from './lead-detail';
 
 export function LearnerDetailPage() {
   const { contactId } = useParams({ from: '/learners/$contactId' });
@@ -211,11 +212,14 @@ function LeadCard({ lead, canWork }: { lead: LearnerLead; canWork: boolean }) {
       <div className="card-body stack">
         <dl className="dl">
           <dt>Nguồn</dt><dd>{lead.sourceLabel}{lead.contract?.name ? ` · ${lead.contract.name}` : ''}</dd>
+          <dt>Chương trình</dt>
+          <dd>{[lead.productName, lead.courseName].filter(Boolean).join(' · ') || <span className="muted">Chưa chọn</span>}</dd>
           <dt>Nhu cầu</dt><dd>{lead.needSummary}</dd>
           {lead.nextAction && lead.status === 'active' && <><dt>Next Action</dt><dd>{lead.nextAction.title} · {fmtDue(lead.nextAction.dueAt)}</dd></>}
           {lead.status === 'lost' && <><dt>Lý do</dt><dd>{lead.lostReason}{lead.lostNote ? `: ${lead.lostNote}` : ''}</dd></>}
           {lead.status === 'won' && lead.wonNote && <><dt>Ghi chú</dt><dd>{lead.wonNote}</dd></>}
         </dl>
+        {canWork && <LeadProgramEditor lead={lead} />}
         <ol className="list" aria-label="Hành trình" style={{ border: '1px solid var(--border)', borderRadius: 8 }}>
           {lead.steps.map((s) => {
             const by = LEARNER_JOURNEY.find((j) => j.code === s.code)?.by;
@@ -455,28 +459,28 @@ function ProductsCard({ detail, canWork }: { detail: Detail; canWork: boolean })
     <li key={p.id} className="row">
       <div style={{ flex: 1, minWidth: 0 }}>
         <div className="truncate">{p.name}</div>
-        <div className="small muted">{fmtMoney(p.priceVnd, false)} · gắn {fmtDate(p.attachedAt)}{p.detachedAt ? ` · gỡ ${fmtDate(p.detachedAt)}` : ''}</div>
+        <div className="small muted">{p.priceVnd === 0 ? 'Miễn phí / báo giá riêng' : fmtMoney(p.priceVnd, false)} · gắn {fmtDate(p.attachedAt)}{p.detachedAt ? ` · gỡ ${fmtDate(p.detachedAt)}` : ''}</div>
       </div>
       {canWork && !p.detachedAt && (
         <button className="btn btn-sm" disabled={detach.isPending}
-          onClick={() => detach.mutate({ customerProductId: p.id, version: p.version }, { onSuccess: () => toast('Đã gỡ sản phẩm') })}>Gỡ</button>
+          onClick={() => detach.mutate({ customerProductId: p.id, version: p.version }, { onSuccess: () => toast('Đã gỡ chương trình') })}>Gỡ</button>
       )}
     </li>
   );
   return (
     <section className="card" aria-labelledby="ln-prod">
-      <div className="card-head"><h2 id="ln-prod">Sản phẩm</h2></div>
-      {detail.products.length === 0 ? <Empty title="Chưa gắn sản phẩm" /> : <ul className="list">{detail.products.map(row)}</ul>}
+      <div className="card-head"><h2 id="ln-prod">Chương trình đã gắn</h2></div>
+      {detail.products.length === 0 ? <Empty title="Chưa gắn chương trình" /> : <ul className="list">{detail.products.map(row)}</ul>}
       {canWork && (
         <div className="card-body stack-sm" style={{ borderTop: '1px solid var(--border)' }}>
           <div className="row">
-            <label className="visually-hidden" htmlFor="ln-pick">Chọn sản phẩm</label>
+            <label className="visually-hidden" htmlFor="ln-pick">Chọn chương trình</label>
             <select id="ln-pick" value={pick} onChange={(e) => setPick(e.target.value)} style={{ flex: 1 }}>
-              <option value="">Chọn sản phẩm để gắn</option>
+              <option value="">Chọn chương trình để gắn</option>
               {options.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
             <button className="btn btn-primary" disabled={!pick || attach.isPending}
-              onClick={() => attach.mutate({ contactId: detail.contact.id, productId: pick }, { onSuccess: () => { setPick(''); toast('Đã gắn sản phẩm'); } })}>Gắn</button>
+              onClick={() => attach.mutate({ contactId: detail.contact.id, productId: pick }, { onSuccess: () => { setPick(''); toast('Đã gắn chương trình'); } })}>Gắn</button>
           </div>
           <FormError error={attach.error ?? detach.error} />
         </div>

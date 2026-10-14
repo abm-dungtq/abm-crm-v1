@@ -1,7 +1,7 @@
 import { Link } from '@tanstack/react-router';
 import { useQuery } from '@tanstack/react-query';
 import { ApiFailure, listIntakes } from '../api';
-import { Empty, ErrorState, Loading } from '../components/ui';
+import { Badge, ChannelBadge, Empty, ErrorState, Loading } from '../components/ui';
 import { fmtAgo, fmtDateTime } from '../format';
 import type { LeadIntake } from '../types';
 
@@ -32,7 +32,7 @@ export function IntakesPage() {
           <div className="table-wrap">
             <table className="table responsive">
               <thead>
-                <tr><th>Khách</th><th>Kênh</th><th>Liên hệ</th><th>Nhu cầu</th><th>Trích lúc</th><th><span className="visually-hidden">Thao tác</span></th></tr>
+                <tr><th>Khách</th><th>Kênh</th><th>Liên hệ</th><th>Chương trình / Nhu cầu</th><th>Trích lúc</th><th><span className="visually-hidden">Thao tác</span></th></tr>
               </thead>
               <tbody>
                 {intakes.data.map((i) => {
@@ -44,9 +44,19 @@ export function IntakesPage() {
                         <div className="cell-title">{name}</div>
                         {proposals > 0 && <div className="cell-sub">{proposals} giá trị mới chờ xác nhận</div>}
                       </td>
-                      <td data-label="Kênh">{i.channel === 'facebook' ? 'Fanpage' : `Zalo · ${i.accountName}`}</td>
+                      <td data-label="Kênh">
+                        <div className="row" style={{ gap: 6 }}>
+                          <ChannelBadge channel={i.channel} compact />
+                          <span className="small">{i.accountName}</span>
+                        </div>
+                      </td>
                       <td data-label="Liên hệ">{[i.fields.phone, i.fields.email].filter(Boolean).join(' · ') || <span className="muted">Chưa có</span>}</td>
-                      <td data-label="Nhu cầu"><span className="intake-need">{i.fields.need ?? i.fields.interest ?? <span className="muted">Chưa rõ</span>}</span></td>
+                      <td data-label="Chương trình / Nhu cầu">
+                        <div className="stack-xs">
+                          {i.fields.program && <Badge tone="agent">{i.fields.program}</Badge>}
+                          <span className="intake-need">{i.fields.need ?? i.fields.interest ?? (!i.fields.program ? <span className="muted">Chưa rõ</span> : null)}</span>
+                        </div>
+                      </td>
                       <td data-label="Trích lúc" className="nowrap"><span title={fmtDateTime(i.updatedAt, true)}>{fmtAgo(i.updatedAt)}</span></td>
                       <td>
                         <Link to="/inbox/$conversationId" params={{ conversationId: i.conversationId }} className="btn btn-sm"

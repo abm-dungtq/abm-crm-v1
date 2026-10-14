@@ -37,7 +37,8 @@ export interface LeadHealth {
 export interface LeadItem {
   id: string;
   code: string;
-  stage: StageCode;
+  pipeline?: 'b2b' | 'learner';
+  stage: StageCode | string;
   status: 'queue' | 'active' | 'won' | 'lost';
   source: string;
   needSummary: string;
@@ -50,8 +51,13 @@ export interface LeadItem {
   createdAt: string;
   closedAt: string | null;
   lostReason: string | null;
+  productId?: string | null;
+  productName?: string | null;
+  courseId?: string | null;
+  courseName?: string | null;
   owner: { id: string; name: string | null } | null;
   team: { id: string; name: string | null } | null;
+  contactId?: string;
   contactName: string;
   account: { id: string; name: string | null } | null;
   nextAction: { id: string; title: string | null; dueAt: string | null } | null;
@@ -79,6 +85,14 @@ export interface TaskItem {
   bucket: 'overdue' | 'today' | 'upcoming' | 'done';
 }
 
+export interface DashboardPipelineBreakdown {
+  activeLeads: number;
+  queueLeads: number;
+  wonCount: number;
+  lostCount: number;
+  pipelineValue: number;
+}
+
 export interface Dashboard {
   truncated: {
     leads: { shown: number; total: number } | null;
@@ -89,7 +103,9 @@ export interface Dashboard {
   kpi: {
     activeLeads: number; queueLeads: number; pipelineValue: number; tasksToday: number; overdueTasks: number;
     firstContactBreaches: number; staleLeads: number; wonCount: number; wonValue: number; lostCount: number;
+    byPipeline?: { b2b: DashboardPipelineBreakdown; learner: DashboardPipelineBreakdown };
   };
+  byPipeline?: { b2b: DashboardPipelineBreakdown; learner: DashboardPipelineBreakdown };
   pipeline: { stage: StageCode; count: number; value: number }[];
   bySale: { id: string; name: string; active: number; overdue: number; stale: number; won: number; lost: number; value: number }[];
   attention: LeadItem[];
@@ -203,7 +219,8 @@ export interface OverviewMatrixRow {
 
 export interface LearnerRow {
   contactId: string; name: string; phone: string | null; ownerName: string | null; stage: string; stageLabel: string;
-  course: string; source: string; sourceLabel: string; contract: string | null; holdExpiresAt: string | null;
+  course: string; productId?: string | null; productName?: string | null; courseId?: string | null; courseName?: string | null;
+  source: string; sourceLabel: string; contract: string | null; holdExpiresAt: string | null;
   version: number; held: boolean; canClaim: boolean;
 }
 export interface LearnerList { items: LearnerRow[]; truncated: boolean }
@@ -218,6 +235,7 @@ export interface LearnerStep {
 export interface LearnerLead {
   id: string; code: string; stage: string; stageLabel: string; status: 'active' | 'won' | 'lost'; source: string; sourceLabel: string;
   needSummary: string; version: number; createdAt: string; closedAt: string | null; lostReason: string | null; lostNote: string | null; wonNote: string | null;
+  productId?: string | null; productName?: string | null; courseId?: string | null; courseName?: string | null;
   contract: { id: string; name: string | null } | null; nextAction: { id: string; title: string; dueAt: string } | null; steps: LearnerStep[];
 }
 export interface LearnerProduct {
@@ -239,7 +257,23 @@ export interface LearnerEnrollment {
   id: string; version: number; status: string; leadId: string; leadCode: string; classId: string; className: string; courseName: string;
 }
 
-export interface ProductItem { id: string; name: string; description: string | null; priceVnd: number; active: boolean; version: number }
+export interface ProductCourseItem {
+  id: string;
+  productId: string;
+  name: string;
+  status: 'active' | 'inactive';
+  version: number;
+}
+
+export interface ProductItem {
+  id: string;
+  name: string;
+  description: string | null;
+  priceVnd: number;
+  active: boolean;
+  version: number;
+  courses?: ProductCourseItem[];
+}
 
 export interface PartnerRow {
   id: string; name: string; status: string; startsOn: string | null; endsOn: string | null; accountId: string; accountName: string;
@@ -280,6 +314,8 @@ export interface InboxConversation {
   lastMessageBody: string | null;
   lastMessageSenderKind: SenderKind | null;
   lastMessageCreatedAt: string | null;
+  unreadCount?: number;
+  leadCode?: string | null;
 }
 
 /** Server-side filters of GET /inbox/conversations; `assignee` is a user id or `none` for unassigned. */
@@ -385,9 +421,9 @@ export interface RosterMember {
 export interface AssignResult { assigneeUserId: string; assigneeName: string }
 
 // ---------- lead intake (src/worker/inbox/intake.ts) ----------
-export const INTAKE_FIELDS = ['name', 'phone', 'email', 'need', 'interest', 'note'] as const;
+export const INTAKE_FIELDS = ['name', 'phone', 'email', 'program', 'need', 'interest', 'note'] as const;
 export type IntakeField = (typeof INTAKE_FIELDS)[number];
-export type IntakeValues = Partial<Record<IntakeField, string>>;
+export type IntakeValues = Partial<Record<IntakeField, string>> & { productId?: string };
 export type IntakeStatus = 'pending' | 'classified' | 'discarded';
 export type IntakePipeline = 'b2b' | 'learner';
 export interface LeadIntake {
@@ -409,7 +445,24 @@ export interface LeadIntake {
   createdAt: string;
   updatedAt: string;
 }
-export interface ClassifyIntakeResult { intakeId: string; leadId: string; contactId: string }
+export interface ClassifyIntakeResult { intakeId: string; leadId: string; leadCode?: string; contactId: string }
+
+export interface InboxContactCrm {
+  contact: {
+    id: string;
+    displayName: string;
+    name?: string;
+    ownerUserId: string | null;
+    ownerName: string | null;
+    holdExpiresAt: string | null;
+    phone: string | null;
+    email: string | null;
+    restricted: boolean;
+  };
+  leads: LeadItem[];
+  hasOpenLead: boolean;
+  openLeadCode: string | null;
+}
 
 // ---------- Zalo groups and recurring posts (src/worker/inbox/group-schedules.ts) ----------
 /** A Zalo group conversation; `id` is the conversation id. */

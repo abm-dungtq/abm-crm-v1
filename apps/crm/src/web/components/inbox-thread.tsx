@@ -2,12 +2,12 @@ import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from
 import { Link } from '@tanstack/react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ChannelKind, ConversationMode } from '@abm/contracts';
-import { ApiFailure, listMessages, sendMessage } from '../api';
+import { ApiFailure, listMessages, sendMessage, setMode } from '../api';
 import { fmtDateTime } from '../format';
 import { conversationChannelLabel, mergeMessages, senderLabel } from '../inbox-format';
-import type { InboxConversation, InboxMessage, SendMessageResult } from '../types';
+import type { InboxConversation, InboxMessage, SendMessageResult, SetModeResult } from '../types';
 import { Icon } from './icons';
-import { Badge, ErrorState, FormError, Loading, type Tone } from './ui';
+import { Avatar, Badge, ChannelBadge, ErrorState, FormError, Loading, SegmentedControl, useToast, type Tone } from './ui';
 
 /** Same limit as the Worker's staff send. */
 export const STAFF_TEXT_MAX = 2000;
@@ -22,6 +22,17 @@ export const MODE_LABEL: Record<ConversationMode, [string, Tone]> = {
   paused: ['Tạm dừng', 'warn'],
 };
 export const ModeBadge = ({ mode }: { mode: ConversationMode }) => <Badge tone={MODE_LABEL[mode][1]} dot>{MODE_LABEL[mode][0]}</Badge>;
+
+const MODE_SEGMENT_OPTIONS: { value: ConversationMode; label: string }[] = [
+  { value: 'ai', label: 'AI' },
+  { value: 'human', label: 'Nhân viên' },
+  { value: 'paused', label: 'Tạm dừng' },
+];
+const MODE_DONE_TOAST: Record<ConversationMode, string> = {
+  ai: 'Đã trả hội thoại cho AI',
+  human: 'Đã tiếp quản hội thoại',
+  paused: 'Đã tạm dừng hội thoại',
+};
 
 export const channelLabel = (c: Pick<InboxConversation, 'channel' | 'accountName'>) => conversationChannelLabel(c);
 export const conversationName = (c: Pick<InboxConversation, 'displayName' | 'kind'>) =>
@@ -154,8 +165,25 @@ function Composer({ conversationId }: { conversationId: string }) {
  * Middle column: header, messages (polled every few seconds) and the composer. `backTo` is the list the
  * small-screen back button returns to.
  */
-export function InboxThread({ conversation, backTo = '/inbox' }: { conversation: InboxConversation; backTo?: '/inbox' | '/zalo-groups' }) {
+export function InboxThread({
+  conversation,
+  backTo = '/inbox',
+  onToggleSide,
+  sideOpen,
+}: {
+  conversation: InboxConversation;
+  backTo?: '/inbox' | '/zalo-groups';
+  onToggleSide?: () => void;
+  sideOpen?: boolean;
+}) {
+  const client = useQueryClient();
+  const toast = useToast();
   const messages = useThreadMessages(conversation.id);
+  const changeMode = useMutation<SetModeResult, ApiFailure, ConversationMode>({
+    mutationFn: (mode) => setMode(conversation.id, mode),
+    onSuccess: (_data, mode) => toast(MODE_DONE_TOAST[mode] ?? 'Đã đổi chế độ'),
+    onSettled: () => client.invalidateQueries({ queryKey: ['inbox'] }),
+  });
   const list = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   useEffect(() => { stick.current = true; }, [conversation.id]);
@@ -170,18 +198,42 @@ export function InboxThread({ conversation, backTo = '/inbox' }: { conversation:
     if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   };
   const failed = messages.data?.filter((m) => m.status === 'failed').length ?? 0;
+  const name = conversationName(conversation);
 
   return (
-    <section className="inbox-thread" aria-label={`Hội thoại với ${conversationName(conversation)}`}>
+    <section className="inbox-thread" aria-label={`Hội thoại với ${name}`}>
       <header className="inbox-thread-head">
         <Link to={backTo} className="btn btn-ghost icon-btn inbox-back" aria-label="Quay lại danh sách hội thoại"><Icon name="arrow" style={{ transform: 'rotate(180deg)' }} /></Link>
-        <div className="truncate" style={{ flex: 1 }}>
-          <div className="truncate" style={{ fontWeight: 600 }}>{conversationName(conversation)}</div>
+        <Avatar name={name} />
+        <div className="truncate" style={{ flex: '1 1 160px', minWidth: 0 }}>
+          <div className="row" style={{ gap: 6 }}>
+            <span className="truncate" style={{ fontWeight: 600 }} title={name}>{name}</span>
+            <ChannelBadge channel={conversation.channel} compact />
+            {conversation.leadCode && <Badge tone="info">{conversation.leadCode}</Badge>}
+          </div>
           <div className="small muted truncate">
-            {channelLabel(conversation)}{conversation.kind === 'group' ? ' · Nhóm' : ''} · {conversation.assigneeName ? `Giao cho ${conversation.assigneeName}` : 'Chưa giao'}
+            {channelLabel(conversation)}{conversation.kind === 'group' ? ' · Nhóm' : ''} · {conversation.assigneeName ? `Phụ trách: ${conversation.assigneeName}` : 'Chưa giao'}
           </div>
         </div>
-        <ModeBadge mode={conversation.mode} />
+        <SegmentedControl
+          size="sm"
+          ariaLabel="Chế độ hội thoại"
+          value={conversation.mode}
+          onChange={(mode) => { if (mode !== conversation.mode && !changeMode.isPending) changeMode.mutate(mode); }}
+          options={MODE_SEGMENT_OPTIONS}
+        />
+        {onToggleSide && (
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm icon-btn"
+            onClick={onToggleSide}
+            aria-expanded={sideOpen}
+            aria-label="Mở hoặc đóng cột Khách trong CRM"
+            title="Khách trong CRM"
+          >
+            <Icon name="panel-right" />
+          </button>
+        )}
       </header>
       {failed > 0 && (
         <div className="alert" data-tone="danger" role="alert" style={{ margin: '8px 12px 0' }}>

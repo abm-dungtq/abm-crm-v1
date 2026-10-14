@@ -1,15 +1,17 @@
 import { useState, type FormEvent } from 'react';
+import { Link } from '@tanstack/react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { COMMANDS } from '@abm/contracts';
 import { useActor } from '../actor-context';
 import { ApiFailure, classifyIntake, confirmIntakeField, discardIntake, linkIntakeContact, listIntakes, requestExtraction, useApi } from '../api';
+import { fmtMoney } from '../format';
 import { DuplicateMatches, duplicateMatches, type DuplicateMatch } from '../pages/lead-new';
 import { useOwnerOptions } from '../pages/learners';
 import {
-  INTAKE_FIELDS, type ClassifyIntakeResult, type InboxConversation, type IntakeField, type IntakePipeline, type LeadIntake, type LearnerList,
+  INTAKE_FIELDS, type ClassifyIntakeResult, type InboxConversation, type IntakeField, type IntakePipeline, type LeadIntake, type LearnerList, type ProductItem,
 } from '../types';
 import { NextActionFields, emptyNextAction, nextActionPayload } from './lead-actions';
-import { Alert, ErrorState, Field, FormError, Loading, Modal, fieldErrors, useDebounced, useToast } from './ui';
+import { Alert, Badge, ErrorState, Field, FormError, Loading, Modal, fieldErrors, useDebounced, useToast } from './ui';
 
 /** Extraction results arrive from the bridge a little later, so the open conversation's intake is polled. */
 const INTAKE_POLL_MS = 10_000;
@@ -17,7 +19,7 @@ const INTAKE_POLL_MS = 10_000;
 const NEED_MAX = 1000;
 
 export const INTAKE_FIELD_LABEL: Record<IntakeField, string> = {
-  name: 'Tên', phone: 'SĐT', email: 'Email', need: 'Nhu cầu', interest: 'Quan tâm', note: 'Ghi chú',
+  name: 'Tên', phone: 'SĐT', email: 'Email', program: 'Chương trình', need: 'Nhu cầu', interest: 'Quan tâm', note: 'Ghi chú',
 };
 const PIPELINE_LABEL: Record<IntakePipeline, string> = { b2b: 'Tạo lead B2B', learner: 'Tạo lead học viên' };
 /** Roles that list customers in their scope (GET /learners), the same scope link-contact checks. */
@@ -31,8 +33,16 @@ function useInboxRefresh() {
   return () => client.invalidateQueries({ queryKey: ['inbox'] });
 }
 
-/** Right-column card of a direct conversation: the pending intake, if any, and "Cập nhật CRM". */
-export function IntakeCard({ conversation }: { conversation: InboxConversation }) {
+/** Right-column card of a direct conversation: the pending intake, if any, and "Cập nhật CRM" / "Lấy thông tin mới vào lead". */
+export function IntakeCard({
+  conversation,
+  hasOpenLead = false,
+  openLeadCode = null,
+}: {
+  conversation: InboxConversation;
+  hasOpenLead?: boolean;
+  openLeadCode?: string | null;
+}) {
   const toast = useToast();
   const refresh = useInboxRefresh();
   const intakes = useQuery<LeadIntake[], ApiFailure>({
@@ -43,32 +53,62 @@ export function IntakeCard({ conversation }: { conversation: InboxConversation }
   });
   const extract = useMutation<{ commandId: string }, ApiFailure>({
     mutationFn: () => requestExtraction(conversation.id),
-    onSuccess: () => toast('Đã gửi yêu cầu cập nhật CRM. Kết quả hiện ở đây sau ít phút.'),
+    onSuccess: () => toast(
+      hasOpenLead
+        ? 'Đã gửi yêu cầu lấy thông tin mới vào lead đang mở.'
+        : 'Đã gửi yêu cầu cập nhật CRM. Kết quả hiện ở đây sau ít phút.',
+    ),
     onSettled: refresh,
   });
   const intake = intakes.data?.[0];
+  const extractLabel = hasOpenLead ? 'Lấy thông tin mới vào lead' : 'Cập nhật CRM';
   return (
     <section className="stack-sm intake-card" aria-label="Lead chờ phân loại">
-      <div className="row">
-        <div className="field-label">Lead chờ phân loại</div>
+      <div className="row" style={{ flexWrap: 'wrap', gap: 6 }}>
+        <div className="field-label">{hasOpenLead ? 'Cập nhật từ hội thoại' : 'Lead chờ phân loại'}</div>
         <span className="spacer" />
         <button className="btn btn-sm" onClick={() => extract.mutate()} disabled={extract.isPending}
           title="Nhờ bot đọc lại hội thoại và cập nhật thông tin khách">
-          {extract.isPending ? 'Đang gửi…' : 'Cập nhật CRM'}
+          {extract.isPending ? 'Đang gửi…' : extractLabel}
         </button>
       </div>
       <FormError error={extract.error} />
       {intakes.isLoading && <Loading rows={1} />}
       {intakes.error && <ErrorState error={intakes.error} onRetry={() => intakes.refetch()} />}
       {intakes.data && !intake && (
-        <p className="small muted">Chưa có. Bot trích thông tin khách khi chuyển người, khi trả lại AI hoặc khi khách im 15 phút.</p>
+        <p className="small muted">
+          {hasOpenLead
+            ? `Khách đã có lead đang mở${openLeadCode ? ` (${openLeadCode})` : ''}. Bấm “${extractLabel}” để bot đọc lại hội thoại và ghi chú thông tin mới vào lead.`
+            : 'Chưa có. Bot trích thông tin khách khi chuyển người, khi trả lại AI hoặc khi khách im 15 phút.'}
+        </p>
       )}
-      {intake && <IntakeDetails key={intake.id} intake={intake} fallbackName={conversation.displayName} />}
+      {intake && (
+        <IntakeDetails
+          key={intake.id}
+          intake={intake}
+          fallbackName={conversation.displayName}
+          conversationContactId={conversation.contactId}
+          hasOpenLead={hasOpenLead}
+          openLeadCode={openLeadCode}
+        />
+      )}
     </section>
   );
 }
 
-function IntakeDetails({ intake, fallbackName }: { intake: LeadIntake; fallbackName: string | null }) {
+function IntakeDetails({
+  intake,
+  fallbackName,
+  conversationContactId,
+  hasOpenLead,
+  openLeadCode,
+}: {
+  intake: LeadIntake;
+  fallbackName: string | null;
+  conversationContactId: string | null;
+  hasOpenLead?: boolean;
+  openLeadCode?: string | null;
+}) {
   const actor = useActor();
   const toast = useToast();
   const refresh = useInboxRefresh();
@@ -107,29 +147,68 @@ function IntakeDetails({ intake, fallbackName }: { intake: LeadIntake; fallbackN
         </dl>
       ) : <p className="small muted">Bot chưa trích được thông tin nào.</p>}
       <FormError error={confirm.error} />
-      <div className="stack-sm">
-        {(['b2b', 'learner'] as const).filter(canCreate).map((p) => (
-          <button key={p} className={p === 'b2b' ? 'btn btn-primary' : 'btn'} onClick={() => setPipeline(p)}>{PIPELINE_LABEL[p]}</button>
-        ))}
-        <button className="btn btn-ghost" onClick={() => setDiscarding(true)}>Bỏ qua</button>
-      </div>
-      {pipeline && <ClassifyDialog intake={intake} pipeline={pipeline} fallbackName={fallbackName} onClose={() => setPipeline(null)} />}
+      {hasOpenLead ? (
+        <div className="stack-sm">
+          <p className="small muted">
+            Khách đã có lead đang mở{openLeadCode ? ` (${openLeadCode})` : ''} nên không tạo thêm lead mới từ thẻ này.
+          </p>
+          <button className="btn btn-ghost btn-sm" onClick={() => setDiscarding(true)}>Bỏ qua thẻ chờ</button>
+        </div>
+      ) : (
+        <div className="stack-sm">
+          {(['b2b', 'learner'] as const).filter(canCreate).map((p) => (
+            <button key={p} className={p === 'b2b' ? 'btn btn-primary' : 'btn'} onClick={() => setPipeline(p)}>{PIPELINE_LABEL[p]}</button>
+          ))}
+          <button className="btn btn-ghost" onClick={() => setDiscarding(true)}>Bỏ qua</button>
+        </div>
+      )}
+      {pipeline && !hasOpenLead && (
+        <ClassifyDialog
+          intake={intake}
+          pipeline={pipeline}
+          fallbackName={fallbackName}
+          conversationContactId={conversationContactId}
+          onClose={() => setPipeline(null)}
+        />
+      )}
       {discarding && <DiscardDialog intakeId={intake.id} onClose={() => setDiscarding(false)} />}
     </div>
   );
 }
 
 interface ClassifyForm {
-  contactName: string; phone: string; email: string; companyName: string; taxCode: string; needSummary: string; sourceNote: string; ownerUserId: string;
+  contactName: string;
+  phone: string;
+  email: string;
+  companyName: string;
+  taxCode: string;
+  needSummary: string;
+  sourceNote: string;
+  ownerUserId: string;
+  productId: string;
+  courseId: string;
 }
 
-/** Form values from the intake: name, phone and email as they are; need, interest and note together as the need summary. */
+/** Form values from the intake: name, phone, email and pre-matched productId; need, program, interest and note together as the need summary. */
 function prefill(intake: LeadIntake, fallbackName: string | null): ClassifyForm {
   const f = intake.fields;
-  const need = [f.need, f.interest && `Quan tâm: ${f.interest}`, f.note && `Ghi chú: ${f.note}`].filter(Boolean).join('\n');
+  const need = [
+    f.need,
+    f.program && `Chương trình quan tâm: ${f.program}`,
+    f.interest && `Quan tâm: ${f.interest}`,
+    f.note && `Ghi chú: ${f.note}`,
+  ].filter(Boolean).join('\n');
   return {
-    contactName: f.name ?? fallbackName?.trim() ?? '', phone: f.phone ?? '', email: f.email ?? '', companyName: '', taxCode: '',
-    needSummary: need.slice(0, NEED_MAX), sourceNote: '', ownerUserId: '',
+    contactName: f.name ?? fallbackName?.trim() ?? '',
+    phone: f.phone ?? '',
+    email: f.email ?? '',
+    companyName: '',
+    taxCode: '',
+    needSummary: (need || f.program || '').slice(0, NEED_MAX),
+    sourceNote: '',
+    ownerUserId: '',
+    productId: f.productId ?? '',
+    courseId: '',
   };
 }
 
@@ -140,8 +219,18 @@ const opt = (v: string) => v.trim() || undefined;
  * DUPLICATE_SUSPECTED answer offers "Vẫn tạo lead mới" (resent with confirmNotDuplicate only on that click) or
  * "Gắn vào khách có sẵn".
  */
-function ClassifyDialog({ intake, pipeline, fallbackName, onClose }: {
-  intake: LeadIntake; pipeline: IntakePipeline; fallbackName: string | null; onClose: () => void;
+function ClassifyDialog({
+  intake,
+  pipeline,
+  fallbackName,
+  conversationContactId,
+  onClose,
+}: {
+  intake: LeadIntake;
+  pipeline: IntakePipeline;
+  fallbackName: string | null;
+  conversationContactId: string | null;
+  onClose: () => void;
 }) {
   const actor = useActor();
   const toast = useToast();
@@ -149,24 +238,44 @@ function ClassifyDialog({ intake, pipeline, fallbackName, onClose }: {
   const isSale = actor.role === 'sale';
   const isAdmin = actor.role === 'admin';
   const b2b = pipeline === 'b2b';
+  const linkedContactId = intake.contactId ?? conversationContactId ?? null;
+  const products = useApi<ProductItem[]>('/products');
+  const activeProducts = (products.data ?? []).filter((p) => Boolean(p.active) || p.id === intake.fields.productId);
   const [form, setForm] = useState(() => prefill(intake, fallbackName));
   const [next, setNext] = useState(() => emptyNextAction(b2b ? 'Gọi giới thiệu và xác nhận nhu cầu' : 'Gọi liên hệ và xác nhận nhu cầu học'));
   const [linking, setLinking] = useState(false);
   const set = (key: keyof ClassifyForm) => (e: { target: { value: string } }) => setForm((v) => ({ ...v, [key]: e.target.value }));
+  const selectedProduct = activeProducts.find((p) => p.id === form.productId);
+  const availableCourses = (selectedProduct?.courses ?? []).filter((c) => c.status === 'active');
 
   const classify = useMutation<ClassifyIntakeResult, ApiFailure, boolean>({
     mutationFn: (confirmNotDuplicate) => classifyIntake(intake.id, pipeline, b2b
       ? {
         contactName: form.contactName, phone: opt(form.phone), email: opt(form.email), companyName: opt(form.companyName),
         taxCode: opt(form.taxCode), needSummary: form.needSummary, confirmNotDuplicate,
+        productId: opt(form.productId), courseId: opt(form.courseId),
         nextAction: isSale ? nextActionPayload(next) : undefined,
       }
       : {
+        ...(linkedContactId ? { contactId: linkedContactId } : {}),
         contactName: form.contactName, phone: opt(form.phone), email: opt(form.email), needSummary: form.needSummary,
-        sourceNote: opt(form.sourceNote), nextAction: nextActionPayload(next), ownerUserId: isAdmin ? opt(form.ownerUserId) : undefined,
+        sourceNote: opt(form.sourceNote),
+        productId: opt(form.productId), courseId: opt(form.courseId),
+        nextAction: nextActionPayload(next), ownerUserId: isAdmin ? opt(form.ownerUserId) : undefined,
       }),
-    onSuccess: () => {
-      toast(b2b ? 'Đã tạo lead B2B và gắn hội thoại vào khách' : 'Đã tạo lead học viên và gắn hội thoại vào khách');
+    onSuccess: (res) => {
+      toast(
+        <span>
+          {b2b ? 'Đã tạo lead B2B và gắn hội thoại vào khách.' : 'Đã tạo lead học viên và gắn hội thoại vào khách.'}{' '}
+          <Link
+            to={b2b ? '/leads/$leadId' : '/learners/$contactId'}
+            params={b2b ? { leadId: res.leadId } : { contactId: res.contactId }}
+            style={{ color: '#fff', textDecoration: 'underline', fontWeight: 600 }}
+          >
+            Mở lead {res.leadCode ?? 'mới'}
+          </Link>
+        </span>,
+      );
       onClose();
     },
     onSettled: refresh,
@@ -191,7 +300,10 @@ function ClassifyDialog({ intake, pipeline, fallbackName, onClose }: {
       </button>
     </>}>
       <form id={formId} className="stack" onSubmit={submit}>
-        <p className="small text-2">Đã điền sẵn từ thông tin bot trích. Kiểm tra lại trước khi tạo; nguồn lead lấy theo kênh {intake.channel === 'facebook' ? 'Facebook' : 'Zalo'}.</p>
+        <p className="small text-2">
+          Đã điền sẵn từ thông tin bot trích. Kiểm tra lại trước khi tạo; nguồn lead lấy theo kênh {intake.channel === 'facebook' ? 'Facebook' : intake.channel === 'zalo_oa' ? 'Zalo OA' : 'Zalo'}.
+          {linkedContactId && <> Hội thoại này đã gắn sẵn với khách trong CRM.</>}
+        </p>
         <div className="grid-2">
           <Field label={b2b ? 'Tên người liên hệ' : 'Họ tên'} required error={errors.contactName} htmlFor={`${formId}-name`}>
             <input id={`${formId}-name`} type="text" maxLength={120} value={form.contactName} onChange={set('contactName')} required
@@ -220,8 +332,45 @@ function ClassifyDialog({ intake, pipeline, fallbackName, onClose }: {
               <input id={`${formId}-note`} type="text" maxLength={200} value={form.sourceNote} onChange={set('sourceNote')} autoComplete="off" />
             </Field>
           )}
+          <Field
+            label="Chương trình"
+            error={errors.productId}
+            hint={intake.fields.productId && form.productId === intake.fields.productId && intake.fields.program ? `Gợi ý tự động từ "${intake.fields.program}"` : undefined}
+            htmlFor={`${formId}-product`}
+          >
+            <select
+              id={`${formId}-product`}
+              value={form.productId}
+              onChange={(e) => setForm((v) => ({ ...v, productId: e.target.value, courseId: '' }))}
+            >
+              <option value="">Chưa chọn chương trình</option>
+              {activeProducts.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name} ({p.priceVnd === 0 ? 'Miễn phí / báo giá riêng' : fmtMoney(p.priceVnd, false)})
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Khóa học" error={errors.courseId} htmlFor={`${formId}-course`}>
+            <select
+              id={`${formId}-course`}
+              value={form.courseId}
+              onChange={set('courseId')}
+              disabled={!form.productId || !availableCourses.length}
+            >
+              <option value="">{!form.productId ? 'Chọn chương trình trước' : availableCourses.length ? 'Chưa chọn khóa học' : 'Không có khóa học đang mở'}</option>
+              {availableCourses.map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+          </Field>
           {!b2b && isAdmin && <OwnerField id={`${formId}-owner`} value={form.ownerUserId} onChange={set('ownerUserId')} error={errors.ownerUserId} />}
         </div>
+        {intake.fields.program && (
+          <div className="row" style={{ gap: 6 }}>
+            <Badge tone="agent">Chương trình khách nhắc: {intake.fields.program}</Badge>
+          </div>
+        )}
         <Field label="Nhu cầu" required error={errors.needSummary} htmlFor={`${formId}-need`}>
           <textarea id={`${formId}-need`} maxLength={NEED_MAX} value={form.needSummary} onChange={set('needSummary')} required
             aria-invalid={Boolean(errors.needSummary)} />

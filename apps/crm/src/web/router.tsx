@@ -87,8 +87,9 @@ const rootRoute = createRootRoute({
   notFoundComponent: () => <div className="empty"><strong>Không tìm thấy trang</strong></div>,
 });
 
-type LeadsSearch = { tab?: 'active' | 'queue' | 'won' | 'lost' | 'all'; q?: string; stage?: string; department?: string };
+type LeadsSearch = { tab?: 'active' | 'queue' | 'won' | 'lost' | 'all'; q?: string; stage?: string; department?: string; pipeline?: 'all' | 'b2b' | 'learner' };
 const tabs = ['active', 'queue', 'won', 'lost', 'all'] as const;
+const pipelines = ['all', 'b2b', 'learner'] as const;
 
 const inboxRoute = createRoute({ getParentRoute: () => rootRoute, path: '/inbox', component: InboxPage });
 const inboxChildren = [
@@ -110,6 +111,7 @@ const routes = [
       q: typeof s.q === 'string' && s.q ? s.q : undefined,
       stage: typeof s.stage === 'string' && s.stage ? s.stage : undefined,
       department: typeof s.department === 'string' && s.department ? s.department : undefined,
+      pipeline: pipelines.includes(s.pipeline as never) ? (s.pipeline as LeadsSearch['pipeline']) : undefined,
     }),
   }),
   createRoute({ getParentRoute: () => rootRoute, path: '/leads/new', component: LeadNewPage }),
