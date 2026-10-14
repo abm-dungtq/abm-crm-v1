@@ -273,6 +273,14 @@ describe('CommandRunner', () => {
     }
   });
 
+  it('does not put an avatar-only profile into the prompt', async () => {
+    const { runner, goclaw, accounts } = setup();
+    accounts.profile.mockResolvedValue({ name: '', gender: null, avatar: 'https://photo.zalo.me/a.jpg' });
+    runner.dispatch(command('c1', 'run_completion', { agentKey: 'bot', userId: 'u', text: 'xin chào', zaloUserId: 'uid-1' }));
+    await runner.idle();
+    expect(goclaw.complete).toHaveBeenCalledWith({ agentKey: 'bot', userId: 'u', text: 'xin chào' });
+  });
+
   it('keeps the text unchanged when the profile lookup throws and still completes', async () => {
     const { runner, goclaw, accounts, results } = setup();
     accounts.profile.mockRejectedValue(Object.assign(new Error('ZALO_DOWN'), { code: 'ZALO_DOWN' }));

@@ -770,6 +770,8 @@ const bridgeMessageEvent = z.object({
   fromSelf: z.boolean(),
   senderExternalId: externalRef,
   senderName: z.string().max(200),
+  /** Optional https avatar. An older bridge omits it. The Worker drops a value that is not https. */
+  senderAvatar: z.string().max(2000).optional(),
   text: z.string().max(20_000),
   attachments: z.array(bridgeAttachment).max(20).optional(),
   sentAt: isoInstant,
@@ -807,7 +809,12 @@ const bridgeGroupMembersEvent = z.object({
   type: z.literal('group_members'),
   accountExternalId: externalRef,
   threadId: externalRef,
-  members: z.array(z.object({ id: externalRef, name: z.string().max(200) })).max(5000),
+  members: z.array(z.object({
+    id: externalRef,
+    name: z.string().max(200),
+    /** Optional https avatar. Omitted when the member has none. */
+    avatar: z.string().max(2000).optional(),
+  })).max(5000),
 });
 export type BridgeGroupMembersEvent = z.infer<typeof bridgeGroupMembersEvent>;
 

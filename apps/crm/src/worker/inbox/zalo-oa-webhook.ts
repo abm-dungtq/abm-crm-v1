@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import type { Env } from '../env';
 import { ZALO_OA_PLACEHOLDER_NAME } from './conversation-flow';
-import { ingestMessage, type ChannelAccountRef, type InboundMessage } from './ingest';
+import { httpsAvatarUrl, ingestMessage, type ChannelAccountRef, type InboundMessage } from './ingest';
 import { accessToken, zaloOaOauthCallback } from './zalo-oa-oauth';
 import { splitZaloOaText } from './zalo-oa-send';
 
@@ -17,6 +17,8 @@ export const zaloOaRoutes = new Hono<{ Bindings: Env }>();
 const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_TEXT = 20_000;
 const PROFILE_URL = 'https://openapi.zalo.me/v3.0/oa/user/detail';
+const OA_AVATAR_TTL_MS = 24 * 60 * 60 * 1000;
+const OA_AVATAR_BACKFILL_LIMIT = 10;
 const encoder = new TextEncoder();
 
 interface ZaloAttachment {
@@ -237,23 +239,63 @@ async function storeAutoReply(db: D1Database, conversationId: string, built: { t
   await db.prepare('UPDATE conversation SET last_message_at = ?, updated_at = ? WHERE id = ?').bind(nowIso, nowIso, conversationId).run();
 }
 
+interface OaUserProfile { name: string | null; avatar: string | null }
+
 /**
- * Display name for a new direct thread. A failure, including Zalo -212, keeps the placeholder.
- * Later messages pass no name, so a real name already stored is left as it is.
+ * A profile lookup that reached Zalo, or a skip because this OA has no usable token.
+ * A skip must not stamp `avatar_checked_at`, so a later message retries once a token exists.
  */
-async function lookupOaUserName(db: D1Database, env: Env, accountId: string, userId: string): Promise<string | null> {
+type OaProfileLookup = { attempted: false } | { attempted: true; profile: OaUserProfile };
+
+/** A real looked-up name. The placeholder and a blank value must not replace a name already stored. */
+function usableOaName(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === ZALO_OA_PLACEHOLDER_NAME) return null;
+  return trimmed;
+}
+
+/** `data.avatar`, else the 240 size, else the 120 size. Only an https URL is kept. */
+function oaAvatar(data: { avatar?: unknown; avatars?: unknown } | undefined): string | null {
+  if (!data) return null;
+  const direct = httpsAvatarUrl(data.avatar);
+  if (direct) return direct;
+  const sizes = data.avatars;
+  if (!sizes || typeof sizes !== 'object') return null;
+  const map = sizes as Record<string, unknown>;
+  return httpsAvatarUrl(map['240']) ?? httpsAvatarUrl(map['120']);
+}
+
+/** True when the row has never been checked, the stamp cannot be read, or the check is at least a day old. */
+function avatarCheckStale(checkedAt: string | null, now: Date): boolean {
+  if (!checkedAt) return true;
+  const at = Date.parse(checkedAt);
+  if (!Number.isFinite(at)) return true;
+  return now.getTime() - at >= OA_AVATAR_TTL_MS;
+}
+
+/**
+ * Name and avatar of one OA user. `attempted: false` means there was no token, so the caller must not
+ * stamp `avatar_checked_at`. A Zalo error, including -212, is an attempt whose profile is empty.
+ */
+async function lookupOaUserProfile(db: D1Database, env: Pick<Env, 'ZALO_OA_TOKEN_KEY'>, accountId: string, userId: string): Promise<OaProfileLookup> {
   try {
     const token = await accessToken(db, env, accountId);
-    if (!token) return null;
+    if (!token) return { attempted: false };
     const url = new URL(PROFILE_URL);
     url.searchParams.set('data', JSON.stringify({ user_id: userId }));
     const res = await fetch(url, { headers: { access_token: token }, signal: AbortSignal.timeout(5_000) });
-    const payload = await res.json().catch(() => null) as { error?: unknown; data?: { display_name?: unknown } } | null;
-    if (!res.ok || !payload || (typeof payload.error === 'number' && payload.error !== 0)) return null;
-    const name = typeof payload.data?.display_name === 'string' ? payload.data.display_name.trim() : '';
-    return name || null;
+    const payload = await res.json().catch(() => null) as { error?: unknown; data?: { display_name?: unknown; avatar?: unknown; avatars?: unknown } } | null;
+    if (!res.ok || !payload || (typeof payload.error === 'number' && payload.error !== 0)) {
+      console.warn('zalo_oa_profile_failed', { status: res.status, error: payload?.error ?? null });
+      return { attempted: true, profile: { name: null, avatar: null } };
+    }
+    const avatar = oaAvatar(payload.data);
+    // Field names only, never values, so a changed Zalo response shape shows up in the logs.
+    if (!avatar) console.warn('zalo_oa_profile_no_avatar', { keys: Object.keys(payload.data ?? {}) });
+    return { attempted: true, profile: { name: usableOaName(payload.data?.display_name), avatar } };
   } catch {
-    return null;
+    return { attempted: true, profile: { name: null, avatar: null } };
   }
 }
 
@@ -296,14 +338,54 @@ async function handleUserSend(db: D1Database, env: Env, ev: ZaloEvent, name: str
     console.warn('zalo_oa_unknown_oa');
     return;
   }
-  const existing = await db.prepare('SELECT id FROM conversation WHERE channel_account_id = ? AND external_thread_id = ?')
-    .bind(account.id, senderId).first<{ id: string }>();
-  const senderName = existing ? null : (await lookupOaUserName(db, env, account.id, senderId)) ?? ZALO_OA_PLACEHOLDER_NAME;
+  const existing = await db.prepare('SELECT id, display_name, avatar_checked_at FROM conversation WHERE channel_account_id = ? AND external_thread_id = ?')
+    .bind(account.id, senderId).first<{ id: string; display_name: string | null; avatar_checked_at: string | null }>();
+  // A fresh stamp blocks another lookup for a day, even while the name is still the placeholder.
+  // A null or stale stamp is looked up, which is how a failed first lookup is retried.
+  let senderName: string | null = existing ? null : ZALO_OA_PLACEHOLDER_NAME;
+  let senderAvatar: string | null = null;
+  let avatarCheckedAt: string | null = null;
+  if (!existing || avatarCheckStale(existing.avatar_checked_at, now)) {
+    const lookup = await lookupOaUserProfile(db, env, account.id, senderId);
+    if (lookup.attempted) {
+      senderName = lookup.profile.name ?? (existing ? null : ZALO_OA_PLACEHOLDER_NAME);
+      senderAvatar = lookup.profile.avatar;
+      avatarCheckedAt = now.toISOString();
+    }
+  }
   const inbound: InboundMessage = {
     threadId: senderId, threadKind: 'direct', msgId, fromSelf: false, senderExternalId: senderId, senderName,
-    text: built.text, attachments: built.attachments,
+    senderAvatar, avatarCheckedAt, text: built.text, attachments: built.attachments,
   };
   await ingestMessage(db, { ...account, channel: 'zalo_oa' }, inbound, now, notEcho);
+}
+
+/**
+ * Each minute, refreshes at most 10 Official Account direct threads that have never had a profile check,
+ * oldest first. An OA with no valid token is left unchecked so a later run retries. An attempted lookup
+ * that fails still stamps `avatar_checked_at`, so it leaves this set. An empty set does not ask for a token.
+ */
+export async function backfillOaSenderAvatars(db: D1Database, env: Pick<Env, 'ZALO_OA_TOKEN_KEY'>, now = new Date()): Promise<void> {
+  const rows = await db.prepare(`SELECT c.id, c.channel_account_id AS accountId, c.external_thread_id AS userId
+    FROM conversation c
+    JOIN channel_account a ON a.id = c.channel_account_id
+    WHERE a.channel = 'zalo_oa' AND c.kind = 'direct' AND c.avatar_checked_at IS NULL
+    ORDER BY c.created_at ASC, c.id ASC
+    LIMIT ?`).bind(OA_AVATAR_BACKFILL_LIMIT).all<{ id: string; accountId: string; userId: string }>();
+  if (!rows.results.length) return;
+  const nowIso = now.toISOString();
+  for (const row of rows.results) {
+    const lookup = await lookupOaUserProfile(db, env, row.accountId, row.userId);
+    if (!lookup.attempted) continue;
+    await db.prepare(`UPDATE conversation SET
+        display_name = COALESCE(?, display_name),
+        avatar_url = COALESCE(?, avatar_url),
+        avatar_checked_at = ?,
+        updated_at = ?
+      WHERE id = ? AND avatar_checked_at IS NULL`)
+      .bind(lookup.profile.name, lookup.profile.avatar, nowIso, nowIso, row.id)
+      .run();
+  }
 }
 
 /**

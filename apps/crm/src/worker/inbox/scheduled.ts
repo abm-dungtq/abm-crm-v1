@@ -6,6 +6,7 @@ import { runDueSchedules } from './group-schedules';
 import { enqueueDailyGroupSummaries } from './group-summaries';
 import { extractIdleConversations } from './intake';
 import { processWorkerCommands } from './worker-commands';
+import { backfillOaSenderAvatars } from './zalo-oa-webhook';
 import { refreshZaloOaTokens } from './zalo-oa-oauth';
 
 /** Cron Trigger work. Every task logs and continues on failure, so the scheduled handler never throws. */
@@ -128,6 +129,7 @@ export async function runScheduled(env: ScheduledEnv, cron: string, now = new Da
   if (now.getUTCMinutes() % 10 === 0) {
     await step('zalo_oa_refresh', () => refreshZaloOaTokens(env.DB, env, now));
   }
+  await step('oa_avatar_backfill', () => backfillOaSenderAvatars(env.DB, env, now));
   await step('worker_commands', () => processWorkerCommands(env));
   await step('sla', () => checkSla(env.DB, now, env.APP_URL));
   await step('stuck_outgoing', () => sweepStuckOutgoing(env.DB, now));

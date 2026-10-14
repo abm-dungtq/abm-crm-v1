@@ -92,15 +92,16 @@ function parseAttachments(json: string | null): Attachment[] {
   }
 }
 
-function MessageBubble({ message: m, channel }: { message: InboxMessage; channel: ChannelKind }) {
+function MessageBubble({ message: m, channel, kind }: { message: InboxMessage; channel: ChannelKind; kind: 'direct' | 'group' }) {
   const time = <time dateTime={m.createdAt} title={fmtDateTime(m.createdAt, true)}>{fmtShortTime(m.createdAt)}</time>;
   if (m.senderKind === 'system') {
     return <li className="msg-system" role="note"><span>{m.body}</span> · {time}</li>;
   }
   const attachments = parseAttachments(m.attachmentsJson);
   const label = senderLabel(m, channel);
-  return (
-    <li className="msg" data-side={m.senderKind === 'customer' ? 'in' : 'out'} data-kind={m.senderKind} data-status={m.status}>
+  const showSender = kind === 'group' && m.senderKind === 'customer';
+  const content = (
+    <>
       <div className="msg-bubble">
         {m.body && <div className="msg-body">{m.body}</div>}
         {attachments.map((a, i) => (
@@ -115,6 +116,15 @@ function MessageBubble({ message: m, channel }: { message: InboxMessage; channel
         {m.status === 'pending' && <span className="msg-state">Đang gửi</span>}
         {m.status === 'failed' && <span className="msg-state msg-failed"><Icon name="alert" />Gửi lỗi</span>}
       </div>
+    </>
+  );
+  if (!showSender) {
+    return <li className="msg" data-side={m.senderKind === 'customer' ? 'in' : 'out'} data-kind={m.senderKind} data-status={m.status}>{content}</li>;
+  }
+  return (
+    <li className="msg msg-with-avatar" data-side="in" data-kind="customer" data-status={m.status}>
+      <Avatar name={m.senderDisplayName} src={m.senderAvatarUrl} />
+      <div className="msg-stack">{content}</div>
     </li>
   );
 }
@@ -204,7 +214,7 @@ export function InboxThread({
     <section className="inbox-thread" aria-label={`Hội thoại với ${name}`}>
       <header className="inbox-thread-head">
         <Link to={backTo} className="btn btn-ghost icon-btn inbox-back" aria-label="Quay lại danh sách hội thoại"><Icon name="arrow" style={{ transform: 'rotate(180deg)' }} /></Link>
-        <Avatar name={name} />
+        <Avatar name={name} src={conversation.avatarUrl} />
         <div className="truncate" style={{ flex: '1 1 160px', minWidth: 0 }}>
           <div className="row" style={{ gap: 6 }}>
             <span className="truncate" style={{ fontWeight: 600 }} title={name}>{name}</span>
@@ -246,7 +256,7 @@ export function InboxThread({
         {messages.error && <ErrorState error={messages.error} onRetry={() => messages.refetch()} />}
         {messages.data && !messages.data.length && <div className="empty"><strong>Chưa có tin nhắn</strong></div>}
         <ol className="msg-list" aria-live="polite" aria-relevant="additions">
-          {messages.data?.map((m) => <MessageBubble key={m.id} message={m} channel={conversation.channel} />)}
+          {messages.data?.map((m) => <MessageBubble key={m.id} message={m} channel={conversation.channel} kind={conversation.kind} />)}
         </ol>
       </div>
       <Composer key={conversation.id} conversationId={conversation.id} />

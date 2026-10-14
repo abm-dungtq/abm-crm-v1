@@ -256,4 +256,19 @@ describe('listGroupMembers', () => {
     expect(getGroupMembersInfo.mock.calls[0]?.[0]).toHaveLength(50);
     expect(getGroupMembersInfo.mock.calls[1]?.[0]).toEqual(['50']);
   });
+
+  it('keeps an https member avatar and omits one that is not https', async () => {
+    const { session, getGroupInfo, getGroupMembersInfo } = harness();
+    getGroupInfo.mockResolvedValue({ gridInfoMap: { g1: { memVerList: ['111_1', '222_1'], currentMems: [] } } });
+    getGroupMembersInfo.mockResolvedValue({
+      profiles: {
+        '111': { displayName: 'An', zaloName: '', avatar: 'https://photo.zalo.me/an.jpg' },
+        '222': { displayName: 'Bình', zaloName: '', avatar: 'http://photo.zalo.me/binh.jpg' },
+      },
+    });
+    expect(await session.listGroupMembers('g1')).toEqual([
+      { id: '111', name: 'An', avatar: 'https://photo.zalo.me/an.jpg' },
+      { id: '222', name: 'Bình' },
+    ]);
+  });
 });

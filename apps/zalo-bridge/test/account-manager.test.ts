@@ -1,9 +1,9 @@
 import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { BridgeEvent } from '@abm/contracts';
+import { bridgeEventSchema, type BridgeEvent } from '@abm/contracts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AccountManager, ECHO_HOLD_MS, GROUP_MEMBERS_REFRESH_MS, MAX_RECONNECT_FAILURES, reconnectDelayMs } from '../src/account-manager';
+import { AccountManager, ECHO_HOLD_MS, GROUP_MEMBERS_REFRESH_MS, MAX_RECONNECT_FAILURES, PROFILE_LOOKUP_TIMEOUT_MS, reconnectDelayMs } from '../src/account-manager';
 import { CodedError } from '../src/config';
 import type { IncomingMessage, QrCode, SessionClose, ZaloConnector, ZaloSession, ZaloUserProfile } from '../src/zalo-client';
 
@@ -16,7 +16,7 @@ class FakeSession implements ZaloSession {
   send = vi.fn(async () => ({ msgId: String(this.nextMsgId++) }));
   getUserProfile = vi.fn(async (_userId: string): Promise<ZaloUserProfile | null> => null);
   listGroups = vi.fn(async () => [{ threadId: 'g1', name: 'Nhóm 1' }]);
-  listGroupMembers = vi.fn(async (_groupId: string) => [{ id: 'mem-1', name: 'An' }]);
+  listGroupMembers = vi.fn(async (_groupId: string): Promise<{ id: string; name: string; avatar?: string }[]> => [{ id: 'mem-1', name: 'An' }]);
   onMessage(cb: (m: IncomingMessage) => void) { this.messageCb = cb; }
   onClose(cb: (c: SessionClose) => void) { this.closeCb = cb; }
   save = vi.fn(async (file: string) => { await writeFile(file, '{}'); });
@@ -169,10 +169,95 @@ describe('AccountManager', () => {
       threadId: 'cust-1', threadKind: 'direct', msgId: 'm-d', fromSelf: false, senderId: 'cust-1', senderName: 'Lan',
       text: 'chào', attachments: [], sentAt: '2026-10-13T01:00:01.000Z', mentionsSelf: true, quotesSelf: true,
     });
+    await vi.advanceTimersByTimeAsync(0);
     const direct = messages().at(-1)!;
     expect(direct.threadKind).toBe('direct');
     expect(direct).not.toHaveProperty('mentionsSelf');
     expect(direct).not.toHaveProperty('quotesSelf');
+  });
+
+  it('puts the cached profile avatar on a direct customer message and looks the profile up once', async () => {
+    const { session } = await loggedIn();
+    session.getUserProfile.mockResolvedValue({ name: 'Lan', gender: 'female', avatar: 'https://photo.zalo.me/lan.jpg' });
+    const direct = {
+      threadId: 'cust-1', threadKind: 'direct' as const, msgId: 'm-d', fromSelf: false, senderId: 'cust-1', senderName: 'Lan',
+      text: 'chào', attachments: [], sentAt: '2026-10-13T01:00:01.000Z', mentionsSelf: false, quotesSelf: false,
+    };
+    session.messageCb!(direct);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(messages().at(-1)).toMatchObject({ msgId: 'm-d', senderAvatar: 'https://photo.zalo.me/lan.jpg' });
+    expect(bridgeEventSchema.safeParse(messages().at(-1)).success).toBe(true);
+    session.messageCb!({ ...direct, msgId: 'm-d2' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(session.getUserProfile).toHaveBeenCalledTimes(1);
+    expect(messages().at(-1)).toMatchObject({ msgId: 'm-d2', senderAvatar: 'https://photo.zalo.me/lan.jpg' });
+  });
+
+  it('omits a direct avatar that is not https or is longer than 2000 characters', async () => {
+    const { session } = await loggedIn();
+    const direct = {
+      threadId: 'cust-1', threadKind: 'direct' as const, msgId: 'm-http', fromSelf: false, senderId: 'cust-1', senderName: 'Lan',
+      text: 'chào', attachments: [], sentAt: '2026-10-13T01:00:01.000Z', mentionsSelf: false, quotesSelf: false,
+    };
+    session.getUserProfile.mockResolvedValueOnce({ name: 'Lan', gender: null, avatar: 'http://photo.zalo.me/lan.jpg' });
+    session.messageCb!(direct);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(messages().at(-1)).toMatchObject({ msgId: 'm-http' });
+    expect(messages().at(-1)).not.toHaveProperty('senderAvatar');
+
+    session.getUserProfile.mockResolvedValueOnce({ name: 'Lan', gender: null, avatar: `https://photo.zalo.me/${'a'.repeat(2000)}` });
+    session.messageCb!({ ...direct, msgId: 'm-long', senderId: 'cust-2' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(messages().at(-1)).toMatchObject({ msgId: 'm-long' });
+    expect(messages().at(-1)).not.toHaveProperty('senderAvatar');
+  });
+
+  it('sends a direct customer message without an avatar when the profile lookup exceeds 5 seconds', async () => {
+    const { session } = await loggedIn();
+    session.getUserProfile.mockReturnValue(new Promise(() => {}));
+    session.messageCb!({
+      threadId: 'cust-1', threadKind: 'direct', msgId: 'm-slow', fromSelf: false, senderId: 'cust-1', senderName: 'Lan',
+      text: 'chào', attachments: [], sentAt: '2026-10-13T01:00:01.000Z', mentionsSelf: false, quotesSelf: false,
+    });
+    await vi.advanceTimersByTimeAsync(PROFILE_LOOKUP_TIMEOUT_MS - 1);
+    expect(messages().some((message) => message.msgId === 'm-slow')).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const sent = messages().find((message) => message.msgId === 'm-slow');
+    expect(sent).toMatchObject({ msgId: 'm-slow', threadKind: 'direct' });
+    expect(sent).not.toHaveProperty('senderAvatar');
+  });
+
+  it('puts a loaded member avatar on the roster and on that member message', async () => {
+    const session = new FakeSession();
+    session.listGroups.mockResolvedValue([{ threadId: 'g1', name: 'Nhóm A' }]);
+    session.listGroupMembers.mockResolvedValue([
+      { id: 'u1', name: 'An', avatar: 'https://photo.zalo.me/an.jpg' },
+      { id: 'u2', name: 'Bình', avatar: 'http://photo.zalo.me/binh.jpg' },
+    ]);
+    const connector: ZaloConnector = { loginWithQr: vi.fn(async () => session), loginWithSaved: vi.fn() };
+    const accounts = manager(connector);
+    await accounts.login('acc-1');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events.filter((event) => event.type === 'group_members')).toEqual([
+      {
+        type: 'group_members', accountExternalId: 'own-uid', threadId: 'g1',
+        members: [
+          { id: 'u1', name: 'An', avatar: 'https://photo.zalo.me/an.jpg' },
+          { id: 'u2', name: 'Bình' },
+        ],
+      },
+    ]);
+    session.messageCb!({
+      threadId: 'g1', threadKind: 'group', msgId: 'm-g1', fromSelf: false, senderId: 'u1', senderName: 'An',
+      text: 'chào', attachments: [], sentAt: '2026-10-13T01:00:00.000Z', mentionsSelf: false, quotesSelf: false,
+    });
+    expect(messages().at(-1)).toMatchObject({ msgId: 'm-g1', senderAvatar: 'https://photo.zalo.me/an.jpg' });
+    session.messageCb!({
+      threadId: 'g1', threadKind: 'group', msgId: 'm-g2', fromSelf: false, senderId: 'u2', senderName: 'Bình',
+      text: 'chào', attachments: [], sentAt: '2026-10-13T01:00:01.000Z', mentionsSelf: false, quotesSelf: false,
+    });
+    expect(messages().at(-1)).toMatchObject({ msgId: 'm-g2' });
+    expect(messages().at(-1)).not.toHaveProperty('senderAvatar');
   });
 
   it('passes replyTo through to the session', async () => {

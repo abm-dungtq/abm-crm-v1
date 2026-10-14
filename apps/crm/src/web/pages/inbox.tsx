@@ -312,7 +312,7 @@ function ConversationRow({ conversation: c, selected }: { conversation: InboxCon
     <li>
       <Link to="/inbox/$conversationId" params={{ conversationId: c.id }} className="conv-row" aria-current={selected ? 'true' : undefined}>
         <div className="row" style={{ alignItems: 'flex-start', gap: 10 }}>
-          <Avatar name={name} />
+          <Avatar name={name} src={c.avatarUrl} />
           <div className="stack-xs" style={{ flex: 1, minWidth: 0 }}>
             <div className="row" style={{ gap: 6 }}>
               <span className="truncate conv-name">{name}</span>
@@ -398,7 +398,7 @@ function ConversationPanel({
           {contact ? (
             <div className="crm-contact-card">
               <div className="row" style={{ gap: 8 }}>
-                <Avatar name={contact.displayName} />
+                <Avatar name={contact.displayName} src={c.avatarUrl} />
                 <div className="truncate" style={{ flex: 1, minWidth: 0 }}>
                   <div className="truncate" style={{ fontWeight: 600 }}>{contact.displayName}</div>
                   <div className="small muted truncate">

@@ -2,7 +2,7 @@ import { readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { BridgeEvent } from '@abm/contracts';
 import { CodedError, errorCode, silentLogger, type Logger } from './config';
-import type { IncomingMessage, ThreadKind, ZaloConnector, ZaloGroup, ZaloSendReply, ZaloSession, ZaloUserProfile } from './zalo-client';
+import { httpsAvatarUrl, type IncomingMessage, type ThreadKind, type ZaloConnector, type ZaloGroup, type ZaloSendReply, type ZaloSession, type ZaloUserProfile } from './zalo-client';
 
 /**
  * Session lifecycle of every Zalo account the bridge holds. One session file per CRM account id lives in
@@ -19,6 +19,12 @@ export const ECHO_HOLD_MS = 3000;
 const SENT_ID_TTL_MS = 10 * 60_000;
 /** How often a live session pushes its group list and member lists again. */
 export const GROUP_MEMBERS_REFRESH_MS = 6 * 60 * 60 * 1000;
+/** A found Zalo profile is reused for a day; an explicit miss is reused for an hour. A failure is not cached. */
+const PROFILE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const PROFILE_NULL_TTL_MS = 60 * 60 * 1000;
+/** A direct-message profile lookup that takes longer than this is sent without an avatar. */
+export const PROFILE_LOOKUP_TIMEOUT_MS = 5000;
+const MAX_PROFILE_CACHE = 2000;
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const SESSION_SUFFIX = '.json';
 /** Files in the sessions directory that are not Zalo sessions (the GoClaw cleanup's id list). */
@@ -63,6 +69,11 @@ export class AccountManager {
   private readonly log: Logger;
   /** Sessions whose group scan is still running; a timer tick during a scan is skipped. A new session after a reconnect scans at once. */
   private readonly scanning = new Set<ZaloSession>();
+  /** Zalo profile per `accountId:zaloUserId`. Shared by inbound avatars and the bot-prompt lookup. */
+  private readonly profileCache = new Map<string, { profile: ZaloUserProfile | null; expiresAt: number }>();
+  private readonly profileInflight = new Map<string, Promise<ZaloUserProfile | null>>();
+  /** https avatar of a group member, keyed by `accountExternalId:memberId`, filled by the member scan. */
+  private readonly memberAvatars = new Map<string, string>();
   private stopped = false;
 
   constructor(private readonly options: AccountManagerOptions) {
@@ -147,11 +158,32 @@ export class AccountManager {
     return result;
   }
 
-  /** Profile of a Zalo user on this account. Null when the account has no live session. */
+  /**
+   * Profile of a Zalo user on this account. Null when the account has no live session.
+   * A found profile is cached for 24 hours and an explicit miss for 1 hour. A thrown lookup is not cached.
+   * Calls already in flight for the same user share one `getUserInfo`. A missing session is not cached.
+   */
   async profile(accountId: string, zaloUserId: string): Promise<ZaloUserProfile | null> {
     const session = this.accounts.get(accountId)?.session;
     if (!session) return null;
-    return session.getUserProfile(zaloUserId);
+    const key = `${accountId}:${zaloUserId}`;
+    const cached = this.profileCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) {
+      this.profileCache.delete(key);
+      this.profileCache.set(key, cached);
+      return cached.profile;
+    }
+    const pending = this.profileInflight.get(key);
+    if (pending) return pending;
+    const work = session.getUserProfile(zaloUserId).then((profile) => {
+      this.rememberProfile(key, profile);
+      return profile;
+    });
+    this.profileInflight.set(key, work);
+    void work.catch(() => {}).finally(() => {
+      if (this.profileInflight.get(key) === work) this.profileInflight.delete(key);
+    });
+    return work;
   }
 
   /** Stops every session and timer; used on shutdown. */
@@ -239,7 +271,12 @@ export class AccountManager {
       if (this.stopped || this.accounts.get(accountId)?.session !== session) return;
       if (index > 0 && delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
       try {
-        const members = await session.listGroupMembers(group.threadId);
+        const loaded = await session.listGroupMembers(group.threadId);
+        const members = loaded.map((member) => {
+          const avatar = httpsAvatarUrl(member.avatar);
+          if (avatar) this.memberAvatars.set(`${externalId}:${member.id}`, avatar);
+          return { id: member.id, name: member.name, ...(avatar ? { avatar } : {}) };
+        });
         this.options.emit([{ type: 'group_members', accountExternalId: externalId, threadId: group.threadId, members }]);
       } catch (error) {
         this.log('warn', 'account.group_members_failed', { accountId, code: errorCode(error) });
@@ -287,21 +324,75 @@ export class AccountManager {
     session?.close();
   }
 
+  private rememberProfile(key: string, profile: ZaloUserProfile | null) {
+    this.profileCache.delete(key);
+    this.profileCache.set(key, {
+      profile,
+      expiresAt: Date.now() + (profile ? PROFILE_CACHE_TTL_MS : PROFILE_NULL_TTL_MS),
+    });
+    while (this.profileCache.size > MAX_PROFILE_CACHE) {
+      const oldest = this.profileCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.profileCache.delete(oldest);
+    }
+  }
+
+  private accountForExternalId(externalId: string): Account | undefined {
+    for (const account of this.accounts.values()) {
+      if (account.externalId === externalId && account.session) return account;
+    }
+    return undefined;
+  }
+
   private onMessage(externalId: string, message: IncomingMessage) {
-    if (!message.fromSelf || this.sent.has(message.msgId)) {
+    const deliver = () => {
+      // Only a customer's direct message waits on the profile. Own messages stay synchronous.
+      if (message.threadKind === 'direct' && !message.fromSelf) {
+        void this.deliverDirect(externalId, message);
+        return;
+      }
       this.emitMessage(externalId, message);
+    };
+    if (!message.fromSelf || this.sent.has(message.msgId)) {
+      deliver();
       return;
     }
     // The echo of our own send can arrive before send() returns its id: hold it briefly.
     const timer = setTimeout(() => {
       this.holds.delete(timer);
-      this.emitMessage(externalId, message);
+      deliver();
     }, ECHO_HOLD_MS);
     this.holds.add(timer);
   }
 
-  private emitMessage(externalId: string, message: IncomingMessage) {
+  /** Looks up the sender avatar, then emits. A timeout or error emits the message without one and does not cache the failure. */
+  private async deliverDirect(externalId: string, message: IncomingMessage) {
+    const account = this.accountForExternalId(externalId);
+    let senderAvatar: string | undefined;
+    if (account) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const pending = this.profile(account.accountId, message.senderId);
+        void pending.catch(() => {});
+        const profile = await Promise.race([
+          pending,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('PROFILE_TIMEOUT')), PROFILE_LOOKUP_TIMEOUT_MS);
+          }),
+        ]);
+        senderAvatar = httpsAvatarUrl(profile?.avatar) ?? undefined;
+      } catch {
+        senderAvatar = undefined;
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+    this.emitMessage(externalId, message, senderAvatar);
+  }
+
+  private emitMessage(externalId: string, message: IncomingMessage, senderAvatar?: string) {
     const commandId = message.fromSelf ? this.sent.get(message.msgId)?.commandId : undefined;
+    const avatar = senderAvatar ?? (message.threadKind === 'group' ? this.memberAvatars.get(`${externalId}:${message.senderId}`) : undefined);
     this.options.emit([{
       type: 'message',
       accountExternalId: externalId,
@@ -314,6 +405,7 @@ export class AccountManager {
       text: message.text,
       sentAt: message.sentAt,
       ...(message.attachments.length ? { attachments: message.attachments.slice(0, 20) } : {}),
+      ...(avatar ? { senderAvatar: avatar } : {}),
       ...(commandId ? { commandId } : {}),
       ...(message.threadKind === 'group' ? { mentionsSelf: message.mentionsSelf, quotesSelf: message.quotesSelf } : {}),
     }]);

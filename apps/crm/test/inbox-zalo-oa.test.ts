@@ -329,7 +329,9 @@ test('a correct signature stores one customer message and one completion; a repl
   expect(await db.prepare('SELECT COUNT(*) AS n FROM message').first('n')).toBe(0);
   expect(await webhook(payload, await sign(raw))).toEqual({ status: 200, text: 'OK' });
   const conv = await conversation();
-  expect(conv).toMatchObject({ channel_account_id: 'ca-oa', kind: 'direct', mode: 'ai', display_name: 'Khách Zalo OA' });
+  expect(conv).toMatchObject({
+    channel_account_id: 'ca-oa', kind: 'direct', mode: 'ai', display_name: 'Khách Zalo OA', avatar_url: null, avatar_checked_at: null,
+  });
   expect(await messages(conv.id)).toMatchObject([
     { direction: 'in', sender_kind: 'customer', external_msg_id: 'm_in_1', body: 'Cho em hỏi học phí', status: 'received' },
   ]);
@@ -775,6 +777,138 @@ test('classifying an OA conversation creates a lead with source zalo', async () 
   expect(res.status).toBe(200);
   const lead = await db.prepare('SELECT pipeline, source FROM lead WHERE id = ?').bind(res.json.data.leadId).first();
   expect(lead).toEqual({ pipeline: 'b2b', source: 'zalo' });
+});
+
+const profileCalls = () => calls.filter((call) => call.url.includes('/user/detail'));
+const MINUTE = new Date(Date.UTC(2026, 9, 14, 1, 5));
+
+function oaUser(userId: string, msgId: string, text = 'Xin chào') {
+  return {
+    app_id: APP_ID, timestamp: '1710000000123', oa_id: OA_ID, event_name: 'user_send_text',
+    sender: { id: userId }, recipient: { id: OA_ID }, message: { msg_id: msgId, text },
+  };
+}
+
+test('an OA profile lookup stores the name and an https avatar, with size fallbacks', async () => {
+  await saveTokens('profile-access');
+  onFetch = async (url) => {
+    if (!url.includes('/user/detail')) return json({ error: 0 });
+    const data = new URL(url).searchParams.get('data') ?? '';
+    if (data.includes('user-full')) {
+      return json({ error: 0, data: { display_name: 'An', avatar: 'https://photo.zalo.me/full.jpg', avatars: { '240': 'https://photo.zalo.me/240.jpg' } } });
+    }
+    if (data.includes('user-240')) {
+      return json({ error: 0, data: { display_name: 'Mai', avatar: 'http://insecure.example/a.jpg', avatars: { '240': 'https://photo.zalo.me/240.jpg', '120': 'https://photo.zalo.me/120.jpg' } } });
+    }
+    return json({ error: 0, data: { display_name: 'Lan', avatars: { '240': 'http://photo.zalo.me/nope.jpg', '120': 'https://photo.zalo.me/120.jpg' } } });
+  };
+  await webhook(oaUser('user-full', 'm-full'));
+  await webhook(oaUser('user-240', 'm-240'));
+  await webhook(oaUser('user-120', 'm-120'));
+  const rows = await db.prepare("SELECT external_thread_id, display_name, avatar_url FROM conversation WHERE channel_account_id = 'ca-oa' ORDER BY external_thread_id").all<{ external_thread_id: string; display_name: string; avatar_url: string }>();
+  expect(rows.results).toEqual([
+    { external_thread_id: 'user-120', display_name: 'Lan', avatar_url: 'https://photo.zalo.me/120.jpg' },
+    { external_thread_id: 'user-240', display_name: 'Mai', avatar_url: 'https://photo.zalo.me/240.jpg' },
+    { external_thread_id: 'user-full', display_name: 'An', avatar_url: 'https://photo.zalo.me/full.jpg' },
+  ]);
+});
+
+test('a placeholder with no avatar check is looked up on the next message', async () => {
+  await saveTokens('profile-access');
+  await db.prepare(`INSERT INTO conversation (id, organization_id, channel_account_id, kind, external_thread_id, display_name, created_at, updated_at)
+    VALUES ('cv-ph', 'org-abm', 'ca-oa', 'direct', ?, 'Khách Zalo OA', ?, ?)`).bind(USER_ID, STAMP, STAMP).run();
+  onFetch = async (url) => (url.includes('/user/detail')
+    ? json({ error: 0, data: { display_name: 'Mai Trần', avatar: 'https://photo.zalo.me/mai.jpg' } })
+    : json({ error: 0 }));
+  calls.length = 0;
+  await webhook(userEvent('user_send_text', 'm-retry', { text: 'Xin chào' }));
+  const conv = await conversation();
+  expect(profileCalls()).toHaveLength(1);
+  expect(conv.display_name).toBe('Mai Trần');
+  expect(conv.avatar_url).toBe('https://photo.zalo.me/mai.jpg');
+  expect(conv.avatar_checked_at).toBeTruthy();
+});
+
+test('a failed profile lookup stamps the check and is repeated only after a day', async () => {
+  await saveTokens('profile-access');
+  onFetch = async (url) => (url.includes('/user/detail') ? json({ error: -212 }) : json({ error: 0 }));
+  calls.length = 0;
+  await webhook(userEvent('user_send_text', 'm1', { text: 'Xin chào' }));
+  const failed = await conversation();
+  expect(failed.display_name).toBe('Khách Zalo OA');
+  expect(failed.avatar_url).toBeNull();
+  expect(failed.avatar_checked_at).toBeTruthy();
+  expect(profileCalls()).toHaveLength(1);
+  expect((await commands('run_completion'))[0].payload.text).toBe('Xin chào');
+
+  await webhook(userEvent('user_send_text', 'm2', { text: 'Lại nữa' }));
+  expect(profileCalls()).toHaveLength(1);
+  expect((await conversation()).display_name).toBe('Khách Zalo OA');
+
+  const stale = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+  await db.prepare('UPDATE conversation SET avatar_checked_at = ? WHERE id = ?').bind(stale, failed.id).run();
+  onFetch = async (url) => (url.includes('/user/detail')
+    ? json({ error: 0, data: { display_name: 'Mai Trần', avatar: 'https://photo.zalo.me/mai.jpg' } })
+    : json({ error: 0 }));
+  await webhook(userEvent('user_send_text', 'm3', { text: 'Hôm sau' }));
+  const named = await conversation();
+  expect(profileCalls()).toHaveLength(2);
+  expect(named.display_name).toBe('Mai Trần');
+  expect(named.avatar_url).toBe('https://photo.zalo.me/mai.jpg');
+  expect(Date.parse(named.avatar_checked_at)).toBeGreaterThan(Date.parse(stale));
+
+  await db.prepare('UPDATE conversation SET avatar_checked_at = ? WHERE id = ?').bind(stale, failed.id).run();
+  onFetch = async (url) => (url.includes('/user/detail') ? json({ error: -212 }) : json({ error: 0 }));
+  await webhook(userEvent('user_send_text', 'm4', { text: 'Vẫn tên cũ' }));
+  const kept = await conversation();
+  expect(profileCalls()).toHaveLength(3);
+  expect(kept.display_name).toBe('Mai Trần');
+  expect(kept.avatar_url).toBe('https://photo.zalo.me/mai.jpg');
+  expect(Date.parse(kept.avatar_checked_at)).toBeGreaterThan(Date.parse(stale));
+});
+
+test('the minute backfill refreshes at most 10 unchecked OA conversations', async () => {
+  await saveTokens('profile-access');
+  const ids = Array.from({ length: 11 }, (_, i) => `user-${String(i).padStart(2, '0')}`);
+  await db.batch(ids.map((userId, i) => db.prepare(`INSERT INTO conversation (id, organization_id, channel_account_id, kind, external_thread_id, display_name, created_at, updated_at)
+    VALUES (?, 'org-abm', 'ca-oa', 'direct', ?, 'Khách Zalo OA', ?, ?)`).bind(`cv-${userId}`, userId, `2026-10-01T00:00:${String(i).padStart(2, '0')}.000Z`, STAMP)));
+  onFetch = async (url) => {
+    if (!url.includes('/user/detail')) return json({ error: 0 });
+    const data = new URL(url).searchParams.get('data') ?? '';
+    const userId = /user-\d+/.exec(data)?.[0] ?? 'x';
+    return json({ error: 0, data: { display_name: `Khách ${userId}`, avatar: `https://photo.zalo.me/${userId}.jpg` } });
+  };
+  calls.length = 0;
+  await runScheduled(testEnv, '* * * * *', MINUTE);
+  expect(profileCalls()).toHaveLength(10);
+  expect(tokenCalls()).toHaveLength(0);
+  const unchecked = await db.prepare("SELECT external_thread_id, avatar_checked_at FROM conversation WHERE channel_account_id = 'ca-oa' AND avatar_checked_at IS NULL").all();
+  expect(unchecked.results).toEqual([{ external_thread_id: 'user-10', avatar_checked_at: null }]);
+  const first = await db.prepare("SELECT display_name, avatar_url FROM conversation WHERE external_thread_id = 'user-00'").first();
+  expect(first).toEqual({ display_name: 'Khách user-00', avatar_url: 'https://photo.zalo.me/user-00.jpg' });
+});
+
+test('backfill skips an OA with no token and stamps a failed lookup', async () => {
+  await saveTokens('profile-access', 'refresh-stored', '2027-01-01T00:00:00.000Z', 'ca-oa');
+  await db.prepare(`INSERT INTO channel_account (id, organization_id, channel, external_id, display_name, agent_key, status, created_at, updated_at)
+    VALUES ('ca-oa-2', 'org-abm', 'zalo_oa', '9002', 'OA khác', 'tu-van-oa', 'connected', ?, ?)`).bind(STAMP, STAMP).run();
+  await db.batch([
+    db.prepare(`INSERT INTO conversation (id, organization_id, channel_account_id, kind, external_thread_id, display_name, created_at, updated_at)
+      VALUES ('cv-fail', 'org-abm', 'ca-oa', 'direct', 'user-fail', 'Khách Zalo OA', ?, ?)`).bind('2026-10-01T00:00:00.000Z', STAMP),
+    db.prepare(`INSERT INTO conversation (id, organization_id, channel_account_id, kind, external_thread_id, display_name, created_at, updated_at)
+      VALUES ('cv-notoken', 'org-abm', 'ca-oa-2', 'direct', 'user-notoken', 'Khách Zalo OA', ?, ?)`).bind('2026-10-01T00:00:01.000Z', STAMP),
+  ]);
+  onFetch = async (url) => (url.includes('/user/detail') ? json({ error: -212 }) : json({ error: 0 }));
+  calls.length = 0;
+  await runScheduled(testEnv, '* * * * *', MINUTE);
+  expect(profileCalls()).toHaveLength(1);
+  expect(tokenCalls()).toHaveLength(0);
+  const failed = await db.prepare('SELECT display_name, avatar_url, avatar_checked_at FROM conversation WHERE id = ?').bind('cv-fail').first<{ display_name: string; avatar_url: string | null; avatar_checked_at: string | null }>();
+  expect(failed!.display_name).toBe('Khách Zalo OA');
+  expect(failed!.avatar_url).toBeNull();
+  expect(failed!.avatar_checked_at).toBe(MINUTE.toISOString());
+  const skipped = await db.prepare('SELECT avatar_checked_at FROM conversation WHERE id = ?').bind('cv-notoken').first<{ avatar_checked_at: string | null }>();
+  expect(skipped!.avatar_checked_at).toBeNull();
 });
 
 test('the bridge cannot claim a Zalo OA send', async () => {

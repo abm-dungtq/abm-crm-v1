@@ -300,6 +300,7 @@ export interface InboxConversation {
   externalThreadId: string;
   contactId: string | null;
   displayName: string | null;
+  avatarUrl: string | null;
   mode: ConversationMode;
   assigneeUserId: string | null;
   assigneeName: string | null;
@@ -336,6 +337,10 @@ export interface InboxMessage {
   senderExternalId: string | null;
   sentByUserId: string | null;
   sentByName: string | null;
+  /** Group member name joined for a customer message. Absent on older payloads. */
+  senderDisplayName?: string | null;
+  /** Group member avatar joined for a customer message. Absent on older payloads. */
+  senderAvatarUrl?: string | null;
   externalMsgId: string | null;
   body: string;
   /** JSON array of { url, name?, mimeType? }, or null. */
@@ -495,6 +500,7 @@ export interface ZaloGroupUpdate {
 export interface ZaloGroupMember {
   externalUserId: string;
   displayName: string | null;
+  avatarUrl: string | null;
   isStaff: boolean;
   updatedAt: string;
 }

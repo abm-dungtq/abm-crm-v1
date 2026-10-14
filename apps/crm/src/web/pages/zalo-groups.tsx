@@ -9,7 +9,7 @@ import {
 } from '../api';
 import { Icon } from '../components/icons';
 import { InboxThread, conversationName, fmtShortTime } from '../components/inbox-thread';
-import { Alert, Badge, Empty, ErrorState, Field, FormError, Loading, Modal, fieldErrors, useToast, type Tone } from '../components/ui';
+import { Alert, Avatar, Badge, Empty, ErrorState, Field, FormError, Loading, Modal, fieldErrors, useToast, type Tone } from '../components/ui';
 import { fmtDateTime } from '../format';
 import { WEEKDAYS, weekdaysLabel } from '../inbox-format';
 import type {
@@ -334,7 +334,10 @@ function MemberRow({ groupId, member: m, canMark }: { groupId: string; member: Z
   return (
     <div className="stack-sm">
       <div className="row-wrap">
-        <span>{name}</span>
+        <span className="row" style={{ gap: 8, minWidth: 0 }}>
+          <Avatar name={name} src={m.avatarUrl} />
+          <span className="truncate">{name}</span>
+        </span>
         <label className="row" title={canMark ? undefined : 'Chỉ trưởng nhóm hoặc quản trị được đánh dấu người ABM'}>
           <input type="checkbox" checked={m.isStaff} disabled={!canMark || mark.isPending} aria-label={`Người ABM ${name}`}
             onChange={(e) => {

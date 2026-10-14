@@ -64,8 +64,16 @@ export function HealthBadges({ health, compact }: { health: LeadHealth; compact?
   return items.length ? <span className="health">{items}</span> : null;
 }
 
-export function Avatar({ name, size }: { name: string | null | undefined; size?: 'lg' | 'sm' }) {
-  return <span className={`avatar${size ? ` ${size}` : ''}`} title={name ?? undefined} aria-hidden="true">{initials(name)}</span>;
+export function Avatar({ name, size, src }: { name: string | null | undefined; size?: 'lg' | 'sm'; src?: string | null }) {
+  const [broken, setBroken] = useState<string | null>(null);
+  const showImage = Boolean(src) && broken !== src;
+  return (
+    <span className={`avatar${size ? ` ${size}` : ''}`} title={name ?? undefined} aria-hidden="true">
+      {showImage
+        ? <img src={src!} alt="" loading="lazy" referrerPolicy="no-referrer" onError={() => setBroken(src!)} />
+        : initials(name)}
+    </span>
+  );
 }
 
 export function Loading({ rows = 4 }: { rows?: number }) {

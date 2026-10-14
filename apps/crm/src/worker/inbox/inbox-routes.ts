@@ -105,7 +105,8 @@ const settingsManager = async (c: Ctx, next: () => Promise<void>) => {
 const placeholders = (n: number) => Array.from({ length: n }, () => '?').join(', ');
 
 const CONVERSATION_SELECT = `SELECT c.id, c.channel_account_id AS channelAccountId, a.display_name AS accountName, a.channel,
-    c.kind, c.external_thread_id AS externalThreadId, c.contact_id AS contactId, c.display_name AS displayName, c.mode,
+    c.kind, c.external_thread_id AS externalThreadId, c.contact_id AS contactId, c.display_name AS displayName,
+    c.avatar_url AS avatarUrl, c.mode,
     c.assignee_user_id AS assigneeUserId, u.display_name AS assigneeName, c.assigned_at AS assignedAt,
     c.handoff_reason AS handoffReason, c.last_message_at AS lastMessageAt, c.last_inbound_at AS lastInboundAt,
     c.last_staff_reply_at AS lastStaffReplyAt, c.sla_due_at AS slaDueAt, c.created_at AS createdAt, c.updated_at AS updatedAt,
@@ -162,9 +163,13 @@ inboxRoutes.get('/conversations/:id/messages', async (c) => {
   const id = c.req.param('id');
   if (!(await conversationInOrg(db, c.get('actor'), id))) return c.json(notFound, 404);
   const select = `SELECT m.id, m.direction, m.sender_kind AS senderKind, m.sender_external_id AS senderExternalId,
-      m.sent_by_user_id AS sentByUserId, u.display_name AS sentByName, m.external_msg_id AS externalMsgId, m.body,
+      m.sent_by_user_id AS sentByUserId, u.display_name AS sentByName, gm.display_name AS senderDisplayName,
+      gm.avatar_url AS senderAvatarUrl, m.external_msg_id AS externalMsgId, m.body,
       m.attachments_json AS attachmentsJson, m.status, m.created_at AS createdAt
-    FROM message m LEFT JOIN app_user u ON u.id = m.sent_by_user_id WHERE m.conversation_id = ?`;
+    FROM message m
+    LEFT JOIN app_user u ON u.id = m.sent_by_user_id
+    LEFT JOIN zalo_group_member gm ON gm.conversation_id = m.conversation_id AND gm.external_user_id = m.sender_external_id
+    WHERE m.conversation_id = ?`;
   const after = c.req.query('after');
   // Without `after` the latest page is returned; either way the list is oldest first.
   const rows = after
@@ -677,6 +682,7 @@ inboxRoutes.get('/groups/:id/members', async (c) => {
   const group = await loadGroup(c.env.DB, actor, c.req.param('id'));
   if (!group) return c.json(notFound, 404);
   const rows = await c.env.DB.prepare(`SELECT m.external_user_id AS externalUserId, m.display_name AS displayName,
+      m.avatar_url AS avatarUrl,
       CASE WHEN s.external_user_id IS NULL THEN 0 ELSE 1 END AS isStaff, m.updated_at AS updatedAt
     FROM zalo_group_member m
     LEFT JOIN zalo_staff_member s ON s.channel_account_id = ? AND s.external_user_id = m.external_user_id

@@ -27,4 +27,17 @@ describe('zaloProfileFromInfo', () => {
     const clipped = zaloProfileFromInfo('1', { '1_0': { displayName: `[${long}]\n`, gender: 1 } });
     expect(clipped?.name).toBe('a'.repeat(100));
   });
+
+  it('keeps an https avatar and omits http, empty, and over-long urls', () => {
+    expect(zaloProfileFromInfo('1', { '1': { displayName: 'Lan', gender: 1, avatar: 'https://photo.zalo.me/lan.jpg' } }))
+      .toEqual({ name: 'Lan', gender: 'female', avatar: 'https://photo.zalo.me/lan.jpg' });
+    expect(zaloProfileFromInfo('1', { '1': { displayName: 'An', gender: 0, avatar: '  https://photo.zalo.me/an.jpg  ' } }))
+      .toEqual({ name: 'An', gender: 'male', avatar: 'https://photo.zalo.me/an.jpg' });
+    expect(zaloProfileFromInfo('1', { '1': { displayName: 'An', gender: null, avatar: 'http://photo.zalo.me/an.jpg' } }))
+      .toEqual({ name: 'An', gender: null });
+    expect(zaloProfileFromInfo('1', { '1': { displayName: 'An', gender: null, avatar: '' } }))
+      .toEqual({ name: 'An', gender: null });
+    expect(zaloProfileFromInfo('1', { '1': { displayName: 'An', gender: null, avatar: `https://photo.zalo.me/${'a'.repeat(2000)}` } }))
+      .toEqual({ name: 'An', gender: null });
+  });
 });

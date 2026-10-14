@@ -19,9 +19,10 @@
  *                                                     -> { message: { msgId: number } | null, attachment: [...] }
  *   api.getAllGroups()                                -> { gridVerMap: { [groupId]: version } }
  *   api.getGroupInfo(ids)                             -> { gridInfoMap: { [groupId]: { name, memVerList, currentMems, ... } } }
- *   api.getGroupMembersInfo(ids)                      -> { profiles: { [id]: { displayName, zaloName, ... } } }
+ *   api.getGroupMembersInfo(ids)                      -> { profiles: { [id]: { displayName, zaloName, avatar, ... } } }
  *   api.getUserInfo(userId)                           -> { changed_profiles: { [userId | userId_0]: User } }
- *                                                     User.displayName, else User.zaloName; Gender.Male = 0, Gender.Female = 1
+ *                                                     User.displayName, else User.zaloName; User.avatar (https only, else omitted)
+ *                                                     Gender.Male = 0, Gender.Female = 1
  */
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -69,6 +70,8 @@ export type ZaloGender = 'male' | 'female' | null;
 export interface ZaloUserProfile {
   name: string;
   gender: ZaloGender;
+  /** https avatar of at most 2000 characters. Absent when Zalo has none or the URL is not https. */
+  avatar?: string;
 }
 
 /** How a session ended. `fatal` means reconnecting with the same credentials will not help. */
@@ -86,8 +89,8 @@ export interface ZaloSession {
   /** Profile of one Zalo user. Null when `changed_profiles` has no entry for that id. */
   getUserProfile(userId: string): Promise<ZaloUserProfile | null>;
   listGroups(): Promise<ZaloGroup[]>;
-  /** Members of one group: Zalo uid and display name. */
-  listGroupMembers(groupId: string): Promise<{ id: string; name: string }[]>;
+  /** Members of one group: Zalo uid, display name, and an https avatar when the profile has one. */
+  listGroupMembers(groupId: string): Promise<{ id: string; name: string; avatar?: string }[]>;
   onMessage(cb: (message: IncomingMessage) => void): void;
   /** Called once when the connection ends for good; not called after close(). */
   onClose(cb: (close: SessionClose) => void): void;
@@ -129,6 +132,19 @@ interface RawChangedProfile {
   displayName?: unknown;
   zaloName?: unknown;
   gender?: unknown;
+  avatar?: unknown;
+}
+
+/** https URL of 1 to 2000 characters, or null. http and anything else are omitted. */
+export function httpsAvatarUrl(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (trimmed.length < 1 || trimmed.length > 2000) return null;
+  try {
+    return new URL(trimmed).protocol === 'https:' ? trimmed : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Gender.Male = 0 and Gender.Female = 1 in zca-js. Any other value is unknown. */
@@ -165,7 +181,8 @@ export function zaloProfileFromInfo(
   if (!profile) return null;
   const display = profileName(profile.displayName);
   const zalo = profileName(profile.zaloName);
-  return { name: display || zalo, gender: mapGender(profile.gender) };
+  const avatar = httpsAvatarUrl(profile.avatar);
+  return { name: display || zalo, gender: mapGender(profile.gender), ...(avatar ? { avatar } : {}) };
 }
 
 function isHttpUrl(value: unknown): value is string {
@@ -342,20 +359,22 @@ class ZcaSession implements ZaloSession {
     return groups;
   }
 
-  async listGroupMembers(groupId: string): Promise<{ id: string; name: string }[]> {
+  async listGroupMembers(groupId: string): Promise<{ id: string; name: string; avatar?: string }[]> {
     const info = await this.api.getGroupInfo(groupId);
     const group = info.gridInfoMap?.[groupId];
     const fromVer = (group?.memVerList ?? []).map(memberIdFromVer).filter((id) => id.length > 0);
     const ids = (fromVer.length ? fromVer : (group?.currentMems ?? []).map((member) => member.id).filter((id) => id.length > 0))
       .slice(0, MAX_GROUP_MEMBERS);
-    const members: { id: string; name: string }[] = [];
+    const members: { id: string; name: string; avatar?: string }[] = [];
     for (let i = 0; i < ids.length; i += MEMBER_INFO_BATCH) {
       const batch = ids.slice(i, i + MEMBER_INFO_BATCH);
       const result = await this.api.getGroupMembersInfo(batch);
       const profiles = result.profiles ?? {};
       // zca-js asks for `${id}_0`, so the map may be keyed by either form, as with getUserInfo.
       for (const id of batch) {
-        members.push({ id, name: memberDisplayName(profiles[id] ?? profiles[`${id}_0`] ?? suffixedProfile(profiles, id)) });
+        const profile = profiles[id] ?? profiles[`${id}_0`] ?? suffixedProfile(profiles, id);
+        const avatar = httpsAvatarUrl(profile?.avatar);
+        members.push({ id, name: memberDisplayName(profile), ...(avatar ? { avatar } : {}) });
       }
     }
     return members;

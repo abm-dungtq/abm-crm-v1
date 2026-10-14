@@ -54,6 +54,22 @@ export interface InboundMessage {
   mentionsSelf?: boolean;
   /** Group only: the message quotes a message the bot sent. */
   quotesSelf?: boolean;
+  /** Optional avatar. A value that is not https is dropped and does not reject the message. */
+  senderAvatar?: string | null;
+  /** Set only after an Official Account profile lookup was attempted. Personal Zalo and Facebook leave it unset. */
+  avatarCheckedAt?: string | null;
+}
+
+/** https URL of 1 to 2000 characters, or null. http and anything else are dropped. */
+export function httpsAvatarUrl(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (trimmed.length < 1 || trimmed.length > 2000) return null;
+  try {
+    return new URL(trimmed).protocol === 'https:' ? trimmed : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Decides whether a fromSelf message echoes a message the system sent; when it does, it marks that message sent. */
@@ -62,12 +78,18 @@ export type EchoMatcher = (conversationId: string) => Promise<boolean>;
 const findZaloAccount = (db: D1Database, externalId: string) =>
   db.prepare("SELECT id, organization_id FROM channel_account WHERE channel = 'zalo' AND external_id = ?").bind(externalId).first<ChannelAccountRef>();
 
-const upsertConversation = (db: D1Database, account: ChannelAccountRef, threadId: string, kind: 'direct' | 'group', displayName: string | null, now: string) =>
-  db.prepare(`INSERT INTO conversation (id, organization_id, channel_account_id, kind, external_thread_id, display_name, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+const upsertConversation = (
+  db: D1Database, account: ChannelAccountRef, threadId: string, kind: 'direct' | 'group', displayName: string | null, now: string,
+  avatarUrl: string | null = null, avatarCheckedAt: string | null = null,
+) =>
+  db.prepare(`INSERT INTO conversation (id, organization_id, channel_account_id, kind, external_thread_id, display_name, avatar_url, avatar_checked_at, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(channel_account_id, external_thread_id) DO UPDATE SET kind = excluded.kind,
-      display_name = COALESCE(excluded.display_name, conversation.display_name), updated_at = excluded.updated_at
-    RETURNING id, mode`).bind(crypto.randomUUID(), account.organization_id, account.id, kind, threadId, displayName, now, now);
+      display_name = COALESCE(excluded.display_name, conversation.display_name),
+      avatar_url = COALESCE(excluded.avatar_url, conversation.avatar_url),
+      avatar_checked_at = COALESCE(excluded.avatar_checked_at, conversation.avatar_checked_at),
+      updated_at = excluded.updated_at
+    RETURNING id, mode`).bind(crypto.randomUUID(), account.organization_id, account.id, kind, threadId, displayName, avatarUrl, avatarCheckedAt, now, now);
 
 /** Rule 4: true when a fromSelf event is the channel's echo of a message the system sent; that message is marked sent. */
 async function applyEcho(db: D1Database, conversationId: string, event: MessageEvent, now: Date) {
@@ -96,14 +118,17 @@ async function applyEcho(db: D1Database, conversationId: string, event: MessageE
 
 const MEMBER_BATCH = 100;
 
-/** Inserts or refreshes one group member. A blank name does not wipe a name already stored. */
-function upsertGroupMember(db: D1Database, conversationId: string, externalUserId: string, displayName: string | null, now: string) {
+/** Inserts or refreshes one group member. A blank name or avatar does not wipe a value already stored. */
+function upsertGroupMember(
+  db: D1Database, conversationId: string, externalUserId: string, displayName: string | null, now: string, avatarUrl: string | null = null,
+) {
   const name = displayName?.trim() || null;
-  return db.prepare(`INSERT INTO zalo_group_member (conversation_id, external_user_id, display_name, updated_at)
-    VALUES (?, ?, ?, ?)
+  return db.prepare(`INSERT INTO zalo_group_member (conversation_id, external_user_id, display_name, avatar_url, updated_at)
+    VALUES (?, ?, ?, ?, ?)
     ON CONFLICT(conversation_id, external_user_id) DO UPDATE SET
       display_name = COALESCE(excluded.display_name, zalo_group_member.display_name),
-      updated_at = excluded.updated_at`).bind(conversationId, externalUserId, name, now);
+      avatar_url = COALESCE(excluded.avatar_url, zalo_group_member.avatar_url),
+      updated_at = excluded.updated_at`).bind(conversationId, externalUserId, name, avatarUrl, now);
 }
 
 const touchGroupInbound = (db: D1Database, conversationId: string, now: string) =>
@@ -142,7 +167,7 @@ async function ingestGroupMessage(db: D1Database, account: ChannelAccountRef, ev
     return;
   }
 
-  await upsertGroupMember(db, conv.id, event.senderExternalId, event.senderName, nowIso).run();
+  await upsertGroupMember(db, conv.id, event.senderExternalId, event.senderName, nowIso, httpsAvatarUrl(event.senderAvatar)).run();
   const staff = await db.prepare('SELECT 1 AS hit FROM zalo_staff_member WHERE channel_account_id = ? AND external_user_id = ?')
     .bind(account.id, event.senderExternalId).first<{ hit: number }>();
   if (staff) {
@@ -256,10 +281,13 @@ export async function ingestMessage(db: D1Database, account: ChannelAccountRef, 
     return;
   }
   const nowIso = now.toISOString();
-  // A direct thread is named after the customer; our own messages and group members do not rename it.
+  // A direct thread is named after the customer; our own messages do not rename it or replace the customer's avatar.
   const senderName = event.senderName?.trim();
-  const name = !event.fromSelf && event.threadKind === 'direct' && senderName ? senderName : null;
-  const conv = await upsertConversation(db, account, event.threadId, event.threadKind, name, nowIso).first<ConversationRef>();
+  const customerDirect = !event.fromSelf && event.threadKind === 'direct';
+  const name = customerDirect && senderName ? senderName : null;
+  const avatarUrl = customerDirect ? httpsAvatarUrl(event.senderAvatar) : null;
+  const avatarCheckedAt = customerDirect && event.avatarCheckedAt ? event.avatarCheckedAt : null;
+  const conv = await upsertConversation(db, account, event.threadId, event.threadKind, name, nowIso, avatarUrl, avatarCheckedAt).first<ConversationRef>();
   if (!conv) throw new Error('conversation upsert returned no row');
   if (event.fromSelf && await isEcho(conv.id)) return;
 
@@ -374,7 +402,7 @@ export async function ingestGroupMembers(db: D1Database, event: GroupMembersEven
   const conv = await db.prepare('SELECT id FROM conversation WHERE channel_account_id = ? AND external_thread_id = ?')
     .bind(account.id, event.threadId).first<{ id: string }>();
   if (!conv) return true;
-  const statements = event.members.map((member) => upsertGroupMember(db, conv.id, member.id, member.name, now));
+  const statements = event.members.map((member) => upsertGroupMember(db, conv.id, member.id, member.name, now, httpsAvatarUrl(member.avatar)));
   for (let i = 0; i < statements.length; i += MEMBER_BATCH) await db.batch(statements.slice(i, i + MEMBER_BATCH));
   return true;
 }
