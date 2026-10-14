@@ -57,17 +57,17 @@ test('contact_point accepts zalo_oa_uid and lead stores product_id and course_id
       VALUES ('pr-1', 'org-abm', 'Khóa AI 199K', 199000, 1, ?1, ?1)`).bind(STAMP),
     db.prepare(`INSERT INTO course (id, organization_id, product_id, name, status, created_at, updated_at)
       VALUES ('co-1', 'org-abm', 'pr-1', 'AI Cơ bản K1', 'active', ?1, ?1)`).bind(STAMP),
-    db.prepare(`INSERT INTO contact_point (id, contact_id, type, value, normalized_value, is_primary, created_at)
-      VALUES ('cp-oa-1', 'ct-1', 'zalo_oa_uid', 'oa-user-123', 'oa-user-123', 0, ?1)`).bind(STAMP),
-    db.prepare("UPDATE lead SET product_id = 'pr-1', course_id = 'co-1' WHERE id = 'ld-1'"),
+    db.prepare(`INSERT INTO contact_point (id, contact_id, type, value, normalized_value, created_at)
+      VALUES ('cp-oa-1', 'ct-1', 'zalo_oa_uid', 'oa-user-123', 'oa-user-123', ?1)`).bind(STAMP),
+    db.prepare("UPDATE lead SET product_id = 'pr-1', course_id = 'co-1' WHERE id = 'lead-01'"),
   ]);
   expect(await db.prepare("SELECT type, value FROM contact_point WHERE id = 'cp-oa-1'").first())
     .toEqual({ type: 'zalo_oa_uid', value: 'oa-user-123' });
-  expect(await db.prepare("SELECT product_id, course_id FROM lead WHERE id = 'ld-1'").first())
+  expect(await db.prepare("SELECT product_id, course_id FROM lead WHERE id = 'lead-01'").first())
     .toEqual({ product_id: 'pr-1', course_id: 'co-1' });
   await expect(
-    db.prepare(`INSERT INTO contact_point (id, contact_id, type, value, normalized_value, is_primary, created_at)
-      VALUES ('cp-bad', 'ct-1', 'telegram_uid', 'tg-1', 'tg-1', 0, ?)`).bind(STAMP).run(),
+    db.prepare(`INSERT INTO contact_point (id, contact_id, type, value, normalized_value, created_at)
+      VALUES ('cp-bad', 'ct-1', 'telegram_uid', 'tg-1', 'tg-1', ?)`).bind(STAMP).run(),
   ).rejects.toThrow(/CHECK/);
   expect((await db.prepare('PRAGMA foreign_key_check').all()).results).toEqual([]);
 });

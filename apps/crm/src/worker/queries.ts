@@ -4,7 +4,7 @@ import {
 } from '@abm/contracts';
 import type { Actor } from './env';
 import { learnerPhoneVisible } from './learner-queries';
-import { b2bLeadScope, leadScope, mayDecideApproval, type SqlFragment } from './scope';
+import { leadScope, mayDecideApproval, type SqlFragment } from './scope';
 
 export type HealthState = 'ok' | 'warn' | 'breach';
 
@@ -20,7 +20,7 @@ export interface LeadListRow {
   stage_entered_at: string; last_activity_at: string | null; created_at: string; updated_at: string;
   closed_at: string | null; lost_reason: string | null; version: number; pipeline: string;
   owner_user_id: string | null; owner_name: string | null; team_id: string | null; team_name: string | null;
-  contact_name: string; account_id: string | null; account_name: string | null;
+  contact_id: string; contact_name: string; account_id: string | null; account_name: string | null;
   na_id: string | null; na_title: string | null; na_due_at: string | null;
   product_id: string | null; product_name: string | null; course_id: string | null; course_name: string | null;
 }
@@ -49,7 +49,7 @@ export const LEAD_SELECT = `
   SELECT l.id, l.code, l.stage, l.status, l.source, l.need_summary, l.expected_value, l.first_contact_at,
     l.assigned_at, l.stage_entered_at, l.last_activity_at, l.created_at, l.updated_at, l.closed_at, l.lost_reason,
     l.version, l.pipeline, l.owner_user_id, u.display_name AS owner_name, l.team_id, t.name AS team_name,
-    c.display_name AS contact_name, a.id AS account_id, a.name AS account_name,
+    l.contact_id, c.display_name AS contact_name, a.id AS account_id, a.name AS account_name,
     na.id AS na_id, na.title AS na_title, na.due_at AS na_due_at,
     l.product_id, pr.name AS product_name, l.course_id, co.name AS course_name
   FROM lead l
@@ -71,6 +71,7 @@ export function toLeadItem(row: LeadListRow, now: Date) {
     courseId: row.course_id ?? null, courseName: row.course_name ?? null,
     owner: row.owner_user_id ? { id: row.owner_user_id, name: row.owner_name } : null,
     team: row.team_id ? { id: row.team_id, name: row.team_name } : null,
+    contactId: row.contact_id,
     contactName: row.contact_name,
     account: row.account_id ? { id: row.account_id, name: row.account_name } : null,
     nextAction: row.na_id ? { id: row.na_id, title: row.na_title, dueAt: row.na_due_at } : null,
@@ -91,6 +92,8 @@ export interface LeadFilter {
   q?: string;
   accountId?: string;
   departmentId?: string;
+  pipeline?: 'b2b' | 'learner' | 'all';
+  contactId?: string;
 }
 
 export async function listLeads(db: D1Database, actor: Actor, filter: LeadFilter = {}) {
@@ -101,14 +104,29 @@ const SEARCH_CANDIDATE_LIMIT = 2000;
 const LEAD_PAGE_LIMIT = 500;
 
 function leadWhere(actor: Actor, filter: LeadFilter, includeStatus = true) {
-  const scope = b2bLeadScope(actor);
+  let pipeline = filter.pipeline;
+  let stage = filter.stage;
+  if (!pipeline && stage) {
+    if (stage === 'b2b' || stage === 'learner') {
+      pipeline = stage;
+      stage = undefined;
+    } else if (stage.startsWith('b2b:')) {
+      pipeline = 'b2b';
+      stage = stage.slice(4) || undefined;
+    } else if (stage.startsWith('learner:')) {
+      pipeline = 'learner';
+      stage = stage.slice(8) || undefined;
+    }
+  }
+  const scope = leadScope(actor, pipeline ?? 'all');
   const where = [scope.sql];
   const binds = [...scope.binds];
   if (includeStatus && filter.status === 'open') where.push(`l.status IN ('queue', 'active')`);
   else if (includeStatus && filter.status) { where.push('l.status = ?'); binds.push(filter.status); }
-  if (filter.stage) { where.push('l.stage = ?'); binds.push(filter.stage); }
+  if (stage) { where.push('l.stage = ?'); binds.push(stage); }
   if (filter.ownerId) { where.push('l.owner_user_id = ?'); binds.push(filter.ownerId); }
   if (filter.accountId) { where.push('l.account_id = ?'); binds.push(filter.accountId); }
+  if (filter.contactId) { where.push('l.contact_id = ?'); binds.push(filter.contactId); }
   if (filter.departmentId) { where.push('l.department_id = ?'); binds.push(filter.departmentId); }
   return { sql: where.join(' AND '), binds };
 }
@@ -211,18 +229,18 @@ export async function dashboard(db: D1Database, actor: Actor) {
   const since = new Date(`${monthStart}T00:00:00+07:00`).toISOString();
   const today = new Date(`${vnDate(now)}T00:00:00+07:00`).toISOString();
   const tomorrow = new Date(Date.parse(today) + 86_400_000).toISOString();
-  const scope = b2bLeadScope(actor);
+  const scope = leadScope(actor, 'all');
   const taskFilter = taskScope(actor);
   const [groups, taskCounts] = await Promise.all([
-    db.prepare(`SELECT l.status, l.stage, l.owner_user_id, u.display_name AS owner_name, l.lost_reason,
+    db.prepare(`SELECT l.pipeline, l.status, l.stage, l.owner_user_id, u.display_name AS owner_name, l.lost_reason,
       COUNT(*) AS n, COALESCE(SUM(l.expected_value), 0) AS v,
       SUM(CASE WHEN l.closed_at >= ? THEN 1 ELSE 0 END) AS month_n,
       COALESCE(SUM(CASE WHEN l.closed_at >= ? THEN l.expected_value ELSE 0 END), 0) AS month_v,
       SUM(CASE WHEN l.status = 'active' AND na.due_at < ? THEN 1 ELSE 0 END) AS overdue
       FROM lead l LEFT JOIN app_user u ON u.id = l.owner_user_id LEFT JOIN task na ON na.id = l.next_action_task_id
-      WHERE ${scope.sql} GROUP BY l.status, l.stage, l.owner_user_id, l.lost_reason`)
+      WHERE ${scope.sql} GROUP BY l.pipeline, l.status, l.stage, l.owner_user_id, l.lost_reason`)
       .bind(since, since, now.toISOString(), ...scope.binds)
-      .all<{ status: string; stage: string; owner_user_id: string | null; owner_name: string | null; lost_reason: string | null;
+      .all<{ pipeline: string; status: string; stage: string; owner_user_id: string | null; owner_name: string | null; lost_reason: string | null;
         n: number; v: number; month_n: number; month_v: number; overdue: number }>(),
     db.prepare(`SELECT COUNT(*) AS total,
       COALESCE(SUM(tk.due_at < ?), 0) AS overdue,
@@ -232,6 +250,24 @@ export async function dashboard(db: D1Database, actor: Actor) {
   ]);
   const active = leads.filter((l) => l.status === 'active');
   const tally = (status: string, field: 'n' | 'v' | 'month_n' | 'month_v') => groups.results.filter((g) => g.status === status).reduce((s, g) => s + g[field], 0);
+  const tallyPipe = (pipe: 'b2b' | 'learner', status: string, field: 'n' | 'v' | 'month_n' | 'month_v') =>
+    groups.results.filter((g) => g.pipeline === pipe && g.status === status).reduce((s, g) => s + g[field], 0);
+  const byPipeline = {
+    b2b: {
+      activeLeads: tallyPipe('b2b', 'active', 'n'),
+      queueLeads: tallyPipe('b2b', 'queue', 'n'),
+      wonCount: tallyPipe('b2b', 'won', 'month_n'),
+      lostCount: tallyPipe('b2b', 'lost', 'month_n'),
+      pipelineValue: tallyPipe('b2b', 'active', 'v'),
+    },
+    learner: {
+      activeLeads: tallyPipe('learner', 'active', 'n'),
+      queueLeads: tallyPipe('learner', 'queue', 'n'),
+      wonCount: tallyPipe('learner', 'won', 'month_n'),
+      lostCount: tallyPipe('learner', 'lost', 'month_n'),
+      pipelineValue: tallyPipe('learner', 'active', 'v'),
+    },
+  };
 
   const owners = new Map<string, { id: string; name: string; active: number; overdue: number; stale: number; won: number; lost: number; value: number }>();
   for (const g of groups.results) {
@@ -264,7 +300,9 @@ export async function dashboard(db: D1Database, actor: Actor) {
       firstContactBreaches: active.filter((l) => l.health.firstContact && ['breach', 'release'].includes(l.health.firstContact.state)).length,
       staleLeads: active.filter((l) => l.health.stageSla?.state === 'breach').length,
       wonCount: tally('won', 'month_n'), wonValue: tally('won', 'month_v'), lostCount: tally('lost', 'month_n'),
+      byPipeline,
     },
+    byPipeline,
     pipeline: ACTIVE_STAGES.map((code) => {
       const items = groups.results.filter((g) => g.status === 'active' && g.stage === code);
       return { stage: code, count: items.reduce((s, g) => s + g.n, 0), value: items.reduce((s, g) => s + g.v, 0) };
@@ -330,10 +368,24 @@ export const canReadProducts = (actor: Actor) => actor.role !== 'teacher';
 
 export async function listProducts(db: D1Database, actor: Actor) {
   const activeOnly = actor.role === 'sale' || actor.role === 'leader';
-  const rows = await db.prepare(`SELECT id, name, description, price_vnd, active, version FROM product
-    WHERE organization_id = ?${activeOnly ? ' AND active = 1' : ''} ORDER BY name`).bind(actor.organizationId)
-    .all<{ id: string; name: string; description: string | null; price_vnd: number; active: number; version: number }>();
-  return rows.results.map((r) => ({ id: r.id, name: r.name, description: r.description, priceVnd: r.price_vnd, active: r.active === 1, version: r.version }));
+  const [rows, courseRows] = await Promise.all([
+    db.prepare(`SELECT id, name, description, price_vnd, active, version FROM product
+      WHERE organization_id = ?${activeOnly ? ' AND active = 1' : ''} ORDER BY name`).bind(actor.organizationId)
+      .all<{ id: string; name: string; description: string | null; price_vnd: number; active: number; version: number }>(),
+    db.prepare(`SELECT id, product_id, name, status, version FROM course
+      WHERE organization_id = ?${actor.role === 'sale' ? " AND status = 'active'" : ''} ORDER BY name`).bind(actor.organizationId)
+      .all<{ id: string; product_id: string; name: string; status: 'active' | 'inactive'; version: number }>(),
+  ]);
+  const coursesByProduct = new Map<string, { id: string; productId: string; name: string; status: 'active' | 'inactive'; version: number }[]>();
+  for (const c of courseRows.results) {
+    const list = coursesByProduct.get(c.product_id) ?? [];
+    list.push({ id: c.id, productId: c.product_id, name: c.name, status: c.status, version: c.version });
+    coursesByProduct.set(c.product_id, list);
+  }
+  return rows.results.map((r) => ({
+    id: r.id, name: r.name, description: r.description, priceVnd: r.price_vnd, active: r.active === 1, version: r.version,
+    courses: coursesByProduct.get(r.id) ?? [],
+  }));
 }
 
 export async function listApprovals(db: D1Database, actor: Actor, status?: string, leadId?: string) {

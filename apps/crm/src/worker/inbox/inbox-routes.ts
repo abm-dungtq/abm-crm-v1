@@ -17,6 +17,7 @@ import {
 } from './intake';
 import { processWorkerCommands } from './worker-commands';
 import { ZaloOaNotConfigured, beginZaloOaConnect } from './zalo-oa-oauth';
+import { listLeads } from '../queries';
 
 /** Inbox API for the web app. Inbox roles see every conversation of the organization; channel accounts are admin-only. */
 export const inboxRoutes = new Hono<AppBindings>();
@@ -108,7 +109,9 @@ const CONVERSATION_SELECT = `SELECT c.id, c.channel_account_id AS channelAccount
     c.assignee_user_id AS assigneeUserId, u.display_name AS assigneeName, c.assigned_at AS assignedAt,
     c.handoff_reason AS handoffReason, c.last_message_at AS lastMessageAt, c.last_inbound_at AS lastInboundAt,
     c.last_staff_reply_at AS lastStaffReplyAt, c.sla_due_at AS slaDueAt, c.created_at AS createdAt, c.updated_at AS updatedAt,
-    lm.body AS lastMessageBody, lm.sender_kind AS lastMessageSenderKind, lm.created_at AS lastMessageCreatedAt
+    lm.body AS lastMessageBody, lm.sender_kind AS lastMessageSenderKind, lm.created_at AS lastMessageCreatedAt,
+    (SELECT COUNT(*) FROM message m WHERE m.conversation_id = c.id AND m.direction = 'in' AND (c.last_staff_reply_at IS NULL OR m.created_at > c.last_staff_reply_at)) AS unreadCount,
+    (SELECT l.code FROM lead l WHERE l.contact_id = c.contact_id AND l.organization_id = c.organization_id ORDER BY l.status IN ('queue', 'active') DESC, l.updated_at DESC LIMIT 1) AS leadCode
   FROM conversation c
   JOIN channel_account a ON a.id = c.channel_account_id
   LEFT JOIN app_user u ON u.id = c.assignee_user_id
@@ -500,7 +503,12 @@ inboxRoutes.post('/intakes/:id/classify', async (c) => {
   const input = await body(c, classifyInput);
   if ('error' in input) return input.error;
   const appBase = linkBase(c.env.APP_URL, new URL(c.req.url).origin);
-  return commandResponse(c, await classifyIntake(c.env.DB, c.get('actor'), c.req.param('id'), input.data, appBase));
+  const result = await classifyIntake(c.env.DB, c.get('actor'), c.req.param('id'), input.data, appBase);
+  if (result.ok) {
+    const leadRow = await c.env.DB.prepare('SELECT code FROM lead WHERE id = ?').bind(result.data.leadId).first<{ code: string }>();
+    return commandResponse(c, { ok: true, data: { ...result.data, leadCode: leadRow?.code } });
+  }
+  return commandResponse(c, result);
 });
 
 inboxRoutes.post('/intakes/:id/discard', async (c) =>
@@ -529,6 +537,52 @@ inboxRoutes.post('/conversations/:id/extract', async (c) => {
   if (!commandId) return c.json(fail('VALIDATION_FAILED', 'Chỉ trích được hội thoại 1-1 đã có tin nhắn'), 422);
   await auditRow(db, actor, 'inbox.requestExtraction', 'conversation', conv.id, null, { commandId }, new Date().toISOString()).run();
   return c.json(ok({ commandId }));
+});
+
+/** Customer card and visible leads for the Inbox right panel ("Khách trong CRM"). */
+inboxRoutes.get('/contacts/:contactId', async (c) => {
+  const actor = c.get('actor');
+  const db = c.env.DB;
+  const contactId = c.req.param('contactId');
+  const contactRow = await db.prepare(`SELECT c.id, c.display_name AS name, c.owner_user_id AS ownerUserId,
+      u.display_name AS ownerName, u.team_id AS ownerTeamId, c.hold_expires_at AS holdExpiresAt, c.version
+    FROM contact c LEFT JOIN app_user u ON u.id = c.owner_user_id
+    WHERE c.id = ? AND c.organization_id = ?`)
+    .bind(contactId, actor.organizationId)
+    .first<{ id: string; name: string; ownerUserId: string | null; ownerName: string | null; ownerTeamId: string | null; holdExpiresAt: string | null; version: number }>();
+  if (!contactRow) return c.json(notFound, 404);
+  const leads = await listLeads(db, actor, { contactId, pipeline: 'all' });
+  const canInspectContact = actor.role === 'admin' || actor.role === 'director' || actor.role === 'head'
+    || contactRow.ownerUserId === actor.id
+    || (actor.role === 'leader' && Boolean(actor.teamId) && contactRow.ownerTeamId === actor.teamId)
+    || !contactRow.ownerUserId
+    || leads.length > 0;
+  let phone: string | null = null;
+  let email: string | null = null;
+  if (canInspectContact) {
+    const points = await db.prepare('SELECT type, value FROM contact_point WHERE contact_id = ? ORDER BY created_at DESC')
+      .bind(contactId).all<{ type: string; value: string }>();
+    phone = points.results.find((p) => p.type === 'phone')?.value ?? null;
+    email = points.results.find((p) => p.type === 'email')?.value ?? null;
+  }
+  const openRow = await db.prepare(`SELECT id, code, pipeline FROM lead WHERE contact_id = ? AND organization_id = ? AND status IN ('queue', 'active') ORDER BY updated_at DESC LIMIT 1`)
+    .bind(contactId, actor.organizationId).first<{ id: string; code: string; pipeline: string }>();
+  return c.json(ok({
+    contact: {
+      id: contactRow.id,
+      displayName: contactRow.name,
+      name: contactRow.name,
+      ownerUserId: contactRow.ownerUserId,
+      ownerName: canInspectContact ? contactRow.ownerName : null,
+      holdExpiresAt: contactRow.holdExpiresAt,
+      phone,
+      email,
+      restricted: !canInspectContact,
+    },
+    leads,
+    hasOpenLead: Boolean(openRow),
+    openLeadCode: openRow?.code ?? null,
+  }));
 });
 
 // ---------- Zalo groups and recurring posts ----------

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, test } from 'vitest';
 import seedSql from '../seed/demo.sql?raw';
 import app from '../src/worker/index';
 import { holdExpiry } from '../src/worker/learner-hold';
+import { listLeads } from '../src/worker/queries';
 import { resetDb } from './helpers/reset-db';
 
 const db = env.DB;
@@ -258,7 +259,7 @@ describe('journey', () => {
     expect((await command('u-lan', 'closeLearnerLead', { leadId, expectedVersion: 2, outcome: 'lost', reason: 'price' })).status).toBe(422);
   });
 
-  test('B2B commands refuse a learner lead and B2B lists leave it out', async () => {
+  test('B2B commands refuse a learner lead while unified lead list & dashboard include it and B2B filter leaves it out', async () => {
     const beforeDashboard = await get('u-lan', '/dashboard');
     const beforeOverview = await get('u-admin', '/overview');
     expect(beforeDashboard.status).toBe(200);
@@ -266,19 +267,52 @@ describe('journey', () => {
     const activeBefore = beforeDashboard.json.data.kpi.activeLeads as number;
     const openBefore = beforeOverview.json.data.kpi.openLeads as number;
 
-    const { leadId } = await seedCustomer();
+    const { leadId, contactId } = await seedCustomer();
     const stage = await command('u-lan', 'changeStage', { leadId, expectedVersion: 1, toStage: 'contacted' });
     expect(stage.status).toBe(422);
     expect(stage.json.error?.code).toBe('VALIDATION_FAILED');
     expect((await command('u-hung', 'assignLead', { leadId, expectedVersion: 1, ownerUserId: 'u-long' })).status).toBe(422);
     expect((await command('u-lan', 'requestOwnerChange', { leadId, expectedVersion: 1, toUserId: 'u-long', reason: 'Bận' })).status).toBe(422);
-    const list = (await get('u-lan', '/leads')).json.data as { id: string }[];
-    expect(list.map((l) => l.id)).not.toContain(leadId);
+
+    const listAll = (await get('u-lan', '/leads')).json.data as { id: string; pipeline: string }[];
+    expect(listAll.map((l) => l.id)).toContain(leadId);
+    const listB2bHttp = (await get('u-lan', '/leads?stage=b2b')).json.data as { id: string }[];
+    expect(listB2bHttp.map((l) => l.id)).not.toContain(leadId);
+
+    const lanActor = {
+      id: 'u-lan',
+      organizationId: 'org-abm',
+      departmentId: 'dep-kd',
+      teamId: 'team-1',
+      role: 'sale' as const,
+      displayName: 'Đỗ Ngọc Lan',
+      email: 'lan@abm.edu.vn',
+      kind: 'human' as const,
+    };
+    const directAll = await listLeads(db, lanActor, { pipeline: 'all' });
+    expect(directAll.map((l) => l.id)).toContain(leadId);
+    const directB2b = await listLeads(db, lanActor, { pipeline: 'b2b' });
+    expect(directB2b.map((l) => l.id)).not.toContain(leadId);
+    const directLearner = await listLeads(db, lanActor, { pipeline: 'learner' });
+    expect(directLearner.map((l) => l.id)).toEqual([leadId]);
+
     const detail = await get('u-lan', `/leads/${leadId}`);
     expect(detail.json.data.lead.health).toEqual({ firstContact: null, stageSla: null, nextActionOverdue: false });
 
+    const inboxContact = await get('u-lan', `/inbox/contacts/${contactId}`);
+    expect(inboxContact.status).toBe(200);
+    expect(inboxContact.json.data).toMatchObject({
+      hasOpenLead: true,
+      contact: { id: contactId, displayName: 'Nguyễn Văn An', ownerUserId: 'u-lan' },
+    });
+    expect(inboxContact.json.data.leads.map((l: { id: string }) => l.id)).toContain(leadId);
+
     const dashboard = await get('u-lan', '/dashboard');
-    expect(dashboard.json.data.kpi.activeLeads).toBe(activeBefore);
+    expect(dashboard.json.data.kpi.activeLeads).toBe(activeBefore + 1);
+    expect(dashboard.json.data.kpi.byPipeline).toMatchObject({
+      b2b: { activeLeads: activeBefore },
+      learner: { activeLeads: 1 },
+    });
     const overview = await get('u-admin', '/overview');
     expect(overview.json.data.kpi.openLeads).toBe(openBefore);
     const cardIds = (overview.json.data.columns as { leads: { id: string }[] }[]).flatMap((column) => column.leads.map((card) => card.id));

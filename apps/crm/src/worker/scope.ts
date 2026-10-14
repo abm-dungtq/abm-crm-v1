@@ -5,36 +5,73 @@ export interface SqlFragment {
   binds: unknown[];
 }
 
-/**
- * Lead visibility per permission-matrix-v1: Sale own/assigned, Leader team plus the
- * department intake queue it assigns from, Head department, BGĐ organization.
- * Admin reads and writes organization-wide but never decides approvals.
- */
-export function leadScope(actor: Actor, alias = 'l'): SqlFragment {
-  const a = alias;
+export type LeadPipelineFilter = 'b2b' | 'learner' | 'all';
+const PIPELINE_FILTERS = new Set<string>(['b2b', 'learner', 'all']);
+const LEARNER_READERS = new Set(['sale', 'leader', 'director', 'admin']);
+export const canReadLearners = (actor: Actor) => LEARNER_READERS.has(actor.role);
+
+function b2bScope(actor: Actor, a = 'l'): SqlFragment {
   switch (actor.role) {
     case 'sale':
-      return { sql: `${a}.owner_user_id = ?`, binds: [actor.id] };
+      return { sql: `${a}.pipeline = 'b2b' AND ${a}.owner_user_id = ?`, binds: [actor.id] };
     case 'leader':
       return {
-        sql: `(${a}.team_id = ? OR (${a}.status = 'queue' AND ${a}.department_id = ?))`,
+        sql: `${a}.pipeline = 'b2b' AND (${a}.team_id = ? OR (${a}.status = 'queue' AND ${a}.department_id = ?))`,
         binds: [actor.teamId, actor.departmentId],
       };
     case 'head':
-      return { sql: `${a}.department_id = ?`, binds: [actor.departmentId] };
+      return { sql: `${a}.pipeline = 'b2b' AND ${a}.department_id = ?`, binds: [actor.departmentId] };
     case 'director':
     case 'admin':
-      return { sql: `${a}.organization_id = ?`, binds: [actor.organizationId] };
+      return { sql: `${a}.pipeline = 'b2b' AND ${a}.organization_id = ?`, binds: [actor.organizationId] };
     default:
-      // academic, teacher and accountant read B2B leads nowhere; their own screens use dedicated queries.
       return { sql: '0 = 1', binds: [] };
   }
 }
 
-/** Same visibility as leadScope, limited to the B2B pipeline. Learner leads stay on the learner screens. */
+export function learnerLeadScope(actor: Actor, a = 'l'): SqlFragment {
+  switch (actor.role) {
+    case 'sale':
+      return {
+        sql: `${a}.pipeline = 'learner' AND (${a}.owner_user_id = ? OR EXISTS (SELECT 1 FROM contact c WHERE c.id = ${a}.contact_id AND c.owner_user_id = ?))`,
+        binds: [actor.id, actor.id],
+      };
+    case 'leader':
+      return {
+        sql: `${a}.pipeline = 'learner' AND (${a}.team_id = ? OR EXISTS (SELECT 1 FROM contact c WHERE c.id = ${a}.contact_id AND c.owner_user_id IN (SELECT id FROM app_user WHERE team_id = ?)))`,
+        binds: [actor.teamId, actor.teamId],
+      };
+    case 'head':
+      return { sql: `${a}.pipeline = 'learner' AND ${a}.department_id = ?`, binds: [actor.departmentId] };
+    case 'director':
+    case 'admin':
+      return { sql: `${a}.pipeline = 'learner' AND ${a}.organization_id = ?`, binds: [actor.organizationId] };
+    default:
+      return { sql: '0 = 1', binds: [] };
+  }
+}
+
+/**
+ * Lead visibility per permission-matrix-v1 across B2B and Learner pipelines.
+ * Accepts either (actor, pipeline?, alias?) or legacy (actor, alias).
+ */
+export function leadScope(actor: Actor, pipelineOrAlias: LeadPipelineFilter | string = 'all', maybeAlias?: string): SqlFragment {
+  const isPipeline = PIPELINE_FILTERS.has(pipelineOrAlias);
+  const pipeline: LeadPipelineFilter = isPipeline ? (pipelineOrAlias as LeadPipelineFilter) : 'all';
+  const a = isPipeline ? (maybeAlias ?? 'l') : pipelineOrAlias;
+  if (pipeline === 'b2b') return b2bScope(actor, a);
+  if (pipeline === 'learner') return learnerLeadScope(actor, a);
+  const b = b2bScope(actor, a);
+  const lr = learnerLeadScope(actor, a);
+  if (b.sql === '0 = 1' && lr.sql === '0 = 1') return { sql: '0 = 1', binds: [] };
+  if (lr.sql === '0 = 1') return b;
+  if (b.sql === '0 = 1') return lr;
+  return { sql: `((${b.sql}) OR (${lr.sql}))`, binds: [...b.binds, ...lr.binds] };
+}
+
+/** Same visibility as leadScope, limited to the B2B pipeline. */
 export function b2bLeadScope(actor: Actor, alias = 'l'): SqlFragment {
-  const scope = leadScope(actor, alias);
-  return { sql: `${scope.sql} AND ${alias}.pipeline = 'b2b'`, binds: [...scope.binds] };
+  return b2bScope(actor, alias);
 }
 
 /**

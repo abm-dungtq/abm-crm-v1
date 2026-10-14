@@ -37,7 +37,7 @@ const intakes = () => db.prepare('SELECT * FROM lead_intake ORDER BY created_at'
 
 async function web(user: string, method: string, path: string, body?: unknown) {
   const res = await app.fetch(new Request(`${ORIGIN}/api${path}`, {
-    method, headers: { 'Content-Type': 'application/json', 'X-Demo-User': user },
+    method, headers: { 'Content-Type': 'application/json', 'X-Demo-User': user, 'Idempotency-Key': crypto.randomUUID() },
     body: body === undefined ? undefined : JSON.stringify(body),
   }), testEnv);
   return { status: res.status, json: await res.json() as any };
@@ -301,21 +301,43 @@ test('discarding an intake writes nothing else, and a group cannot be extracted 
   expect(direct.json.data.commandId).toBeTruthy();
 });
 
-test('extraction for a customer with an open lead logs a note activity on that lead instead of creating a pending intake', async () => {
-  // ct-1 in demo seed has open lead ld-1 (L-0001).
+test('extraction for a customer with an open lead logs only changed/new fields and writes nothing when nothing changed', async () => {
+  // ct-1 in demo seed has open lead lead-01 (L-0001).
   await customerSays('Em muốn đăng ký học khóa AI cơ bản ạ');
   const conv = await conversation();
   await db.prepare("UPDATE conversation SET contact_id = 'ct-1' WHERE id = ?").bind(conv.id).run();
 
-  const commandId = await enqueueExtraction(db, conv.id);
-  await answer(commandId!, JSON.stringify({ need: 'Học khóa AI cơ bản', program: '199k' }));
+  const commandId1 = await enqueueExtraction(db, conv.id);
+  await answer(commandId1!, JSON.stringify({ need: 'Học khóa AI cơ bản', program: '199k' }));
 
   expect(await intakes()).toHaveLength(0);
-  const note = await db.prepare("SELECT actor_kind, type, summary FROM activity WHERE lead_id = 'ld-1' ORDER BY created_at DESC, rowid DESC LIMIT 1")
-    .first<{ actor_kind: string; type: string; summary: string }>();
-  expect(note).toMatchObject({ actor_kind: 'system', type: 'note' });
-  expect(note!.summary).toContain('Nhu cầu: Học khóa AI cơ bản');
-  expect(note!.summary).toContain('Chương trình: 199k');
+  const sysNotes = () => db.prepare("SELECT summary FROM activity WHERE lead_id = 'lead-01' AND actor_kind = 'system' AND type = 'note' ORDER BY created_at ASC, rowid ASC")
+    .all<{ summary: string }>().then((r) => r.results.map((x) => x.summary));
+
+  const notes1 = await sysNotes();
+  expect(notes1).toHaveLength(1);
+  expect(notes1[0]).toContain('Nhu cầu: Học khóa AI cơ bản');
+  expect(notes1[0]).toContain('Chương trình: 199k');
+
+  // Second extraction with identical values writes nothing.
+  await customerSays('Dạ vâng ạ');
+  const commandId2 = await enqueueExtraction(db, conv.id);
+  await answer(commandId2!, JSON.stringify({ need: 'Học khóa AI cơ bản', program: '199k' }));
+  expect(await sysNotes()).toHaveLength(1);
+
+  // Third extraction with one new field (phone) and unchanged need/program writes only the new field.
+  await customerSays('Số điện thoại em là 0912345678');
+  const commandId3 = await enqueueExtraction(db, conv.id);
+  await answer(commandId3!, JSON.stringify({ need: 'Học khóa AI cơ bản', program: '199k', phone: '0912345678' }));
+  const notes3 = await sysNotes();
+  expect(notes3).toHaveLength(2);
+  expect(notes3[1]).toBe('Trích xuất tự động từ hội thoại: SĐT: 0912345678');
+
+  // Fourth extraction with the same 3 fields (even with +84 phone formatting) writes nothing.
+  await customerSays('Cảm ơn shop');
+  const commandId4 = await enqueueExtraction(db, conv.id);
+  await answer(commandId4!, JSON.stringify({ need: 'Học khóa AI cơ bản', program: '199k', phone: '+84 912 345 678' }));
+  expect(await sysNotes()).toHaveLength(2);
 });
 
 test('a returning zalo_oa customer in a new conversation is linked to the existing contact without creating a duplicate contact', async () => {
@@ -324,15 +346,13 @@ test('a returning zalo_oa customer in a new conversation is linked to the existi
       VALUES ('ca-oa', 'org-abm', 'zalo_oa', 'oa-acc-1', 'Zalo OA ABM', 'sales-bot', 'connected', ?1, ?1)`).bind(STAMP),
     db.prepare(`INSERT INTO contact (id, organization_id, display_name, owner_user_id, created_at, updated_at)
       VALUES ('ct-oa-existing', 'org-abm', 'Phạm Minh Tuấn', 'u-lan', ?1, ?1)`).bind(STAMP),
-    db.prepare(`INSERT INTO contact_point (id, contact_id, type, value, normalized_value, is_primary, created_at)
-      VALUES ('cp-oa-existing', 'ct-oa-existing', 'zalo_oa_uid', 'oa-thread-99', 'oa-thread-99', 0, ?1)`).bind(STAMP),
+    db.prepare(`INSERT INTO contact_point (id, contact_id, type, value, normalized_value, created_at)
+      VALUES ('cp-oa-existing', 'ct-oa-existing', 'zalo_oa_uid', 'oa-thread-99', 'oa-thread-99', ?1)`).bind(STAMP),
+    db.prepare(`INSERT INTO conversation (id, organization_id, channel_account_id, kind, external_thread_id, display_name, mode, created_at, updated_at)
+      VALUES ('conv-oa-99', 'org-abm', 'ca-oa', 'direct', 'oa-thread-99', 'Phạm Minh Tuấn', 'ai', ?1, ?1)`).bind(STAMP),
+    db.prepare(`INSERT INTO message (id, conversation_id, direction, sender_kind, body, status, created_at)
+      VALUES ('msg-oa-99', 'conv-oa-99', 'in', 'customer', 'Cho anh đăng ký học khóa tiếp theo, số anh 0918111222', 'received', ?1)`).bind(STAMP),
   ]);
-
-  await ingestEvents(db, [{
-    type: 'message', accountExternalId: 'oa-acc-1', threadId: 'oa-thread-99', threadKind: 'direct',
-    msgId: 'oa-msg-1', fromSelf: false, senderExternalId: 'oa-thread-99', senderName: 'Phạm Minh Tuấn',
-    text: 'Cho anh đăng ký học khóa tiếp theo, số anh 0918111222', sentAt: new Date().toISOString(),
-  }]);
 
   const conv = await conversation('oa-thread-99');
   const commandId = await enqueueExtraction(db, conv.id);
@@ -356,16 +376,18 @@ test('a returning zalo_oa customer in a new conversation is linked to the existi
 });
 
 test('classifying an intake assigns the conversation to the lead owner and queues one private Lark notice with the lead code', async () => {
-  await db.prepare("UPDATE app_user SET lark_open_id = 'ou_lan_123' WHERE id = 'u-lan'").run();
-  const prod = await web('u-admin', 'POST', '/commands/upsertProduct', { name: 'Khóa AI 199K', priceVnd: 199000, active: true });
-  const productId = prod.json.data.id as string;
+  await db.batch([
+    db.prepare("UPDATE app_user SET lark_open_id = 'ou_lan_123' WHERE id = 'u-lan'"),
+    db.prepare(`INSERT INTO product (id, organization_id, name, price_vnd, active, created_at, updated_at)
+      VALUES ('pr-199k', 'org-abm', 'Khóa AI 199K', 199000, 1, ?1, ?1)`).bind(STAMP),
+  ]);
 
   const { conv, intake } = await intakeFrom({ name: 'Nguyễn Văn An', phone: '0912345678' });
   await db.prepare('DELETE FROM channel_command').run();
 
   const res = await web('u-lan', 'POST', `/inbox/intakes/${intake.id}/classify`, {
     pipeline: 'learner',
-    input: { contactName: 'Nguyễn Văn An', phone: '0912345678', productId, needSummary: 'Học AI 199k', nextAction: nextAction() },
+    input: { contactName: 'Nguyễn Văn An', phone: '0912345678', productId: 'pr-199k', needSummary: 'Học AI 199k', nextAction: nextAction() },
   });
   expect(res.status, JSON.stringify(res.json)).toBe(200);
   const { leadId, contactId } = res.json.data as { leadId: string; contactId: string };
@@ -383,23 +405,180 @@ test('classifying an intake assigns the conversation to the lead owner and queue
   expect(privateCmds[0].text).toContain('Nguyễn Văn An');
   expect(privateCmds[0].text).toContain('Khóa AI 199K');
   expect(privateCmds[0].text).toContain(`https://crm.example/learners/${contactId}`);
+
+  // L2: setLeadProgram on a learner lead enforces mayEdit (head/director rejected with NOT_FOUND) and requires explicit productId (or null).
+  expect((await web('u-head', 'POST', '/commands/setLeadProgram', { leadId, expectedVersion: 1, productId: null })).status).toBe(404);
+  expect((await web('u-bgd', 'POST', '/commands/setLeadProgram', { leadId, expectedVersion: 1, productId: null })).status).toBe(404);
+  expect((await web('u-lan', 'POST', '/commands/setLeadProgram', { leadId, expectedVersion: 1 })).status).toBe(422);
+  expect((await web('u-lan', 'POST', '/commands/setLeadProgram', { leadId, expectedVersion: 1, productId: null })).status).toBe(200);
 });
 
-test('pronouns and honorific short names are dropped while real names are kept, and program 199k matches the 199,000đ product', async () => {
+test('pronouns and honorific short names are dropped while diacritic-distinct real names are kept', () => {
   expect(parseExtraction('{"name": "Chị", "phone": "0912345678"}')).toEqual({ phone: '0912345678' });
   expect(parseExtraction('{"name": "Sếp Tú", "phone": "0912345678"}')).toEqual({ phone: '0912345678' });
   expect(parseExtraction('{"name": "anh Long", "phone": "0912345678"}')).toEqual({ phone: '0912345678' });
+  expect(parseExtraction('{"name": "Anh Thư", "phone": "0912345678"}')).toEqual({ phone: '0912345678' });
+  expect(parseExtraction('{"name": "Chi", "phone": "0912345678"}')).toEqual({ name: 'Chi', phone: '0912345678' });
+  expect(parseExtraction('{"name": "Chu Hoa", "phone": "0912345678"}')).toEqual({ name: 'Chu Hoa', phone: '0912345678' });
+  expect(parseExtraction('{"name": "Bắc Hà", "phone": "0912345678"}')).toEqual({ name: 'Bắc Hà', phone: '0912345678' });
   expect(parseExtraction('{"name": "Nguyễn Văn An", "phone": "0912345678"}')).toEqual({ name: 'Nguyễn Văn An', phone: '0912345678' });
+});
 
-  const prod = await web('u-admin', 'POST', '/commands/upsertProduct', { name: 'Lớp AI Ứng Dụng 199K', priceVnd: 199000, active: true });
-  const productId = prod.json.data.id as string;
+test('program matching requires a unique active match (never price 0, whole-word/phrase >= 4 chars) and updates on confirm-field', async () => {
+  await db.batch([
+    db.prepare(`INSERT INTO product (id, organization_id, name, price_vnd, active, created_at, updated_at)
+      VALUES ('pr-ai-199', 'org-abm', 'Lớp AI Ứng Dụng 199K', 199000, 1, ?1, ?1)`).bind(STAMP),
+    db.prepare(`INSERT INTO product (id, organization_id, name, price_vnd, active, created_at, updated_at)
+      VALUES ('pr-free-1', 'org-abm', 'Buổi Học Thử Đầu Tiên', 0, 1, ?1, ?1)`).bind(STAMP),
+    db.prepare(`INSERT INTO product (id, organization_id, name, price_vnd, active, created_at, updated_at)
+      VALUES ('pr-short', 'org-abm', 'AI', 500000, 1, ?1, ?1)`).bind(STAMP),
+    db.prepare(`INSERT INTO product (id, organization_id, name, price_vnd, active, created_at, updated_at)
+      VALUES ('pr-ielts', 'org-abm', 'Khóa IELTS Cấp Tốc', 5000000, 1, ?1, ?1)`).bind(STAMP),
+  ]);
 
-  const { intake } = await intakeFrom({ name: 'Nguyễn Văn An', phone: '0912345678', program: '199k' });
+  // Unique price 199k matches pr-ai-199.
+  const { conv, intake } = await intakeFrom({ name: 'Nguyễn Văn An', phone: '0912345678', program: '199k' });
   expect(intake.fields).toEqual({
     name: 'Nguyễn Văn An',
     phone: '0912345678',
     program: '199k',
-    productId,
+    productId: 'pr-ai-199',
   });
+
+  // Proposing a new program and confirming it updates productId (L5).
+  await customerSays('Em đổi sang học IELTS cấp tốc nhé');
+  const cmdProp = await enqueueExtraction(db, conv.id);
+  await answer(cmdProp!, JSON.stringify({ program: 'IELTS cấp tốc' }));
+  const confirmed = await web('u-lan', 'POST', `/inbox/intakes/${intake.id}/confirm-field`, { field: 'program' });
+  expect(confirmed.status).toBe(200);
+  expect(confirmed.json.data.fields).toMatchObject({ program: 'IELTS cấp tốc', productId: 'pr-ielts' });
+
+  // Price 0 / "miễn phí" never matches by price, and short name "AI" (< 4 chars) does not match "tài chính" or "AI".
+  await db.prepare('DELETE FROM lead_intake').run();
+  await customerSays('Cho em hỏi khóa miễn phí về tài chính');
+  const cmdFree = await enqueueExtraction(db, conv.id);
+  await answer(cmdFree!, JSON.stringify({ program: 'miễn phí tài chính' }));
+  expect((await intakes())[0].fields.productId).toBeUndefined();
+
+  await db.prepare('DELETE FROM lead_intake').run();
+  await customerSays('Cho em hỏi lớp AI');
+  const cmdShort = await enqueueExtraction(db, conv.id);
+  await answer(cmdShort!, JSON.stringify({ program: 'AI' }));
+  expect((await intakes())[0].fields.productId).toBeUndefined();
+
+  // Two active products with the same 199,000đ price: neither is guessed.
+  await db.batch([
+    db.prepare('DELETE FROM lead_intake'),
+    db.prepare(`INSERT INTO product (id, organization_id, name, price_vnd, active, created_at, updated_at)
+      VALUES ('pr-excel-199', 'org-abm', 'Lớp Excel Ứng Dụng', 199000, 1, ?1, ?1)`).bind(STAMP),
+  ]);
+  await customerSays('Em đóng 199k rồi');
+  const cmdDupPrice = await enqueueExtraction(db, conv.id);
+  await answer(cmdDupPrice!, JSON.stringify({ program: '199k' }));
+  expect((await intakes())[0].fields.productId).toBeUndefined();
+
+  // Two active products matching the phrase "Ứng Dụng": neither is guessed.
+  await db.prepare('DELETE FROM lead_intake').run();
+  await customerSays('Em hỏi lớp ứng dụng');
+  const cmdDupName = await enqueueExtraction(db, conv.id);
+  await answer(cmdDupName!, JSON.stringify({ program: 'Lớp ứng dụng' }));
+  expect((await intakes())[0].fields.productId).toBeUndefined();
 });
+
+test('H1: classifying as B2B or calling createLead on a contact held by another sale returns FORBIDDEN without naming the holder', async () => {
+  const futureHold = new Date(Date.now() + 30 * 86_400_000).toISOString();
+  await db.prepare(`INSERT INTO contact (id, organization_id, display_name, owner_user_id, hold_started_at, hold_expires_at, created_at, updated_at)
+    VALUES ('ct-held-lan', 'org-abm', 'Khách Học Viên Của Lan', 'u-lan', ?1, ?2, ?1, ?1)`).bind(STAMP, futureHold).run();
+
+  const { conv, intake } = await intakeFrom({ name: 'Khách Học Viên Của Lan', phone: '0919888777' });
+  await db.prepare("UPDATE conversation SET contact_id = 'ct-held-lan' WHERE id = ?").bind(conv.id).run();
+
+  const forbidden = await web('u-huy', 'POST', `/inbox/intakes/${intake.id}/classify`, {
+    pipeline: 'b2b',
+    input: { contactName: 'Khách Học Viên Của Lan', phone: '0919888777', needSummary: 'Đào tạo doanh nghiệp', nextAction: nextAction() },
+  });
+  expect(forbidden.status).toBe(403);
+  expect(forbidden.json.error.code).toBe('FORBIDDEN');
+  expect(JSON.stringify(forbidden.json)).not.toContain('Lan');
+  expect((await intakes())[0].status).toBe('pending');
+});
+
+test('M3 & L8: classifying twice on the same conversation keeps 1 contact and rejects the second classification with DUPLICATE_SUSPECTED', async () => {
+  // 1) Learner pipeline: classify twice on the same conversation.
+  const { conv, intake: firstIntake } = await intakeFrom({ name: 'Lê Hoàng Nam', phone: '0917222333' });
+  const contactsBefore = (await db.prepare('SELECT COUNT(*) AS n FROM contact').first<{ n: number }>())!.n;
+
+  const firstRes = await web('u-lan', 'POST', `/inbox/intakes/${firstIntake.id}/classify`, {
+    pipeline: 'learner',
+    input: { contactName: 'Lê Hoàng Nam', phone: '0917222333', needSummary: 'Học AI cơ bản', nextAction: nextAction() },
+  });
+  expect(firstRes.status, JSON.stringify(firstRes.json)).toBe(200);
+  const { contactId } = firstRes.json.data as { contactId: string; leadId: string };
+  expect((await db.prepare('SELECT COUNT(*) AS n FROM contact').first<{ n: number }>())!.n).toBe(contactsBefore + 1);
+
+  await db.prepare(`INSERT INTO lead_intake (id, organization_id, conversation_id, contact_id, fields_json, status, created_at, updated_at)
+    VALUES ('intake-learner-2', 'org-abm', ?, ?, '{"name":"Lê Hoàng Nam"}', 'pending', ?, ?)`).bind(conv.id, contactId, STAMP, STAMP).run();
+
+  const secondLearner = await web('u-lan', 'POST', '/inbox/intakes/intake-learner-2/classify', {
+    pipeline: 'learner',
+    input: { contactName: 'Lê Hoàng Nam', needSummary: 'Học khóa thứ hai', nextAction: nextAction() },
+  });
+  expect(secondLearner.status).toBe(409);
+  expect(secondLearner.json.error.code).toBe('DUPLICATE_SUSPECTED');
+  expect((await db.prepare('SELECT COUNT(*) AS n FROM contact').first<{ n: number }>())!.n).toBe(contactsBefore + 1);
+  expect((await db.prepare("SELECT COUNT(*) AS n FROM lead WHERE contact_id = ? AND pipeline = 'learner'").bind(contactId).first<{ n: number }>())!.n).toBe(1);
+
+  // 2) B2B pipeline: classify B2B on the same contact, then a second B2B intake on the same conversation is blocked by DUPLICATE_SUSPECTED even without phone/email.
+  const firstB2b = await web('u-lan', 'POST', '/inbox/intakes/intake-learner-2/classify', {
+    pipeline: 'b2b',
+    input: { contactName: 'Lê Hoàng Nam', needSummary: 'Đào tạo nội bộ', nextAction: nextAction() },
+  });
+  expect(firstB2b.status, JSON.stringify(firstB2b.json)).toBe(200);
+  expect(firstB2b.json.data.contactId).toBe(contactId);
+
+  await db.prepare(`INSERT INTO lead_intake (id, organization_id, conversation_id, contact_id, fields_json, status, created_at, updated_at)
+    VALUES ('intake-b2b-2', 'org-abm', ?, ?, '{"name":"Lê Hoàng Nam"}', 'pending', ?, ?)`).bind(conv.id, contactId, STAMP, STAMP).run();
+
+  const secondB2b = await web('u-lan', 'POST', '/inbox/intakes/intake-b2b-2/classify', {
+    pipeline: 'b2b',
+    input: { contactName: 'Lê Hoàng Nam', needSummary: 'Đào tạo đợt 2', confirmNotDuplicate: true, nextAction: nextAction() },
+  });
+  expect(secondB2b.status).toBe(409);
+  expect(secondB2b.json.error.code).toBe('DUPLICATE_SUSPECTED');
+  expect((await db.prepare('SELECT COUNT(*) AS n FROM contact').first<{ n: number }>())!.n).toBe(contactsBefore + 1);
+  expect((await db.prepare("SELECT COUNT(*) AS n FROM lead WHERE contact_id = ? AND pipeline = 'b2b'").bind(contactId).first<{ n: number }>())!.n).toBe(1);
+});
+
+test('M7: creating a lead for an existing contact skips a phone or email owned by another contact and notes it on the lead', async () => {
+  // ct-2 in demo seed already owns phone 0900100002 and email lienhe2@khachhang-demo.example.
+  await db.prepare(`INSERT INTO contact (id, organization_id, display_name, owner_user_id, created_at, updated_at)
+    VALUES ('ct-own-x', 'org-abm', 'Khách X Của Lan', 'u-lan', ?1, ?1)`).bind(STAMP).run();
+
+  const { conv, intake } = await intakeFrom({ name: 'Khách X Của Lan', phone: '0900100002', email: 'lienhe2@khachhang-demo.example' });
+  await db.prepare("UPDATE conversation SET contact_id = 'ct-own-x' WHERE id = ?").bind(conv.id).run();
+
+  const classified = await web('u-lan', 'POST', `/inbox/intakes/${intake.id}/classify`, {
+    pipeline: 'learner',
+    input: {
+      contactName: 'Khách X Của Lan',
+      phone: '0900100002',
+      email: 'lienhe2@khachhang-demo.example',
+      needSummary: 'Đăng ký học cho người nhà',
+      nextAction: nextAction(),
+    },
+  });
+  expect(classified.status, JSON.stringify(classified.json)).toBe(200);
+  const { leadId, contactId } = classified.json.data as { leadId: string; contactId: string };
+  expect(contactId).toBe('ct-own-x');
+
+  const points = await db.prepare("SELECT type, normalized_value FROM contact_point WHERE contact_id = 'ct-own-x' AND type IN ('phone', 'email')")
+    .all<{ type: string; normalized_value: string }>();
+  expect(points.results).toEqual([]);
+
+  const notes = await db.prepare("SELECT summary FROM activity WHERE lead_id = ? AND type = 'note' ORDER BY created_at")
+    .bind(leadId).all<{ summary: string }>().then((r) => r.results.map((x) => x.summary).join('\n'));
+  expect(notes).toContain('Bỏ qua SĐT 0900100002 vì đã thuộc khách khác');
+  expect(notes).toContain('Bỏ qua email lienhe2@khachhang-demo.example vì đã thuộc khách khác');
+});
+
 

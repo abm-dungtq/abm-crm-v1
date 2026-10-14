@@ -36,14 +36,14 @@ const EXTRACT_INSTRUCTION = 'Trích thông tin khách hàng từ hội thoại d
   + 'Chỉ lấy họ tên thật khách tự giới thiệu; không lấy đại từ xưng hô (anh, chị, em, cô, chú, bác, sếp, bạn…) hay biệt danh; '
   + 'khoá program ghi tên chương trình/khóa học hoặc mức phí khách nói đã đóng (ví dụ "199k").';
 
-const HONORIFIC_PREFIXES = new Set(['anh', 'chi', 'em', 'co', 'chu', 'bac', 'sep', 'ban', 'thay']);
-const SINGLE_PRONOUNS = new Set(['minh', 'toi', 'to', 'da', 'vang', 'ad', 'admin', 'shop', 'khach']);
+const HONORIFIC_PREFIXES = new Set(['anh', 'chị', 'em', 'cô', 'chú', 'bác', 'sếp', 'bạn', 'thầy']);
+const SINGLE_PRONOUNS = new Set(['mình', 'tôi', 'tớ', 'dạ', 'vâng', 'ad', 'admin', 'shop', 'khách']);
 
 /** Rejects bare pronouns or an honorific followed by at most one word (e.g. "Chị", "Sếp Tú", "anh Long"). */
 export function isValidCustomerName(name: string): boolean {
   const words = name.trim().split(/\s+/).filter(Boolean);
   if (!words.length) return false;
-  const first = foldText(words[0]!);
+  const first = words[0]!.normalize('NFC').toLowerCase();
   if (words.length === 1 && (HONORIFIC_PREFIXES.has(first) || SINGLE_PRONOUNS.has(first))) return false;
   if (words.length === 2 && HONORIFIC_PREFIXES.has(first)) return false;
   return true;
@@ -109,27 +109,28 @@ export function parsePriceVnd(text: string): number | null {
   return null;
 }
 
-async function matchProgramProduct(db: D1Database, organizationId: string, programText: string): Promise<{ id: string; name: string } | null> {
+const phraseWords = (text: string) => foldText(text).replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+export async function matchProgramProduct(db: D1Database, organizationId: string, programText: string): Promise<{ id: string; name: string } | null> {
   const products = (await db.prepare('SELECT id, name, price_vnd FROM product WHERE organization_id = ? AND active = 1 ORDER BY created_at, id')
     .bind(organizationId).all<{ id: string; name: string; price_vnd: number }>()).results;
   if (!products.length) return null;
   const price = parsePriceVnd(programText);
-  if (price !== null) {
-    const byPrice = products.find((p) => p.price_vnd === price);
-    if (byPrice) return { id: byPrice.id, name: byPrice.name };
+  if (price !== null && price > 0) {
+    const byPrice = products.filter((p) => p.price_vnd > 0 && p.price_vnd === price);
+    if (byPrice.length === 1) return { id: byPrice[0]!.id, name: byPrice[0]!.name };
+    if (byPrice.length > 1) return null;
   }
-  const lower = programText.trim().toLowerCase();
-  const folded = foldText(programText);
-  const exact = products.find((p) => p.name.trim().toLowerCase() === lower || foldText(p.name) === folded);
-  if (exact) return { id: exact.id, name: exact.name };
-  if (folded.length >= 2) {
-    const partial = products.find((p) => {
-      const pf = foldText(p.name);
-      return pf.length >= 2 && (pf.includes(folded) || folded.includes(pf));
-    });
-    if (partial) return { id: partial.id, name: partial.name };
-  }
-  return null;
+  const q = phraseWords(programText);
+  if (q.length < 4) return null;
+  const paddedQ = ` ${q} `;
+  const byName = products.filter((p) => {
+    const pf = phraseWords(p.name);
+    if (pf.length < 4) return false;
+    const paddedP = ` ${pf} `;
+    return paddedP.includes(paddedQ) || paddedQ.includes(paddedP);
+  });
+  return byName.length === 1 ? { id: byName[0]!.id, name: byName[0]!.name } : null;
 }
 
 const sameValue = (field: IntakeField, a: string, b: string) => {
@@ -152,8 +153,9 @@ export function mergeIntakeFields(current: IntakeFields, extracted: IntakeValues
     else if (sameValue(field, existing, value)) delete next.proposed![field];
     else next.proposed![field] = value;
   }
-  if (extracted.productId && (!current.productId || next.program === extracted.program)) {
-    next.productId = extracted.productId;
+  if (next.program === extracted.program) {
+    if (extracted.productId) next.productId = extracted.productId;
+    else delete next.productId;
   }
   if (!Object.keys(next.proposed!).length) delete next.proposed;
   return next;
@@ -250,6 +252,26 @@ const FIELD_LABELS: Record<IntakeField, string> = {
   note: 'Ghi chú',
 };
 
+const AUTO_EXTRACT_NOTE_PREFIX = 'Trích xuất tự động từ hội thoại: ';
+const LABEL_TO_FIELD = new Map<string, IntakeField>(
+  INTAKE_FIELDS.map((f) => [FIELD_LABELS[f], f]),
+);
+
+/** Parses `FieldLabel: value` segments from a system extraction note summary. */
+function parseExtractionNote(summary: string): IntakeValues {
+  if (!summary.startsWith(AUTO_EXTRACT_NOTE_PREFIX)) return {};
+  const body = summary.slice(AUTO_EXTRACT_NOTE_PREFIX.length);
+  const values: IntakeValues = {};
+  for (const part of body.split(/;\s*(?=(?:Tên|SĐT|Email|Chương trình|Nhu cầu|Quan tâm|Ghi chú):\s)/)) {
+    const sep = part.indexOf(': ');
+    if (sep < 0) continue;
+    const field = LABEL_TO_FIELD.get(part.slice(0, sep));
+    const val = part.slice(sep + 2).trim();
+    if (field && val) values[field] = val;
+  }
+  return values;
+}
+
 const channelPointType = (channel: 'zalo' | 'facebook' | 'zalo_oa') =>
   channel === 'facebook' ? 'fb_psid' : channel === 'zalo_oa' ? 'zalo_oa_uid' : 'zalo_uid';
 
@@ -281,10 +303,15 @@ export async function applyExtractionResult(db: D1Database, command: ExtractionC
       ORDER BY c.updated_at DESC, cp.created_at DESC LIMIT 1
     `).bind(pointType, conv.external_thread_id, conv.organization_id).first<{ id: string }>();
     if (matchedContact) {
-      contactId = matchedContact.id;
       const nowIso = new Date().toISOString();
-      await db.prepare('UPDATE conversation SET contact_id = ?, updated_at = ? WHERE id = ? AND contact_id IS NULL')
-        .bind(contactId, nowIso, conv.id).run();
+      const updated = await db.prepare('UPDATE conversation SET contact_id = ?, updated_at = ? WHERE id = ? AND contact_id IS NULL')
+        .bind(matchedContact.id, nowIso, conv.id).run();
+      if (updated.meta.changes === 1) {
+        contactId = matchedContact.id;
+      } else {
+        contactId = (await db.prepare('SELECT contact_id FROM conversation WHERE id = ?')
+          .bind(conv.id).first<{ contact_id: string | null }>())?.contact_id ?? null;
+      }
     }
   }
 
@@ -295,13 +322,27 @@ export async function applyExtractionResult(db: D1Database, command: ExtractionC
       ORDER BY created_at DESC, rowid DESC LIMIT 1
     `).bind(contactId, conv.organization_id).first<{ id: string }>();
     if (openLead) {
-      const parts = INTAKE_FIELDS.flatMap((f) => (extracted[f] ? [`${FIELD_LABELS[f]}: ${extracted[f]}`] : []));
+      const prevNotes = await db.prepare(`
+        SELECT summary FROM activity
+        WHERE lead_id = ? AND type = 'note' AND actor_kind = 'system' AND summary LIKE 'Trích xuất tự động từ hội thoại: %'
+        ORDER BY created_at ASC, rowid ASC
+      `).bind(openLead.id).all<{ summary: string }>();
+      const previous: IntakeValues = {};
+      for (const row of prevNotes.results) {
+        Object.assign(previous, parseExtractionNote(row.summary));
+      }
+      const parts = INTAKE_FIELDS.flatMap((f) => {
+        const val = extracted[f];
+        if (!val) return [];
+        if (previous[f] && sameValue(f, previous[f]!, val)) return [];
+        return [`${FIELD_LABELS[f]}: ${val}`];
+      });
       if (parts.length) {
         const nowIso = new Date().toISOString();
         await db.batch([
           db.prepare(`INSERT INTO activity (id, lead_id, type, summary, actor_user_id, actor_kind, occurred_at, created_at)
             VALUES (?, ?, 'note', ?, NULL, 'system', ?, ?)`).bind(
-            crypto.randomUUID(), openLead.id, `Trích xuất tự động từ hội thoại: ${parts.join('; ')}`, nowIso, nowIso,
+            crypto.randomUUID(), openLead.id, `${AUTO_EXTRACT_NOTE_PREFIX}${parts.join('; ')}`, nowIso, nowIso,
           ),
           db.prepare('UPDATE conversation SET last_extracted_at = ?, updated_at = ? WHERE id = ?').bind(nowIso, nowIso, conv.id),
         ]);
@@ -450,23 +491,27 @@ export async function classifyIntake(db: D1Database, actor: Actor, intakeId: str
   if (moved!.meta.changes !== 1) return notPending();
 
   if (lead.owner_user_id) {
-    const assignee = await assignConversationToLeadOwner(db, actor, intake.conversation_id, lead.owner_user_id, appBase);
-    if (assignee?.larkOpenId) {
-      const detailUrl = request.pipeline === 'b2b'
-        ? `${appBase}/leads/${leadId}`
-        : `${appBase}/learners/${lead.contact_id}`;
-      const parts = [
-        `Bạn có lead mới ${lead.code}`,
-        lead.contact_name,
-        ...(lead.product_name ? [lead.product_name] : []),
-        detailUrl,
-      ];
-      await enqueueCommand(db, {
-        kind: 'send_lark',
-        target: 'worker',
-        conversationId: intake.conversation_id,
-        payload: { text: parts.join(' – '), openId: assignee.larkOpenId },
-      });
+    try {
+      const assignee = await assignConversationToLeadOwner(db, actor, intake.conversation_id, lead.owner_user_id, appBase);
+      if (assignee?.larkOpenId) {
+        const detailUrl = request.pipeline === 'b2b'
+          ? `${appBase}/leads/${leadId}`
+          : `${appBase}/learners/${lead.contact_id}`;
+        const parts = [
+          `Bạn có lead mới ${lead.code}`,
+          lead.contact_name,
+          ...(lead.product_name ? [lead.product_name] : []),
+          detailUrl,
+        ];
+        await enqueueCommand(db, {
+          kind: 'send_lark',
+          target: 'worker',
+          conversationId: intake.conversation_id,
+          payload: { text: parts.join(' – '), openId: assignee.larkOpenId },
+        });
+      }
+    } catch (error) {
+      console.error('classify_post_assign_error', error instanceof Error ? error.message : 'unknown');
     }
   }
 
@@ -525,6 +570,11 @@ export async function confirmProposedField(db: D1Database, actor: Actor, intakeI
   const next: IntakeFields = { ...current, [field]: proposed, proposed: { ...current.proposed } };
   delete next.proposed![field];
   if (!Object.keys(next.proposed!).length) delete next.proposed;
+  if (field === 'program') {
+    const matched = await matchProgramProduct(db, actor.organizationId, proposed);
+    if (matched) next.productId = matched.id;
+    else delete next.productId;
+  }
   const now = new Date().toISOString();
   const nextJson = JSON.stringify(next);
   // The audit row is guarded by the exact row this request wrote, so a lost compare-and-set records nothing.

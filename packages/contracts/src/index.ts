@@ -34,8 +34,11 @@ export const LEARNER_STAGES = [
   { code: 'not_fit', label: 'Không phù hợp' },
 ] as const;
 
+export type LearnerStageCode = (typeof LEARNER_STAGES)[number]['code'];
+
 export const stageLabel = (code: string, pipeline: PipelineCode = 'b2b') =>
   (pipeline === 'learner' ? LEARNER_STAGES : STAGES).find((s) => s.code === code)?.label ?? code;
+export const learnerStageLabel = (code: string) => stageLabel(code, 'learner');
 
 /** First contact SLA and release threshold, in working hours (QĐ4/QĐ14). */
 export const FIRST_CONTACT_SLA_HOURS = 4;
@@ -391,7 +394,7 @@ export type CreateLearnerLeadInput = z.infer<typeof createLearnerLeadInput>;
 export const setLeadProgramInput = z.object({
   leadId: id,
   expectedVersion: version,
-  productId: id.nullable().optional(),
+  productId: id.nullable(),
   courseId: id.nullable().optional(),
 });
 export type SetLeadProgramInput = z.infer<typeof setLeadProgramInput>;
@@ -663,7 +666,7 @@ export const COMMANDS = {
   changeStage: { schema: changeStageInput, roles: ['sale', 'leader', 'head', 'director', 'admin'], riskLevel: 'high', idempotent: true, expectedVersion: true, agentNeedsApproval: true },
   requestOwnerChange: { schema: requestOwnerChangeInput, roles: ['sale'], riskLevel: 'medium', idempotent: true, expectedVersion: true, agentNeedsApproval: true },
   decideApproval: { schema: decideApprovalInput, roles: ['sale', 'leader'], riskLevel: 'high', idempotent: true, expectedVersion: true, agentNeedsApproval: true },
-  upsertProduct: { schema: upsertProductInput, roles: ['academic', 'admin'], riskLevel: 'low', idempotent: true, expectedVersion: false, agentNeedsApproval: false },
+  upsertProduct: { schema: upsertProductInput, roles: ['leader', 'academic', 'admin'], riskLevel: 'low', idempotent: true, expectedVersion: false, agentNeedsApproval: false },
   recordConsent: { schema: recordConsentInput, roles: ['sale', 'leader', 'admin'], riskLevel: 'low', idempotent: true, expectedVersion: false, agentNeedsApproval: false },
   createLearnerLead: { schema: createLearnerLeadInput, roles: ['sale', 'leader', 'admin'], riskLevel: 'low', idempotent: true, expectedVersion: false, agentNeedsApproval: false },
   setLeadProgram: { schema: setLeadProgramInput, roles: ['sale', 'leader', 'head', 'director', 'admin'], riskLevel: 'low', idempotent: true, expectedVersion: true, agentNeedsApproval: false },
@@ -679,7 +682,7 @@ export const COMMANDS = {
   addContractStep: { schema: addContractStepInput, roles: ['sale', 'leader', 'admin'], riskLevel: 'low', idempotent: true, expectedVersion: false, agentNeedsApproval: false },
   toggleContractStep: { schema: toggleContractStepInput, roles: ['sale', 'leader', 'admin'], riskLevel: 'low', idempotent: true, expectedVersion: true, agentNeedsApproval: false },
   importContractLearners: { schema: importContractLearnersInput, roles: ['sale', 'leader', 'admin'], riskLevel: 'low', idempotent: true, expectedVersion: false, agentNeedsApproval: false },
-  upsertCourse: { schema: upsertCourseInput, roles: ['academic', 'admin'], riskLevel: 'low', idempotent: true, expectedVersion: false, agentNeedsApproval: false },
+  upsertCourse: { schema: upsertCourseInput, roles: ['leader', 'academic', 'admin'], riskLevel: 'low', idempotent: true, expectedVersion: false, agentNeedsApproval: false },
   upsertClass: { schema: upsertClassInput, roles: ['academic', 'admin'], riskLevel: 'low', idempotent: true, expectedVersion: false, agentNeedsApproval: false },
   setClassTeachers: { schema: setClassTeachersInput, roles: ['academic', 'admin'], riskLevel: 'low', idempotent: true, expectedVersion: true, agentNeedsApproval: false },
   addSession: { schema: addSessionInput, roles: ['academic', 'admin'], riskLevel: 'low', idempotent: true, expectedVersion: false, agentNeedsApproval: false },

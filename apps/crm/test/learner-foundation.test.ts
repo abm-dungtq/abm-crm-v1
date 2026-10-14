@@ -87,7 +87,7 @@ describe('learner foundation', () => {
   describe('products', () => {
     const product = { name: 'Khóa IELTS 6.5', description: 'Lớp tối', priceVnd: 12_000_000, active: true };
 
-    test('Tổ chức and Admin can edit the catalogue; Sale cannot', async () => {
+    test('Tổ chức, Leader, and Admin can edit the catalogue and courses; Sale cannot', async () => {
       await addUser('u-academic', 'academic');
       const created = await command('u-academic', 'upsertProduct', product);
       expect(created.status).toBe(200);
@@ -98,6 +98,21 @@ describe('learner foundation', () => {
       expect(renamed.status).toBe(200);
       const row = await db.prepare('SELECT name, version FROM product WHERE id = ?').bind(id).first<{ name: string; version: number }>();
       expect(row).toEqual({ name: 'Khóa IELTS 7.0', version: 2 });
+
+      const leaderUpdated = await command('u-hung', 'upsertProduct', { ...product, id, version: 2, name: 'Khóa IELTS 7.5' });
+      expect(leaderUpdated.status).toBe(200);
+
+      const leaderCourse = await command('u-hung', 'upsertCourse', { productId: id, name: 'Lớp IELTS 7.5 Khóa 1', status: 'active' });
+      expect(leaderCourse.status).toBe(200);
+      const courseId = leaderCourse.json.data.id as string;
+
+      const saleCourseDenied = await command('u-lan', 'upsertCourse', { productId: id, name: 'Lớp Sale Tạo', status: 'active' });
+      expect(saleCourseDenied.status).toBe(403);
+      expect(saleCourseDenied.json.error?.code).toBe('FORBIDDEN');
+
+      const leaderClassDenied = await command('u-hung', 'upsertClass', { courseId, name: 'Lớp K1', status: 'open' });
+      expect(leaderClassDenied.status).toBe(403);
+      expect(leaderClassDenied.json.error?.code).toBe('FORBIDDEN');
 
       const stale = await command('u-admin', 'upsertProduct', { ...product, id, version: 1 });
       expect(stale.status).toBe(409);

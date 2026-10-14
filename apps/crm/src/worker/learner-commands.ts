@@ -21,7 +21,7 @@ interface LearnerLeadRow {
   product_id: string | null; course_id: string | null;
 }
 interface StepRow { id: string; step_code: string; label: string; status: 'open' | 'done' | 'skipped'; version: number }
-type ContactCandidate = ContactState & { has_active_learner_lead?: number };
+export type ContactCandidate = ContactState & { has_active_learner_lead?: number; has_open_b2b_lead?: number };
 
 const MAX_PHONE_LOOKUP = ROSTER_MAX_ROWS;
 const stepLabel = (code: string) => LEARNER_JOURNEY.find((s) => s.code === code)?.label ?? code;
@@ -80,10 +80,52 @@ async function resolveOwner(db: D1Database, actor: Actor, ownerUserId: string | 
 }
 
 const ACTIVE_LEARNER_LEAD_SQL = `EXISTS (SELECT 1 FROM lead al WHERE al.contact_id = c.id AND al.pipeline = 'learner' AND al.status = 'active') AS has_active_learner_lead`;
+const OPEN_B2B_LEAD_SQL = `EXISTS (SELECT 1 FROM lead bl WHERE bl.contact_id = c.id AND bl.pipeline = 'b2b' AND bl.status IN ('queue', 'active')) AS has_open_b2b_lead`;
 
-async function loadContactState(db: D1Database, organizationId: string, contactId: string) {
-  return db.prepare(`SELECT ${CONTACT_STATE_COLUMNS}, ${ACTIVE_LEARNER_LEAD_SQL} FROM contact c WHERE c.id = ? AND c.organization_id = ? AND c.archived_at IS NULL`)
+export async function loadContactState(db: D1Database, organizationId: string, contactId: string) {
+  return db.prepare(`SELECT ${CONTACT_STATE_COLUMNS}, ${ACTIVE_LEARNER_LEAD_SQL}, ${OPEN_B2B_LEAD_SQL} FROM contact c WHERE c.id = ? AND c.organization_id = ? AND c.archived_at IS NULL`)
     .bind(contactId, organizationId).first<ContactCandidate>();
+}
+
+/**
+ * When a lead is created for an existing contact, skips any phone or email that already belongs to
+ * another active contact in the organization and returns note lines explaining what was skipped.
+ */
+export async function filterExistingContactPoints(
+  db: D1Database,
+  organizationId: string,
+  contactId: string,
+  phone: string | null,
+  rawPhone: string | undefined,
+  email: string | null,
+  rawEmail: string | undefined,
+): Promise<{ phone: string | null; email: string | null; skippedNotes: string[] }> {
+  const skippedNotes: string[] = [];
+  let nextPhone = phone;
+  let nextEmail = email;
+  if (phone) {
+    const other = await db.prepare(`
+      SELECT 1 FROM contact_point cp JOIN contact c ON c.id = cp.contact_id
+      WHERE cp.type = 'phone' AND cp.normalized_value = ? AND c.organization_id = ? AND c.archived_at IS NULL AND cp.contact_id <> ?
+      LIMIT 1
+    `).bind(phone, organizationId, contactId).first();
+    if (other) {
+      nextPhone = null;
+      skippedNotes.push(`Bỏ qua SĐT ${rawPhone ?? phone} vì đã thuộc khách khác`);
+    }
+  }
+  if (email) {
+    const other = await db.prepare(`
+      SELECT 1 FROM contact_point cp JOIN contact c ON c.id = cp.contact_id
+      WHERE cp.type = 'email' AND cp.normalized_value = ? AND c.organization_id = ? AND c.archived_at IS NULL AND cp.contact_id <> ?
+      LIMIT 1
+    `).bind(email, organizationId, contactId).first();
+    if (other) {
+      nextEmail = null;
+      skippedNotes.push(`Bỏ qua email ${rawEmail ?? email} vì đã thuộc khách khác`);
+    }
+  }
+  return { phone: nextPhone, email: nextEmail, skippedNotes };
 }
 
 /** Learner customers that already use one of these phone numbers, found with a single query. */
@@ -104,7 +146,7 @@ async function loadOpenTasks(db: D1Database, leadId: string) {
 }
 
 const poolMessage = 'Khách đang ở hồ chung, hãy bấm Nhận trước';
-const heldByOtherMessage = 'Khách đang do sale khác giữ';
+export const heldByOtherMessage = 'Khách đang do sale khác giữ';
 const activeLearnerLeadMessage = 'Khách đã có lead học viên đang mở';
 
 // ---------- creating a learner lead ----------
@@ -151,6 +193,7 @@ interface LeadPlan {
   phone: string | null;
   email: string | null;
   attachProductIds: string[];
+  skippedNotes?: string[];
 }
 
 /** Stages one learner lead: customer (new, reused or taken over), lead, Next Action, journey steps and products. */
@@ -185,14 +228,18 @@ function writeLearnerLead(db: D1Database, tx: GuardedTx, actor: Actor, plan: Lea
     if (phone) {
       tx.raw(db.prepare(`INSERT INTO contact_point (id, contact_id, type, value, normalized_value, created_at)
         SELECT ?1, ?2, 'phone', ?3, ?4, ?5
-        WHERE NOT EXISTS (SELECT 1 FROM contact_point WHERE contact_id = ?2 AND type = 'phone' AND normalized_value = ?4)`)
-        .bind(crypto.randomUUID(), contactId, draft.phone, phone, now));
+        WHERE NOT EXISTS (
+          SELECT 1 FROM contact_point cp JOIN contact c ON c.id = cp.contact_id
+          WHERE cp.type = 'phone' AND cp.normalized_value = ?4 AND c.organization_id = ?6 AND c.archived_at IS NULL
+        )`).bind(crypto.randomUUID(), contactId, draft.phone, phone, now, actor.organizationId));
     }
     if (email) {
       tx.raw(db.prepare(`INSERT INTO contact_point (id, contact_id, type, value, normalized_value, created_at)
         SELECT ?1, ?2, 'email', ?3, ?4, ?5
-        WHERE NOT EXISTS (SELECT 1 FROM contact_point WHERE contact_id = ?2 AND type = 'email' AND normalized_value = ?4)`)
-        .bind(crypto.randomUUID(), contactId, draft.email, email, now));
+        WHERE NOT EXISTS (
+          SELECT 1 FROM contact_point cp JOIN contact c ON c.id = cp.contact_id
+          WHERE cp.type = 'email' AND cp.normalized_value = ?4 AND c.organization_id = ?6 AND c.archived_at IS NULL
+        )`).bind(crypto.randomUUID(), contactId, draft.email, email, now, actor.organizationId));
     }
     touched.add(contactId);
   }
@@ -227,7 +274,11 @@ function writeLearnerLead(db: D1Database, tx: GuardedTx, actor: Actor, plan: Lea
       id: crypto.randomUUID(), contact_id: contactId, product_id: productId, attached_by_user_id: actor.id, attached_at: now,
     });
   }
-  tx.activity(leadId, 'note', `Tạo lead học viên, nguồn ${draft.source}${draft.sourceNote ? ` (${draft.sourceNote})` : ''}`);
+  const noteLines = [
+    `Tạo lead học viên, nguồn ${draft.source}${draft.sourceNote ? ` (${draft.sourceNote})` : ''}`,
+    ...(plan.skippedNotes ?? []),
+  ];
+  tx.activity(leadId, 'note', noteLines.join('\n'));
   tx.audit('lead', leadId, null, {
     pipeline: 'learner', source: draft.source, contactId, owner: owner.id, contact: contact.kind,
     product_id: draft.productId ?? null, course_id: draft.courseId ?? null,
@@ -280,8 +331,8 @@ async function createLearnerLead({ db, actor, input, tx }: Ctx<CreateLearnerLead
     if (sellable?.n !== productIds.length) return fail('VALIDATION_FAILED', 'Có sản phẩm không còn bán', { fields: { productIds: 'Không hợp lệ' } });
   }
 
-  const phone = input.phone ? normalizePhone(input.phone) : null;
-  const email = input.email ? normalizeEmail(input.email) : null;
+  let phone = input.phone ? normalizePhone(input.phone) : null;
+  let email = input.email ? normalizeEmail(input.email) : null;
   let candidates: ContactCandidate[];
   if (input.contactId) {
     const state = await loadContactState(db, actor.organizationId, input.contactId);
@@ -293,6 +344,16 @@ async function createLearnerLead({ db, actor, input, tx }: Ctx<CreateLearnerLead
   const decided = decideContact(candidates, owner, now, Boolean(input.contactId));
   if ('error' in decided) return decided.error;
 
+  let skippedNotes: string[] = [];
+  if (decided.contact.kind !== 'new') {
+    const filtered = await filterExistingContactPoints(
+      db, actor.organizationId, decided.contact.state.id, phone, input.phone, email, input.email,
+    );
+    phone = filtered.phone;
+    email = filtered.email;
+    skippedNotes = filtered.skippedNotes;
+  }
+
   let attachProductIds = productIds;
   if (decided.contact.kind !== 'new' && productIds.length) {
     const attached = await db.prepare(`SELECT product_id FROM customer_product WHERE contact_id = ? AND detached_at IS NULL`)
@@ -302,7 +363,7 @@ async function createLearnerLead({ db, actor, input, tx }: Ctx<CreateLearnerLead
   }
   const created = writeLearnerLead(db, tx, actor, {
     draft: { ...input, productId: program.productId, courseId: program.courseId },
-    owner, contact: decided.contact, phone, email, attachProductIds,
+    owner, contact: decided.contact, phone, email, attachProductIds, skippedNotes,
   }, new Set());
   return ok(created);
 }

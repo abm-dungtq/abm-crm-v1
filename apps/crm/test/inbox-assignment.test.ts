@@ -255,12 +255,15 @@ test('Lark error 230013 stops retrying immediately and marks the user lark_link_
   expect(privateCmd).toMatchObject({
     status: 'failed',
     attempts: 1,
-    next_run_at: null,
+    lease_expires_at: null,
   });
-  expect(privateCmd.last_error).toContain('230013');
+  expect(JSON.parse(privateCmd.result_json).error).toContain('230013');
 
-  const user = await db.prepare("SELECT lark_link_status, lark_checked_at FROM app_user WHERE id = 'u-lan'").first<any>();
+  const user = await db.prepare("SELECT lark_link_status, lark_checked_at, version FROM app_user WHERE id = 'u-lan'").first<any>();
   expect(user.lark_link_status).toBe('error');
   expect(user.lark_checked_at).toBeTruthy();
+  expect(user.version).toBeGreaterThan(1);
+  const audit = await db.prepare("SELECT command, entity_id FROM audit_log WHERE command = 'lark.send'").first<any>();
+  expect(audit).toEqual({ command: 'lark.send', entity_id: 'u-lan' });
 });
 

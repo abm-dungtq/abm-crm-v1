@@ -13,7 +13,10 @@ import { fail, ok, type Ctx, type Handler } from './command-result';
 import { academicHandlers } from './academic-commands';
 import { attendanceHandlers } from './attendance';
 import { feeHandlers } from './fees';
-import { learnerHandlers, validateLeadProgram } from './learner-commands';
+import {
+  filterExistingContactPoints, heldByOtherMessage, learnerHandlers, loadContactState, validateLeadProgram, type ContactCandidate,
+} from './learner-commands';
+import { heldNow } from './learner-hold';
 import { privacyHandlers } from './privacy';
 import { canSeeLead, customerScope, leaderOnly, leadScope, mayDecideApproval } from './scope';
 
@@ -292,15 +295,29 @@ async function createLead({ db, actor, input, tx }: Ctx<CreateLeadInput>) {
   const program = await validateLeadProgram(db, actor.organizationId, input.productId, input.courseId);
   if ('error' in program) return program.error;
 
-  let existingContact: { id: string; display_name: string } | null = null;
+  let existingContact: ContactCandidate | null = null;
   if (input.contactId) {
-    existingContact = await db.prepare('SELECT id, display_name FROM contact WHERE id = ? AND organization_id = ? AND archived_at IS NULL')
-      .bind(input.contactId, actor.organizationId).first<{ id: string; display_name: string }>();
+    existingContact = await loadContactState(db, actor.organizationId, input.contactId);
     if (!existingContact) return fail('NOT_FOUND', 'Không tìm thấy khách');
+    if (heldNow(existingContact, new Date(tx.now)) && existingContact.owner_user_id !== actor.id) {
+      return fail('FORBIDDEN', heldByOtherMessage);
+    }
+    if (existingContact.has_open_b2b_lead) {
+      return fail('DUPLICATE_SUSPECTED', 'Khách đã có lead B2B đang mở');
+    }
   }
 
-  const phone = input.phone ? normalizePhone(input.phone) : null;
-  const email = input.email ? normalizeEmail(input.email) : null;
+  let phone = input.phone ? normalizePhone(input.phone) : null;
+  let email = input.email ? normalizeEmail(input.email) : null;
+  let skippedNotes: string[] = [];
+  if (existingContact) {
+    const filtered = await filterExistingContactPoints(
+      db, actor.organizationId, existingContact.id, phone, input.phone, email, input.email,
+    );
+    phone = filtered.phone;
+    email = filtered.email;
+    skippedNotes = filtered.skippedNotes;
+  }
   const taxCode = input.taxCode?.trim() || null;
   const companyName = input.companyName?.trim() || null;
 
@@ -383,14 +400,18 @@ async function createLead({ db, actor, input, tx }: Ctx<CreateLeadInput>) {
   if (phone) {
     tx.raw(db.prepare(`INSERT INTO contact_point (id, contact_id, type, value, normalized_value, created_at)
       SELECT ?1, ?2, 'phone', ?3, ?4, ?5
-      WHERE NOT EXISTS (SELECT 1 FROM contact_point WHERE contact_id = ?2 AND type = 'phone' AND normalized_value = ?4)`)
-      .bind(crypto.randomUUID(), contactId, input.phone, phone, tx.now));
+      WHERE NOT EXISTS (
+        SELECT 1 FROM contact_point cp JOIN contact c ON c.id = cp.contact_id
+        WHERE cp.type = 'phone' AND cp.normalized_value = ?4 AND c.organization_id = ?6 AND c.archived_at IS NULL
+      )`).bind(crypto.randomUUID(), contactId, input.phone, phone, tx.now, actor.organizationId));
   }
   if (email) {
     tx.raw(db.prepare(`INSERT INTO contact_point (id, contact_id, type, value, normalized_value, created_at)
       SELECT ?1, ?2, 'email', ?3, ?4, ?5
-      WHERE NOT EXISTS (SELECT 1 FROM contact_point WHERE contact_id = ?2 AND type = 'email' AND normalized_value = ?4)`)
-      .bind(crypto.randomUUID(), contactId, input.email, email, tx.now));
+      WHERE NOT EXISTS (
+        SELECT 1 FROM contact_point cp JOIN contact c ON c.id = cp.contact_id
+        WHERE cp.type = 'email' AND cp.normalized_value = ?4 AND c.organization_id = ?6 AND c.archived_at IS NULL
+      )`).bind(crypto.randomUUID(), contactId, input.email, email, tx.now, actor.organizationId));
   }
 
   const leadId = crypto.randomUUID();
@@ -409,12 +430,17 @@ async function createLead({ db, actor, input, tx }: Ctx<CreateLeadInput>) {
     exprs: [`(SELECT printf('L-%04d', next_value) FROM lead_counter WHERE organization_id = ?)`],
     binds: [actor.organizationId],
   });
+  // Guard against two concurrent requests both creating an open B2B lead for the same customer.
+  tx.assert(`SELECT COUNT(*) = 1 FROM lead WHERE contact_id = ? AND pipeline = 'b2b' AND status IN ('queue', 'active')`, [contactId]);
   tx.raw(db.prepare('UPDATE lead_counter SET next_value = next_value + 1 WHERE organization_id = ?').bind(actor.organizationId));
   if (taskId && input.nextAction) {
     tx.insertVersioned('task', {
       id: taskId, lead_id: leadId, title: input.nextAction.title, due_at: new Date(input.nextAction.dueAt).toISOString(),
       assignee_user_id: actor.id, status: 'open', created_by_user_id: actor.id,
     });
+  }
+  if (skippedNotes.length) {
+    tx.activity(leadId, 'note', skippedNotes.join('\n'));
   }
   tx.audit('lead', leadId, null, {
     source: input.source, status: isSale ? 'active' : 'queue', contactId,
@@ -428,6 +454,10 @@ async function createLead({ db, actor, input, tx }: Ctx<CreateLeadInput>) {
 async function setLeadProgram({ db, actor, input, tx }: Ctx<SetLeadProgramInput>) {
   const lead = await loadLead(db, actor, input.leadId);
   if (!lead) return notFound();
+  if (lead.pipeline === 'learner') {
+    const mayEdit = actor.role === 'admin' || lead.owner_user_id === actor.id || (actor.role === 'leader' && lead.team_id === actor.teamId);
+    if (!mayEdit) return fail('NOT_FOUND', 'Không tìm thấy lead học viên trong phạm vi của bạn');
+  }
   if (lead.version !== input.expectedVersion) return stale();
   if (lead.status !== 'active' && lead.status !== 'queue') return fail('VALIDATION_FAILED', 'Lead đã đóng');
   const program = await validateLeadProgram(db, actor.organizationId, input.productId, input.courseId);

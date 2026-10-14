@@ -24,8 +24,23 @@ async function runLarkCommand(env: WorkerCommandEnv, command: ClaimedCommand) {
       const now = new Date();
       if (typeof openId === 'string') {
         const nowIso = now.toISOString();
-        await db.prepare(`UPDATE app_user SET lark_link_status = 'error', lark_checked_at = ?, updated_at = ? WHERE lark_open_id = ?`)
-          .bind(nowIso, nowIso, openId).run();
+        const user = await db.prepare('SELECT id, lark_link_status FROM app_user WHERE lark_open_id = ?')
+          .bind(openId).first<{ id: string; lark_link_status: string | null }>();
+        if (user) {
+          await db.batch([
+            db.prepare(`UPDATE app_user SET lark_link_status = 'error', lark_checked_at = ?, updated_at = ?, version = version + 1 WHERE id = ?`)
+              .bind(nowIso, nowIso, user.id),
+            db.prepare(`INSERT INTO audit_log (id, actor_user_id, actor_kind, command, entity, entity_id, before_json, after_json, created_at)
+              VALUES (?, NULL, 'system', 'lark.send', 'app_user', ?, ?, ?, ?)`)
+              .bind(
+                crypto.randomUUID(),
+                user.id,
+                JSON.stringify({ lark_link_status: user.lark_link_status }),
+                JSON.stringify({ lark_link_status: 'error', reason: '230013' }),
+                nowIso,
+              ),
+          ]);
+        }
       }
       return failCommand(db, command.id, command.attempts, error.message, now, true);
     }
