@@ -17,6 +17,9 @@ export const zaloOaRoutes = new Hono<{ Bindings: Env }>();
 const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_TEXT = 20_000;
 const PROFILE_URL = 'https://openapi.zalo.me/v3.0/oa/user/detail';
+const CONVERSATION_URL = 'https://openapi.zalo.me/v2.0/oa/conversation';
+/** "App has not registered this api": the Zalo app lacks the user-info permission. */
+const UNREGISTERED_API = -212;
 const OA_AVATAR_TTL_MS = 24 * 60 * 60 * 1000;
 const OA_AVATAR_BACKFILL_LIMIT = 10;
 const encoder = new TextEncoder();
@@ -274,9 +277,41 @@ function avatarCheckStale(checkedAt: string | null, now: Date): boolean {
   return now.getTime() - at >= OA_AVATAR_TTL_MS;
 }
 
+interface OaConversationMessage {
+  from_id?: unknown; from_display_name?: unknown; from_avatar?: unknown;
+  to_id?: unknown; to_display_name?: unknown; to_avatar?: unknown;
+}
+
+/**
+ * Fallback while the Zalo app has not registered the v3 user-info API (-212): the v2 conversation history
+ * carries the customer's name and avatar on each message. The customer is the side whose id matches.
+ */
+async function oaProfileFromConversation(token: string, userId: string): Promise<OaUserProfile> {
+  const url = new URL(CONVERSATION_URL);
+  url.searchParams.set('data', JSON.stringify({ user_id: userId, offset: 0, count: 5 }));
+  const res = await fetch(url, { headers: { access_token: token }, signal: AbortSignal.timeout(5_000) });
+  const payload = await res.json().catch(() => null) as { error?: unknown; data?: unknown } | null;
+  if (!res.ok || !payload || (typeof payload.error === 'number' && payload.error !== 0) || !Array.isArray(payload.data)) {
+    console.warn('zalo_oa_conversation_failed', { status: res.status, error: payload?.error ?? null });
+    return { name: null, avatar: null };
+  }
+  let name: string | null = null;
+  let avatar: string | null = null;
+  for (const message of payload.data as OaConversationMessage[]) {
+    const side = String(message.from_id) === userId ? { name: message.from_display_name, avatar: message.from_avatar }
+      : String(message.to_id) === userId ? { name: message.to_display_name, avatar: message.to_avatar } : null;
+    if (!side) continue;
+    name ??= usableOaName(side.name);
+    avatar ??= httpsAvatarUrl(side.avatar);
+    if (name && avatar) break;
+  }
+  return { name, avatar };
+}
+
 /**
  * Name and avatar of one OA user. `attempted: false` means there was no token, so the caller must not
- * stamp `avatar_checked_at`. A Zalo error, including -212, is an attempt whose profile is empty.
+ * stamp `avatar_checked_at`. -212 falls back to the conversation history; any other Zalo error is an
+ * attempt whose profile is empty.
  */
 async function lookupOaUserProfile(db: D1Database, env: Pick<Env, 'ZALO_OA_TOKEN_KEY'>, accountId: string, userId: string): Promise<OaProfileLookup> {
   try {
@@ -286,6 +321,9 @@ async function lookupOaUserProfile(db: D1Database, env: Pick<Env, 'ZALO_OA_TOKEN
     url.searchParams.set('data', JSON.stringify({ user_id: userId }));
     const res = await fetch(url, { headers: { access_token: token }, signal: AbortSignal.timeout(5_000) });
     const payload = await res.json().catch(() => null) as { error?: unknown; data?: { display_name?: unknown; avatar?: unknown; avatars?: unknown } } | null;
+    if (payload?.error === UNREGISTERED_API) {
+      return { attempted: true, profile: await oaProfileFromConversation(token, userId) };
+    }
     if (!res.ok || !payload || (typeof payload.error === 'number' && payload.error !== 0)) {
       console.warn('zalo_oa_profile_failed', { status: res.status, error: payload?.error ?? null });
       return { attempted: true, profile: { name: null, avatar: null } };

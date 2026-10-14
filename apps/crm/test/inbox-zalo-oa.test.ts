@@ -867,6 +867,25 @@ test('a failed profile lookup stamps the check and is repeated only after a day'
   expect(Date.parse(kept.avatar_checked_at)).toBeGreaterThan(Date.parse(stale));
 });
 
+test('-212 on user detail falls back to the conversation history for name and avatar', async () => {
+  await saveTokens('profile-access');
+  onFetch = async (url) => {
+    if (url.includes('/user/detail')) return json({ error: -212 });
+    if (url.includes('/oa/conversation')) {
+      return json({ error: 0, data: [
+        { from_id: OA_ID, from_display_name: 'ABM', from_avatar: 'https://photo.zalo.me/oa.jpg', to_id: USER_ID, to_display_name: '', to_avatar: 'https://photo.zalo.me/lan.jpg' },
+        { from_id: USER_ID, from_display_name: 'Lan Phạm', from_avatar: 'https://photo.zalo.me/lan.jpg', to_id: OA_ID },
+      ] });
+    }
+    return json({ error: 0 });
+  };
+  await webhook(userEvent('user_send_text', 'm1', { text: 'Xin chào' }));
+  const row = await conversation();
+  expect(row.display_name).toBe('Lan Phạm');
+  expect(row.avatar_url).toBe('https://photo.zalo.me/lan.jpg');
+  expect(row.avatar_checked_at).toBeTruthy();
+});
+
 test('the minute backfill refreshes at most 10 unchecked OA conversations', async () => {
   await saveTokens('profile-access');
   const ids = Array.from({ length: 11 }, (_, i) => `user-${String(i).padStart(2, '0')}`);
