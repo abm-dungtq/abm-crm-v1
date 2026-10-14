@@ -55,8 +55,18 @@ export async function makeLead(name: string, phone: string, user = 'u-lan') {
   return created.json.data as { leadId: string; contactId: string };
 }
 
+async function ensureProduct() {
+  const existing = await db.prepare('SELECT id FROM product WHERE active = 1 LIMIT 1').first<{ id: string }>();
+  return existing ? existing.id : makeProduct();
+}
+
 export async function winLead(name: string, phone: string) {
-  const { leadId, contactId } = await makeLead(name, phone);
+  const productId = await ensureProduct();
+  const created = await command('u-lan', 'createLearnerLead', {
+    contactName: name, phone, source: 'facebook', needSummary: 'Học IELTS', productId, nextAction: nextAction(),
+  });
+  expect(created.status, JSON.stringify(created.json)).toBe(200);
+  const { leadId, contactId } = created.json.data as { leadId: string; contactId: string };
   await walk('u-lan', leadId, ['contacted', 'need_confirmed']);
   const skipped = await command('u-lan', 'skipTrial', { leadId, expectedVersion: await leadVersion(leadId), reason: 'Đã học thử nơi khác' });
   expect(skipped.status, JSON.stringify(skipped.json)).toBe(200);

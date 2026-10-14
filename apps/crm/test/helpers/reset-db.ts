@@ -2,13 +2,15 @@ import { applyD1Migrations, env } from 'cloudflare:test';
 
 /** Child tables first, parents last, so deletes never trip a foreign key. */
 export const TABLES = [
+  'zalo_oa_oauth_state', 'zalo_oa_credential',
   'channel_command', 'message', 'lead_intake', 'group_schedule', 'inbox_roster', 'conversation', 'channel_account',
   'customer_bot_switch', 'inbox_setting',
   'privacy_request',
   'payment_allocation', 'payment', 'charge',
-  'attendance', 'trial_booking', 'enrollment', 'class_session', 'class_teacher', 'class_group', 'course',
-  'agent_token', 'user_session', 'consent', 'customer_product', 'product',
+  'attendance', 'trial_booking', 'enrollment', 'class_session', 'class_teacher', 'class_group',
   '_guard', 'idempotency_key', 'outbox', 'audit_log', 'approval', 'activity', 'task', 'lead_step', 'lead', 'lead_counter',
+  'course',
+  'agent_token', 'user_session', 'consent', 'customer_product', 'product',
   'partner_contract_step', 'partner_contract',
   'contact_point', 'account_contact', 'contact', 'account', 'app_user', 'team', 'department',
   'fee_counter', 'org_setting', 'organization',

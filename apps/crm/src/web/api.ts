@@ -4,7 +4,7 @@ import type { ApiError, CommandName, ConversationMode } from '@abm/contracts';
 import type {
   AssignResult, ChannelAccount, ChannelAccountList, ChannelAccountUpdate, ClassifyIntakeResult, ConversationFilter, CustomerBotSwitch, GroupSchedule,
   GroupScheduleInput, InboxConversation, InboxMessage, InboxSettings, InboxSettingsUpdate, IntakeField, IntakePipeline, IntakeStatus,
-  IntakeValues, LeadIntake, RosterMember, SendMessageResult, SetModeResult, ZaloGroup, ZaloGroupUpdate,
+  IntakeValues, LeadIntake, RegistrationPolicyUpdate, RosterMember, SendMessageResult, SetModeResult, ZaloGroup, ZaloGroupMember, ZaloGroupUpdate,
 } from './types';
 import { conversationsPath } from './inbox-format';
 
@@ -118,6 +118,11 @@ export const createAccount = (input: { displayName: string; agentKey: string; ch
 export const updateAccount = (id: string, input: ChannelAccountUpdate) => api.patch<ChannelAccount>(`/inbox/accounts/${enc(id)}`, input);
 export const connectAccount = (id: string) => api.post<{ commandId: string }>(`/inbox/accounts/${enc(id)}/connect`);
 export const disconnectAccount = (id: string) => api.post<{ commandId: string }>(`/inbox/accounts/${enc(id)}/disconnect`);
+/** Starts Zalo OA OAuth. The page then leaves for `url`. */
+export const connectZaloOa = () => api.post<{ url: string }>('/inbox/channel-accounts/zalo-oa/connect');
+/** Admin. `enabled` requires `groupUrl` to be an exact https://zalo.me/g/... link. */
+export const setRegistrationPolicy = (id: string, input: RegistrationPolicyUpdate) =>
+  api.put<ChannelAccount>(`/inbox/accounts/${enc(id)}/registration-policy`, input);
 export const getCustomerBotSwitch = () => api.get<CustomerBotSwitch>('/inbox/customer-bot-switch');
 export const setCustomerBotSwitch = (enabled: boolean) => api.put<CustomerBotSwitch>('/inbox/customer-bot-switch', { enabled });
 
@@ -153,6 +158,10 @@ export const requestExtraction = (conversationId: string) =>
 /** Groups of the organization, optionally of one channel account. */
 export const listGroups = (account?: string) => api.get<ZaloGroup[]>(`/inbox/groups${account ? `?account=${enc(account)}` : ''}`);
 export const updateGroup = (id: string, input: ZaloGroupUpdate) => api.patch<ZaloGroup>(`/inbox/groups/${enc(id)}`, input);
+export const listGroupMembers = (id: string) => api.get<ZaloGroupMember[]>(`/inbox/groups/${enc(id)}/members`);
+/** Marks one member as ABM staff for every group of this account, or clears that mark. */
+export const setGroupStaff = (id: string, externalUserId: string, isStaff: boolean) =>
+  api.put<{ externalUserId: string; isStaff: boolean }>(`/inbox/groups/${enc(id)}/members/${enc(externalUserId)}/staff`, { isStaff });
 /** Schedules of the organization, newest first, optionally of one group. */
 export const listGroupSchedules = (conversationId?: string) =>
   api.get<GroupSchedule[]>(`/inbox/group-schedules${conversationId ? `?conversationId=${enc(conversationId)}` : ''}`);

@@ -57,6 +57,7 @@ export interface LearnerFilter {
 interface LearnerListRow extends ContactState {
   stage: string; source: string; contract_name: string | null; owner_name: string | null;
   phone: string | null; phone_key: string | null; course: string | null;
+  product_id: string | null; product_name: string | null; course_id: string | null; course_name: string | null;
 }
 
 export async function listLearners(db: D1Database, actor: Actor, filter: LearnerFilter = {}) {
@@ -83,10 +84,11 @@ export async function listLearners(db: D1Database, actor: Actor, filter: Learner
   }
   const rows = await db.prepare(`
     WITH latest AS (
-      SELECT l.contact_id, l.stage, l.source, l.partner_contract_id,
+      SELECT l.contact_id, l.stage, l.source, l.partner_contract_id, l.product_id, l.course_id,
         ROW_NUMBER() OVER (PARTITION BY l.contact_id ORDER BY l.created_at DESC, l.rowid DESC) AS rn
       FROM lead l WHERE l.organization_id = ? AND l.pipeline = 'learner')
     SELECT ${CONTACT_STATE_COLUMNS}, lt.stage, lt.source, pc.name AS contract_name, ow.display_name AS owner_name,
+      lt.product_id, lpr.name AS product_name, lt.course_id, lco.name AS course_name,
       (SELECT cp.value FROM contact_point cp WHERE cp.contact_id = c.id AND cp.type = 'phone' ORDER BY cp.created_at LIMIT 1) AS phone,
       (SELECT cp.normalized_value FROM contact_point cp WHERE cp.contact_id = c.id AND cp.type = 'phone' ORDER BY cp.created_at LIMIT 1) AS phone_key,
       COALESCE(
@@ -95,12 +97,16 @@ export async function listLearners(db: D1Database, actor: Actor, filter: Learner
           JOIN class_group cg ON cg.id = e.class_id JOIN course co ON co.id = cg.course_id
           WHERE e.contact_id = c.id AND e.status IN ('pending', 'confirmed', 'studying', 'deferred')
           ORDER BY name)),
+        lco.name,
+        lpr.name,
         (SELECT group_concat(p.name, ', ') FROM customer_product cpr JOIN product p ON p.id = cpr.product_id
           WHERE cpr.contact_id = c.id AND cpr.detached_at IS NULL)) AS course
     FROM contact c
     JOIN latest lt ON lt.contact_id = c.id AND lt.rn = 1
     LEFT JOIN app_user ow ON ow.id = c.owner_user_id
     LEFT JOIN partner_contract pc ON pc.id = lt.partner_contract_id
+    LEFT JOIN product lpr ON lpr.id = lt.product_id
+    LEFT JOIN course lco ON lco.id = lt.course_id
     WHERE ${where.join(' AND ')}
     ORDER BY c.updated_at DESC, c.id LIMIT ${LIST_CANDIDATE_LIMIT}`).bind(actor.organizationId, ...binds).all<LearnerListRow>();
 
@@ -118,6 +124,8 @@ export async function listLearners(db: D1Database, actor: Actor, filter: Learner
       contactId: row.id, name: row.display_name, phone: inspect ? row.phone : null,
       ownerName: ownerLabel(held, inspect, row.owner_name), stage: row.stage, stageLabel: stageLabel(row.stage, 'learner'),
       course: row.course ?? '', source: row.source, sourceLabel: sourceLabel(row.source), contract: row.contract_name,
+      productId: row.product_id ?? null, productName: row.product_name ?? null,
+      courseId: row.course_id ?? null, courseName: row.course_name ?? null,
       holdExpiresAt: row.hold_expires_at, version: row.version, held,
       canClaim: !held && (actor.role === 'sale' || actor.role === 'leader'),
     });
@@ -160,8 +168,10 @@ export async function learnerDetail(db: D1Database, actor: Actor, contactId: str
 
   const [leads, steps, products, consents, activities, enrollments] = await Promise.all([
     db.prepare(`SELECT l.id, l.code, l.stage, l.status, l.source, l.need_summary, l.lost_reason, l.lost_note, l.won_note, l.version, l.created_at, l.closed_at,
-        l.partner_contract_id, pc.name AS contract_name, na.id AS na_id, na.title AS na_title, na.due_at AS na_due_at
+        l.partner_contract_id, pc.name AS contract_name, na.id AS na_id, na.title AS na_title, na.due_at AS na_due_at,
+        l.product_id, pr.name AS product_name, l.course_id, co.name AS course_name
       FROM lead l LEFT JOIN partner_contract pc ON pc.id = l.partner_contract_id LEFT JOIN task na ON na.id = l.next_action_task_id
+        LEFT JOIN product pr ON pr.id = l.product_id LEFT JOIN course co ON co.id = l.course_id
       WHERE l.contact_id = ? AND l.pipeline = 'learner' ORDER BY l.created_at DESC, l.rowid DESC`).bind(contactId).all<Record<string, unknown>>(),
     db.prepare(`SELECT s.lead_id, s.step_code, s.label, s.required, s.position, s.status, s.skip_reason, s.done_at FROM lead_step s
       WHERE s.lead_id IN (SELECT id FROM lead WHERE contact_id = ? AND pipeline = 'learner') ORDER BY s.position`).bind(contactId)
@@ -203,6 +213,8 @@ export async function learnerDetail(db: D1Database, actor: Actor, contactId: str
       source: l.source as string, sourceLabel: sourceLabel(l.source as string), needSummary: l.need_summary as string, version: l.version as number,
       createdAt: l.created_at as string, closedAt: l.closed_at as string | null,
       lostReason: l.lost_reason ? learnerLostReasonLabel(l.lost_reason as string) : null, lostNote: l.lost_note as string | null, wonNote: l.won_note as string | null,
+      productId: (l.product_id as string | null) ?? null, productName: (l.product_name as string | null) ?? null,
+      courseId: (l.course_id as string | null) ?? null, courseName: (l.course_name as string | null) ?? null,
       contract: l.partner_contract_id ? { id: l.partner_contract_id as string, name: l.contract_name as string | null } : null,
       nextAction: l.na_id ? { id: l.na_id as string, title: l.na_title as string, dueAt: l.na_due_at as string } : null,
       steps: steps.results.filter((s) => s.lead_id === l.id).map((s) => ({

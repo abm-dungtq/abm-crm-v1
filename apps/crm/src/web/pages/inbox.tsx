@@ -5,11 +5,12 @@ import type { ConversationMode } from '@abm/contracts';
 import { useActor } from '../actor-context';
 import { ApiFailure, assignConversation, getConversation, listAccounts, listConversations, listRoster, setMode } from '../api';
 import { Icon } from '../components/icons';
-import { InboxThread, MODE_LABEL, ModeBadge, channelLabel, conversationName, fmtShortTime } from '../components/inbox-thread';
+import { InboxThread, MODE_LABEL, ModeBadge, conversationName, fmtShortTime } from '../components/inbox-thread';
 import { IntakeCard } from '../components/intake-card';
 import { roleLabel } from '../components/layout';
 import { Empty, ErrorState, FormError, Loading, useDebounced, useToast } from '../components/ui';
 import { fmtDateTime } from '../format';
+import { channelKindLabel, conversationChannelLabel } from '../inbox-format';
 import type { AssignResult, ChannelAccountList, ConversationFilter, InboxConversation, RosterMember, SetModeResult } from '../types';
 import { INBOX_SETTINGS_ROLES, ROSTER_KEY } from './inbox-settings';
 
@@ -23,6 +24,9 @@ const CONVERSATION_PAGE = 50;
  * approve group schedules and let an opted-out group receive recurring posts again.
  */
 export const MANAGER_ROLES: readonly string[] = ['leader', 'head', 'director', 'admin'];
+
+/** Leader and admin, matching the Worker: turn Long on in a group and mark ABM staff. Changing a group's agent stays admin-only. */
+export const SETTINGS_ROLES: readonly string[] = ['leader', 'admin'];
 
 type AssigneeTab = 'mine' | 'none' | 'all';
 const ASSIGNEE_TABS: [AssigneeTab, string][] = [['mine', 'Của tôi'], ['none', 'Chưa giao'], ['all', 'Tất cả']];
@@ -115,7 +119,7 @@ function ConversationList({ selectedId }: { selectedId: string | null }) {
         <div className="row">
           <select aria-label="Lọc theo tài khoản kênh" value={account} onChange={(e) => setAccount(e.target.value)}>
             <option value="">Mọi tài khoản</option>
-            {accounts.data?.accounts.map((a) => <option key={a.id} value={a.id}>{a.channel === 'facebook' ? 'Fanpage' : 'Zalo'} · {a.displayName}</option>)}
+            {accounts.data?.accounts.map((a) => <option key={a.id} value={a.id}>{channelKindLabel(a.channel)} · {a.displayName}</option>)}
           </select>
           <select aria-label="Lọc theo chế độ" value={mode} onChange={(e) => setModeFilter(e.target.value as ConversationMode | '')}>
             <option value="">Mọi chế độ</option>
@@ -154,7 +158,7 @@ function ConversationRow({ conversation: c, selected }: { conversation: InboxCon
         </div>
         {preview && <div className="small text-2 truncate">{preview}</div>}
         <div className="row-wrap conv-meta">
-          <span className="small muted truncate">{channelLabel(c)}{c.kind === 'group' ? ' · Nhóm' : ''}</span>
+          <span className="small muted truncate">{conversationChannelLabel(c)}{c.kind === 'group' ? ' · Nhóm' : ''}</span>
           <ModeBadge mode={c.mode} />
           <span className="small muted truncate">{c.assigneeName ?? 'Chưa giao'}</span>
         </div>
@@ -196,7 +200,7 @@ function ConversationPanel({ conversation: c }: { conversation: InboxConversatio
       </div>
       {c.kind === 'direct' && <IntakeCard conversation={c} />}
       <PanelSection title="Kênh">
-        <span className="small">{channelLabel(c)}{c.kind === 'group' ? ' · Nhóm' : ''}</span>
+        <span className="small">{conversationChannelLabel(c)}{c.kind === 'group' ? ' · Nhóm' : ''}</span>
         {c.lastInboundAt && <span className="small muted">Khách nhắn lần cuối {fmtDateTime(c.lastInboundAt)}</span>}
       </PanelSection>
     </aside>

@@ -66,8 +66,11 @@ export function gatewayWsUrl(goclawBaseUrl: string): string {
   return url.toString();
 }
 
-/** One authenticated gateway connection; requests are answered by id. */
-class GatewayConnection {
+/**
+ * One authenticated gateway connection; requests are answered by id.
+ * Image turns use this same request frame. The timeout defaults keep session cleanup on a 15 s budget.
+ */
+export class GatewayConnection {
   private readonly waiting = new Map<string, { resolve: (frame: z.infer<typeof responseSchema>) => void; reject: (e: Error) => void }>();
   private closedError: CodedError | null = null;
 
@@ -96,7 +99,7 @@ class GatewayConnection {
     ws.addEventListener('error', fail);
   }
 
-  static open(factory: WebSocketFactory, url: string): Promise<GatewayConnection> {
+  static open(factory: WebSocketFactory, url: string, timeoutMs = REQUEST_TIMEOUT_MS): Promise<GatewayConnection> {
     return new Promise((resolve, reject) => {
       let ws: WebSocketLike;
       try {
@@ -106,7 +109,7 @@ class GatewayConnection {
         return;
       }
       let settled = false;
-      const timer = setTimeout(() => finish(new CodedError('GOCLAW_WS_TIMEOUT')), REQUEST_TIMEOUT_MS);
+      const timer = setTimeout(() => finish(new CodedError('GOCLAW_WS_TIMEOUT')), timeoutMs);
       const finish = (error: CodedError | null) => {
         if (settled) return;
         settled = true;
@@ -125,14 +128,14 @@ class GatewayConnection {
   }
 
   /** Sends a request and resolves with its payload; a refused request rejects with GOCLAW_RPC_<code>. */
-  request(method: string, params: unknown): Promise<unknown> {
+  request(method: string, params: unknown, timeoutMs = REQUEST_TIMEOUT_MS): Promise<unknown> {
     if (this.closedError) return Promise.reject(this.closedError);
     const id = randomUUID();
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.waiting.delete(id);
         reject(new CodedError('GOCLAW_WS_TIMEOUT'));
-      }, REQUEST_TIMEOUT_MS);
+      }, timeoutMs);
       this.waiting.set(id, {
         resolve: (frame) => {
           clearTimeout(timer);

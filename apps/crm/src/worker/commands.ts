@@ -3,8 +3,8 @@ import {
   foldText, lostReasonLabel, normalizeEmail, normalizePhone, stageLabel, workingMinutesBetween,
   type ApiError, type ApiResult, type AssignLeadInput, type ChangeStageInput, type CommandName,
   type CompleteTaskInput, type CreateLeadInput, type DecideApprovalInput, type LogActivityInput,
-  type NextActionInput, type PipelineCode, type RecordConsentInput, type ReleaseLeadInput, type RequestOwnerChangeInput, type StageCode,
-  type UpsertProductInput,
+  type NextActionInput, type PipelineCode, type RecordConsentInput, type ReleaseLeadInput, type RequestOwnerChangeInput,
+  type SetLeadProgramInput, type StageCode, type UpsertProductInput,
 } from '@abm/contracts';
 import type { z } from 'zod';
 import type { Actor } from './env';
@@ -13,7 +13,7 @@ import { fail, ok, type Ctx, type Handler } from './command-result';
 import { academicHandlers } from './academic-commands';
 import { attendanceHandlers } from './attendance';
 import { feeHandlers } from './fees';
-import { learnerHandlers } from './learner-commands';
+import { learnerHandlers, validateLeadProgram } from './learner-commands';
 import { privacyHandlers } from './privacy';
 import { canSeeLead, customerScope, leaderOnly, leadScope, mayDecideApproval } from './scope';
 
@@ -32,6 +32,8 @@ export interface LeadRow {
   next_action_task_id: string | null;
   first_contact_at: string | null;
   assigned_at: string | null;
+  product_id: string | null;
+  course_id: string | null;
   created_at: string;
   version: number;
 }
@@ -57,7 +59,7 @@ interface ApprovalRow {
 
 
 const handlers: { [K in CommandName]: Handler<z.infer<(typeof COMMANDS)[K]['schema']>> } = {
-  createLead, assignLead, releaseLead, logActivity, completeTask, changeStage, requestOwnerChange, decideApproval,
+  createLead, setLeadProgram, assignLead, releaseLead, logActivity, completeTask, changeStage, requestOwnerChange, decideApproval,
   upsertProduct, recordConsent, ...learnerHandlers, ...academicHandlers, ...attendanceHandlers, ...feeHandlers, ...privacyHandlers,
 };
 
@@ -287,6 +289,16 @@ async function linkableContacts(db: D1Database, actor: Actor, contactIds: string
 }
 
 async function createLead({ db, actor, input, tx }: Ctx<CreateLeadInput>) {
+  const program = await validateLeadProgram(db, actor.organizationId, input.productId, input.courseId);
+  if ('error' in program) return program.error;
+
+  let existingContact: { id: string; display_name: string } | null = null;
+  if (input.contactId) {
+    existingContact = await db.prepare('SELECT id, display_name FROM contact WHERE id = ? AND organization_id = ? AND archived_at IS NULL')
+      .bind(input.contactId, actor.organizationId).first<{ id: string; display_name: string }>();
+    if (!existingContact) return fail('NOT_FOUND', 'Không tìm thấy khách');
+  }
+
   const phone = input.phone ? normalizePhone(input.phone) : null;
   const email = input.email ? normalizeEmail(input.email) : null;
   const taxCode = input.taxCode?.trim() || null;
@@ -302,15 +314,19 @@ async function createLead({ db, actor, input, tx }: Ctx<CreateLeadInput>) {
     SELECT 'phone' AS field, l.id, l.code, l.stage, u.display_name AS owner, l.contact_id AS contactId FROM contact_point cp
       JOIN lead l ON l.contact_id = cp.contact_id LEFT JOIN app_user u ON u.id = l.owner_user_id
       WHERE cp.type = 'phone' AND cp.normalized_value = ?1 AND l.organization_id = ?5
+        AND (?6 IS NULL OR l.contact_id <> ?6 OR l.status IN ('queue', 'active'))
     UNION SELECT 'email', l.id, l.code, l.stage, u.display_name, l.contact_id FROM contact_point cp
       JOIN lead l ON l.contact_id = cp.contact_id LEFT JOIN app_user u ON u.id = l.owner_user_id
       WHERE cp.type = 'email' AND cp.normalized_value = ?2 AND l.organization_id = ?5
+        AND (?6 IS NULL OR l.contact_id <> ?6 OR l.status IN ('queue', 'active'))
     UNION SELECT 'tax_code', l.id, l.code, l.stage, u.display_name, l.contact_id FROM account a
       JOIN lead l ON l.account_id = a.id LEFT JOIN app_user u ON u.id = l.owner_user_id
       WHERE a.tax_code = ?3 AND l.organization_id = ?5
+        AND (?6 IS NULL OR l.contact_id <> ?6 OR l.status IN ('queue', 'active'))
     UNION SELECT 'company', l.id, l.code, l.stage, u.display_name, l.contact_id FROM lead l LEFT JOIN app_user u ON u.id = l.owner_user_id
       WHERE l.account_id IN (SELECT value FROM json_each(?4)) AND l.organization_id = ?5
-    LIMIT 10`).bind(phone, email, taxCode, JSON.stringify(sameName), actor.organizationId)
+        AND (?6 IS NULL OR l.contact_id <> ?6 OR l.status IN ('queue', 'active'))
+    LIMIT 10`).bind(phone, email, taxCode, JSON.stringify(sameName), actor.organizationId, existingContact?.id ?? null)
     .all<{ field: string; id: string; code: string; stage: string; owner: string | null; contactId: string }>()).results;
 
   // Only leads inside the actor's scope are described (here and in the audit); others are acknowledged without detail.
@@ -355,17 +371,27 @@ async function createLead({ db, actor, input, tx }: Ctx<CreateLeadInput>) {
     tx.raw(db.prepare(`INSERT INTO account (id, organization_id, name, tax_code, created_at, updated_at, last_txn_id)
       VALUES (?, ?, ?, ?, ?, ?, ?)`).bind(accountId, actor.organizationId, companyName, taxCode, tx.now, tx.now, tx.txnId));
   }
-  const contactId = crypto.randomUUID();
-  tx.raw(db.prepare(`INSERT INTO contact (id, organization_id, display_name, created_at, updated_at, last_txn_id)
-    VALUES (?, ?, ?, ?, ?, ?)`).bind(contactId, actor.organizationId, input.contactName, tx.now, tx.now, tx.txnId));
+  const contactId = existingContact?.id ?? crypto.randomUUID();
+  if (!existingContact) {
+    tx.raw(db.prepare(`INSERT INTO contact (id, organization_id, display_name, created_at, updated_at, last_txn_id)
+      VALUES (?, ?, ?, ?, ?, ?)`).bind(contactId, actor.organizationId, input.contactName, tx.now, tx.now, tx.txnId));
+  }
   if (accountId) {
-    tx.raw(db.prepare(`INSERT INTO account_contact (id, account_id, contact_id, is_primary, created_at) VALUES (?, ?, ?, 1, ?)`)
+    tx.raw(db.prepare(`INSERT INTO account_contact (id, account_id, contact_id, is_primary, created_at) VALUES (?, ?, ?, 1, ?) ON CONFLICT(account_id, contact_id) DO NOTHING`)
       .bind(crypto.randomUUID(), accountId, contactId, tx.now));
   }
-  if (phone) tx.raw(db.prepare(`INSERT INTO contact_point (id, contact_id, type, value, normalized_value, created_at) VALUES (?, ?, 'phone', ?, ?, ?)`)
-    .bind(crypto.randomUUID(), contactId, input.phone, phone, tx.now));
-  if (email) tx.raw(db.prepare(`INSERT INTO contact_point (id, contact_id, type, value, normalized_value, created_at) VALUES (?, ?, 'email', ?, ?, ?)`)
-    .bind(crypto.randomUUID(), contactId, input.email, email, tx.now));
+  if (phone) {
+    tx.raw(db.prepare(`INSERT INTO contact_point (id, contact_id, type, value, normalized_value, created_at)
+      SELECT ?1, ?2, 'phone', ?3, ?4, ?5
+      WHERE NOT EXISTS (SELECT 1 FROM contact_point WHERE contact_id = ?2 AND type = 'phone' AND normalized_value = ?4)`)
+      .bind(crypto.randomUUID(), contactId, input.phone, phone, tx.now));
+  }
+  if (email) {
+    tx.raw(db.prepare(`INSERT INTO contact_point (id, contact_id, type, value, normalized_value, created_at)
+      SELECT ?1, ?2, 'email', ?3, ?4, ?5
+      WHERE NOT EXISTS (SELECT 1 FROM contact_point WHERE contact_id = ?2 AND type = 'email' AND normalized_value = ?4)`)
+      .bind(crypto.randomUUID(), contactId, input.email, email, tx.now));
+  }
 
   const leadId = crypto.randomUUID();
   const taskId = isSale ? crypto.randomUUID() : null;
@@ -374,6 +400,7 @@ async function createLead({ db, actor, input, tx }: Ctx<CreateLeadInput>) {
     id: leadId, organization_id: actor.organizationId, department_id: departmentId,
     team_id: isSale ? actor.teamId : null, account_id: accountId, contact_id: contactId,
     source: input.source, need_summary: input.needSummary,
+    product_id: program.productId, course_id: program.courseId,
     owner_user_id: isSale ? actor.id : null, stage: 'new', status: isSale ? 'active' : 'queue',
     next_action_task_id: taskId, assigned_at: isSale ? tx.now : null, stage_entered_at: tx.now,
     created_by_user_id: actor.id,
@@ -390,11 +417,32 @@ async function createLead({ db, actor, input, tx }: Ctx<CreateLeadInput>) {
     });
   }
   tx.audit('lead', leadId, null, {
-    source: input.source, status: isSale ? 'active' : 'queue',
+    source: input.source, status: isSale ? 'active' : 'queue', contactId,
+    product_id: program.productId, course_id: program.courseId,
     duplicateOverride: matches.length ? matches.map((m) => `${m.field}:${visible.has(m.id) ? m.code : 'ngoài phạm vi'}`) : undefined,
   });
   tx.event('lead.created', { leadId, source: input.source });
-  return ok({ leadId });
+  return ok({ leadId, contactId });
+}
+
+async function setLeadProgram({ db, actor, input, tx }: Ctx<SetLeadProgramInput>) {
+  const lead = await loadLead(db, actor, input.leadId);
+  if (!lead) return notFound();
+  if (lead.version !== input.expectedVersion) return stale();
+  if (lead.status !== 'active' && lead.status !== 'queue') return fail('VALIDATION_FAILED', 'Lead đã đóng');
+  const program = await validateLeadProgram(db, actor.organizationId, input.productId, input.courseId);
+  if ('error' in program) return program.error;
+  tx.update('lead', lead.id, input.expectedVersion, {
+    product_id: program.productId,
+    course_id: program.courseId,
+    last_activity_at: tx.now,
+  });
+  const summary = program.productName
+    ? `Chọn chương trình: ${program.productName}${program.courseName ? ` — ${program.courseName}` : ''}`
+    : 'Bỏ chọn chương trình học';
+  tx.activity(lead.id, 'note', summary);
+  tx.audit('lead', lead.id, { product_id: lead.product_id, course_id: lead.course_id }, { product_id: program.productId, course_id: program.courseId });
+  return ok({ leadId: lead.id, productId: program.productId, courseId: program.courseId });
 }
 
 /**

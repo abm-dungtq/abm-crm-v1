@@ -2,7 +2,7 @@ import { readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { BridgeEvent } from '@abm/contracts';
 import { CodedError, errorCode, silentLogger, type Logger } from './config';
-import type { IncomingMessage, ThreadKind, ZaloConnector, ZaloSession, ZaloUserProfile } from './zalo-client';
+import type { IncomingMessage, ThreadKind, ZaloConnector, ZaloGroup, ZaloSendReply, ZaloSession, ZaloUserProfile } from './zalo-client';
 
 /**
  * Session lifecycle of every Zalo account the bridge holds. One session file per CRM account id lives in
@@ -17,6 +17,8 @@ export const MAX_RECONNECT_FAILURES = 10;
 export const ECHO_HOLD_MS = 3000;
 /** Sent message ids are remembered this long for echo matching. */
 const SENT_ID_TTL_MS = 10 * 60_000;
+/** How often a live session pushes its group list and member lists again. */
+export const GROUP_MEMBERS_REFRESH_MS = 6 * 60 * 60 * 1000;
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const SESSION_SUFFIX = '.json';
 /** Files in the sessions directory that are not Zalo sessions (the GoClaw cleanup's id list). */
@@ -32,7 +34,11 @@ export interface AccountManagerOptions {
   /** Hands events to the CRM client queue; must not throw. */
   emit: (events: BridgeEvent[]) => void;
   log?: Logger;
+  /** Pause between two groups' member lookups, so a scan does not burst Zalo's API. Default 1.5 s. */
+  memberScanDelayMs?: number;
 }
+
+const MEMBER_SCAN_DELAY_MS = 1500;
 
 interface Account {
   accountId: string;
@@ -40,6 +46,8 @@ interface Account {
   externalId: string | null;
   failures: number;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
+  /** Repeats pushGroups while the session is open. */
+  groupRefresh: ReturnType<typeof setInterval> | null;
   loggingIn: boolean;
 }
 
@@ -53,6 +61,8 @@ export class AccountManager {
   private readonly sent = new Map<string, { commandId: string; at: number }>();
   private readonly holds = new Set<ReturnType<typeof setTimeout>>();
   private readonly log: Logger;
+  /** Sessions whose group scan is still running; a timer tick during a scan is skipped. A new session after a reconnect scans at once. */
+  private readonly scanning = new Set<ZaloSession>();
   private stopped = false;
 
   constructor(private readonly options: AccountManagerOptions) {
@@ -120,10 +130,17 @@ export class AccountManager {
   }
 
   /** Sends text from the account and remembers the message id so its echo carries `commandId`. */
-  async send(accountId: string, threadId: string, threadKind: ThreadKind, text: string, commandId: string): Promise<{ msgId: string }> {
+  async send(
+    accountId: string,
+    threadId: string,
+    threadKind: ThreadKind,
+    text: string,
+    commandId: string,
+    reply?: ZaloSendReply,
+  ): Promise<{ msgId: string }> {
     const session = this.accounts.get(accountId)?.session;
     if (!session) throw new CodedError('ACCOUNT_NOT_CONNECTED');
-    const result = await session.send(threadId, threadKind, text);
+    const result = await session.send(threadId, threadKind, text, reply);
     const now = Date.now();
     for (const [msgId, entry] of this.sent) if (now - entry.at > SENT_ID_TTL_MS) this.sent.delete(msgId);
     this.sent.set(result.msgId, { commandId, at: now });
@@ -160,13 +177,14 @@ export class AccountManager {
   private account(accountId: string): Account {
     let account = this.accounts.get(accountId);
     if (!account) {
-      account = { accountId, session: null, externalId: null, failures: 0, reconnectTimer: null, loggingIn: false };
+      account = { accountId, session: null, externalId: null, failures: 0, reconnectTimer: null, groupRefresh: null, loggingIn: false };
       this.accounts.set(accountId, account);
     }
     return account;
   }
 
   private attach(account: Account, session: ZaloSession) {
+    this.clearGroupRefresh(account);
     account.session = session;
     account.externalId = session.ownId;
     account.failures = 0;
@@ -175,6 +193,7 @@ export class AccountManager {
     session.onMessage((message) => this.onMessage(externalId, message));
     session.onClose((close) => {
       if (account.session !== session) return;
+      this.clearGroupRefresh(account);
       account.session = null;
       this.log('warn', 'account.closed', { accountId, code: close.code });
       if (close.fatal) {
@@ -184,15 +203,47 @@ export class AccountManager {
       }
     });
     this.options.emit([{ type: 'account_status', accountId, accountExternalId: externalId, status: 'connected' }]);
+    account.groupRefresh = setInterval(() => {
+      if (this.stopped || account.session !== session) return;
+      void this.pushGroups(accountId, externalId, session);
+    }, GROUP_MEMBERS_REFRESH_MS);
     void this.pushGroups(accountId, externalId, session);
   }
 
+  private clearGroupRefresh(account: Account) {
+    if (account.groupRefresh) clearInterval(account.groupRefresh);
+    account.groupRefresh = null;
+  }
+
   private async pushGroups(accountId: string, externalId: string, session: ZaloSession) {
+    if (this.scanning.has(session)) return;
+    this.scanning.add(session);
     try {
-      const groups = await session.listGroups();
-      this.options.emit([{ type: 'group_list', accountExternalId: externalId, groups }]);
+      await this.scanGroups(accountId, externalId, session);
+    } finally {
+      this.scanning.delete(session);
+    }
+  }
+
+  private async scanGroups(accountId: string, externalId: string, session: ZaloSession) {
+    let groups: ZaloGroup[];
+    try {
+      groups = await session.listGroups();
     } catch (error) {
       this.log('warn', 'account.group_list_failed', { accountId, code: errorCode(error) });
+      return;
+    }
+    this.options.emit([{ type: 'group_list', accountExternalId: externalId, groups }]);
+    const delayMs = this.options.memberScanDelayMs ?? MEMBER_SCAN_DELAY_MS;
+    for (const [index, group] of groups.entries()) {
+      if (this.stopped || this.accounts.get(accountId)?.session !== session) return;
+      if (index > 0 && delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      try {
+        const members = await session.listGroupMembers(group.threadId);
+        this.options.emit([{ type: 'group_members', accountExternalId: externalId, threadId: group.threadId, members }]);
+      } catch (error) {
+        this.log('warn', 'account.group_members_failed', { accountId, code: errorCode(error) });
+      }
     }
   }
 
@@ -230,6 +281,7 @@ export class AccountManager {
   }
 
   private closeSession(account: Account) {
+    this.clearGroupRefresh(account);
     const session = account.session;
     account.session = null;
     session?.close();
@@ -263,6 +315,7 @@ export class AccountManager {
       sentAt: message.sentAt,
       ...(message.attachments.length ? { attachments: message.attachments.slice(0, 20) } : {}),
       ...(commandId ? { commandId } : {}),
+      ...(message.threadKind === 'group' ? { mentionsSelf: message.mentionsSelf, quotesSelf: message.quotesSelf } : {}),
     }]);
   }
 }

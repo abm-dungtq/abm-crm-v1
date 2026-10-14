@@ -264,7 +264,8 @@ export const nextActionInput = z.object({
 export type NextActionInput = z.infer<typeof nextActionInput>;
 
 export const createLeadInput = z.object({
-  contactName: text(120),
+  contactId: id.optional(),
+  contactName: text(120).optional(),
   phone: z.string().trim().max(20)
     .refine((v) => v === '' || v.replace(/\D/g, '').length >= 9, 'Số điện thoại cần ít nhất 9 chữ số').optional(),
   email: z.string().trim().email('Email không hợp lệ').max(160).optional(),
@@ -272,11 +273,14 @@ export const createLeadInput = z.object({
   taxCode: z.string().trim().max(20).optional(),
   source: z.enum(LEAD_SOURCE_CODES),
   needSummary: text(1000),
+  productId: id.optional(),
+  courseId: id.optional(),
   confirmNotDuplicate: z.boolean().optional(),
   nextAction: nextActionInput.optional(),
   /** Only used by actors without a department of their own (Admin, BGĐ). */
   departmentId: id.optional(),
-}).refine((v) => Boolean(v.phone || v.email), { message: 'Cần số điện thoại hoặc email', path: ['phone'] })
+}).refine((v) => Boolean(v.contactId || v.contactName), { message: 'Bắt buộc', path: ['contactName'] })
+  .refine((v) => Boolean(v.contactId || v.phone || v.email), { message: 'Cần số điện thoại hoặc email', path: ['phone'] })
   .refine((v) => !v.taxCode || Boolean(v.companyName), { message: 'MST cần đi kèm tên công ty', path: ['companyName'] });
 export type CreateLeadInput = z.infer<typeof createLeadInput>;
 
@@ -374,6 +378,8 @@ export const createLearnerLeadInput = z.object({
   partnerContractId: id.optional(),
   sourceNote: z.string().trim().max(200).optional(),
   needSummary: text(1000),
+  productId: id.optional(),
+  courseId: id.optional(),
   productIds: z.array(id).max(20).optional(),
   nextAction: nextActionInput,
   /** Admin only: the Sale or Leader who will hold the customer. */
@@ -381,6 +387,14 @@ export const createLearnerLeadInput = z.object({
 }).refine((v) => Boolean(v.contactId || v.contactName), { message: 'Cần chọn khách hoặc nhập tên', path: ['contactName'] })
   .refine((v) => v.source !== 'partner' || Boolean(v.partnerContractId), { message: 'Nguồn đối tác cần chọn hợp đồng', path: ['partnerContractId'] });
 export type CreateLearnerLeadInput = z.infer<typeof createLearnerLeadInput>;
+
+export const setLeadProgramInput = z.object({
+  leadId: id,
+  expectedVersion: version,
+  productId: id.nullable().optional(),
+  courseId: id.nullable().optional(),
+});
+export type SetLeadProgramInput = z.infer<typeof setLeadProgramInput>;
 
 export const markJourneyStepInput = z.object({
   leadId: id,
@@ -652,6 +666,7 @@ export const COMMANDS = {
   upsertProduct: { schema: upsertProductInput, roles: ['academic', 'admin'], riskLevel: 'low', idempotent: true, expectedVersion: false, agentNeedsApproval: false },
   recordConsent: { schema: recordConsentInput, roles: ['sale', 'leader', 'admin'], riskLevel: 'low', idempotent: true, expectedVersion: false, agentNeedsApproval: false },
   createLearnerLead: { schema: createLearnerLeadInput, roles: ['sale', 'leader', 'admin'], riskLevel: 'low', idempotent: true, expectedVersion: false, agentNeedsApproval: false },
+  setLeadProgram: { schema: setLeadProgramInput, roles: ['sale', 'leader', 'head', 'director', 'admin'], riskLevel: 'low', idempotent: true, expectedVersion: true, agentNeedsApproval: false },
   markJourneyStep: { schema: markJourneyStepInput, roles: ['sale', 'leader', 'admin'], riskLevel: 'low', idempotent: true, expectedVersion: true, agentNeedsApproval: false },
   skipTrial: { schema: skipTrialInput, roles: ['sale', 'leader', 'admin'], riskLevel: 'low', idempotent: true, expectedVersion: true, agentNeedsApproval: false },
   winLearnerLead: { schema: winLearnerLeadInput, roles: ['sale', 'leader', 'admin'], riskLevel: 'high', idempotent: true, expectedVersion: true, agentNeedsApproval: true },
@@ -727,9 +742,9 @@ export const CONVERSATION_MODES = ['ai', 'human', 'paused'] as const;
 export type ConversationMode = (typeof CONVERSATION_MODES)[number];
 export const SENDER_KINDS = ['customer', 'bot', 'staff_web', 'staff_phone', 'system'] as const;
 export type SenderKind = (typeof SENDER_KINDS)[number];
-export const CHANNEL_KINDS = ['zalo', 'facebook'] as const;
+export const CHANNEL_KINDS = ['zalo', 'facebook', 'zalo_oa'] as const;
 export type ChannelKind = (typeof CHANNEL_KINDS)[number];
-export const COMMAND_KINDS = ['send_zalo', 'send_messenger', 'run_completion', 'send_lark', 'zalo_login', 'zalo_logout'] as const;
+export const COMMAND_KINDS = ['send_zalo', 'send_messenger', 'run_completion', 'send_lark', 'zalo_login', 'zalo_logout', 'send_zalo_oa'] as const;
 export type CommandKind = (typeof COMMAND_KINDS)[number];
 export const CHANNEL_ACCOUNT_STATUSES = ['disconnected', 'qr_pending', 'connected', 'error'] as const;
 export type ChannelAccountStatus = (typeof CHANNEL_ACCOUNT_STATUSES)[number];
@@ -757,6 +772,10 @@ const bridgeMessageEvent = z.object({
   sentAt: isoInstant,
   /** Id of the send_zalo command that produced this message, when the bridge itself sent it. */
   commandId: id.optional(),
+  /** True when this group message @-mentions the bot's own uid. @all does not count. Absent on direct messages. */
+  mentionsSelf: z.boolean().optional(),
+  /** True when this group message quotes a message the bot sent. Absent on direct messages. */
+  quotesSelf: z.boolean().optional(),
 });
 const bridgeAccountStatusEvent = z.object({
   type: z.literal('account_status'),
@@ -781,9 +800,16 @@ const bridgeGroupListEvent = z.object({
   accountExternalId: externalRef,
   groups: z.array(z.object({ threadId: externalRef, name: z.string().max(200) })).max(1000),
 });
+const bridgeGroupMembersEvent = z.object({
+  type: z.literal('group_members'),
+  accountExternalId: externalRef,
+  threadId: externalRef,
+  members: z.array(z.object({ id: externalRef, name: z.string().max(200) })).max(5000),
+});
+export type BridgeGroupMembersEvent = z.infer<typeof bridgeGroupMembersEvent>;
 
 export const bridgeEventSchema = z.discriminatedUnion('type', [
-  bridgeMessageEvent, bridgeAccountStatusEvent, bridgeQrEvent, bridgeGroupListEvent,
+  bridgeMessageEvent, bridgeAccountStatusEvent, bridgeQrEvent, bridgeGroupListEvent, bridgeGroupMembersEvent,
 ]);
 export type BridgeEvent = z.infer<typeof bridgeEventSchema>;
 /** Body of POST /api/bridge/events. */

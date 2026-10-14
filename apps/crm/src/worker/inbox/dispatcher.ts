@@ -178,11 +178,14 @@ export async function dropBotSend(db: D1Database, command: Pick<ClaimedCommand, 
  * Outgoing customer messages one channel account has sent, is sending or has waiting to send since
  * `dayStartIso` (start of the current day in Vietnam time, as an ISO instant). A claimed or done send counts
  * by claim time, a waiting one by creation time, so sends queued while the bridge is offline still use up the cap.
+ * The bot's replies to learners in a group (the only sends carrying `replyTo`) do not count, so they cannot fill the
+ * cap; scheduled group posts still do.
  */
 export async function accountSendsToday(db: D1Database, channelAccountId: string, dayStartIso: string): Promise<number> {
-  const row = await db.prepare(`SELECT COUNT(*) AS n FROM channel_command
-    WHERE channel_account_id = ? AND kind IN ('send_zalo', 'send_messenger')
-      AND status IN ('pending', 'claimed', 'done') AND COALESCE(claimed_at, created_at) >= ?`)
+  const row = await db.prepare(`SELECT COUNT(*) AS n FROM channel_command cc
+    WHERE cc.channel_account_id = ? AND cc.kind IN ('send_zalo', 'send_messenger', 'send_zalo_oa')
+      AND cc.status IN ('pending', 'claimed', 'done') AND COALESCE(cc.claimed_at, cc.created_at) >= ?
+      AND json_extract(cc.payload_json, '$.replyTo') IS NULL`)
     .bind(channelAccountId, dayStartIso)
     .first<{ n: number }>();
   return Number(row?.n ?? 0);

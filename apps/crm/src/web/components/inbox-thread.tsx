@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ChannelKind, ConversationMode } from '@abm/contracts';
 import { ApiFailure, listMessages, sendMessage } from '../api';
 import { fmtDateTime } from '../format';
-import { mergeMessages, senderLabel } from '../inbox-format';
+import { conversationChannelLabel, mergeMessages, senderLabel } from '../inbox-format';
 import type { InboxConversation, InboxMessage, SendMessageResult } from '../types';
 import { Icon } from './icons';
 import { Badge, ErrorState, FormError, Loading, type Tone } from './ui';
@@ -23,8 +23,7 @@ export const MODE_LABEL: Record<ConversationMode, [string, Tone]> = {
 };
 export const ModeBadge = ({ mode }: { mode: ConversationMode }) => <Badge tone={MODE_LABEL[mode][1]} dot>{MODE_LABEL[mode][0]}</Badge>;
 
-export const channelLabel = (c: Pick<InboxConversation, 'channel' | 'accountName'>) =>
-  (c.channel === 'facebook' ? 'Fanpage' : `Zalo · ${c.accountName}`);
+export const channelLabel = (c: Pick<InboxConversation, 'channel' | 'accountName'>) => conversationChannelLabel(c);
 export const conversationName = (c: Pick<InboxConversation, 'displayName' | 'kind'>) =>
   c.displayName?.trim() || (c.kind === 'group' ? 'Nhóm chưa đặt tên' : 'Khách chưa rõ tên');
 

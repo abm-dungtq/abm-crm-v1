@@ -1,13 +1,15 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient, type UseMutationResult } from '@tanstack/react-query';
 import type { ChannelAccountStatus, ChannelKind } from '@abm/contracts';
 import { useActor } from '../actor-context';
 import {
-  ApiFailure, connectAccount, createAccount, disconnectAccount, getCustomerBotSwitch, listAccounts, setCustomerBotSwitch, updateAccount,
+  ApiFailure, connectAccount, connectZaloOa, createAccount, disconnectAccount, getCustomerBotSwitch, listAccounts,
+  setCustomerBotSwitch, setRegistrationPolicy, updateAccount,
 } from '../api';
 import { Alert, Badge, Empty, ErrorState, Field, FormError, Loading, Modal, fieldErrors, useToast, type Tone } from '../components/ui';
 import { fmtAgo, fmtDateTime } from '../format';
-import type { ChannelAccount, ChannelAccountList, ChannelAccountUpdate, CustomerBotSwitch } from '../types';
+import { channelKindLabel } from '../inbox-format';
+import type { ChannelAccount, ChannelAccountList, ChannelAccountUpdate, CustomerBotSwitch, RegistrationPolicyUpdate } from '../types';
 
 /** Polling while an admin waits for a login QR or the connection that follows it. */
 const CONNECT_POLL_MS = 2000;
@@ -42,8 +44,20 @@ export function ChannelAccountsPage() {
   const toggle = useAccountMutation(({ id, ...input }: ChannelAccountUpdate & { id: string }) => updateAccount(id, input));
   const connect = useAccountMutation(connectAccount);
   const startConnect = (id: string) => { setConnectingId(id); connect.mutate(id); };
+  const toast = useToast();
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const result = params.get('zalo_oa');
+    if (result !== 'connected' && result !== 'error') return;
+    toast(result === 'connected' ? 'Đã kết nối Zalo OA' : 'Kết nối Zalo OA lỗi', result === 'error' ? 'danger' : undefined);
+    params.delete('zalo_oa');
+    const query = params.toString();
+    window.history.replaceState(window.history.state, '', `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`);
+  }, [toast]);
   if (!isAdmin) return <Alert tone="warn">Chỉ Admin quản lý tài khoản kênh.</Alert>;
-  const rows = accounts.data?.accounts ?? [];
+  const allAccounts = accounts.data?.accounts ?? [];
+  const rows = allAccounts.filter((account) => account.channel !== 'zalo_oa');
+  const oaAccounts = allAccounts.filter((account) => account.channel === 'zalo_oa');
   const connecting = rows.find((a) => a.id === connectingId) ?? null;
   const bridgeOffline = accounts.data?.bridgeOnline === false;
 
@@ -58,6 +72,7 @@ export function ChannelAccountsPage() {
       <div className="stack">
         <CustomerBotSwitchCard />
         <AddAccountCard />
+        <ZaloOaSection accounts={oaAccounts} listed={Boolean(accounts.data)} onEdit={setEditing} />
         {bridgeOffline && rows.some((account) => account.channel === 'zalo') && (
           <Alert tone="warn">{bridgeOfflineMessage(accounts.data?.bridgeLastSeenAt ?? null)}</Alert>
         )}
@@ -65,7 +80,7 @@ export function ChannelAccountsPage() {
           <div className="card-head"><h2>Danh sách tài khoản</h2></div>
           {accounts.isLoading && <div className="card-body"><Loading rows={3} /></div>}
           {accounts.error && <div className="card-body"><ErrorState error={accounts.error} onRetry={() => accounts.refetch()} /></div>}
-          {accounts.data && !rows.length && <Empty title="Chưa có tài khoản kênh">Thêm số Zalo hoặc Fanpage ở trên để bắt đầu.</Empty>}
+          {accounts.data && !rows.length && <Empty title="Chưa có số Zalo hoặc Fanpage">Thêm số Zalo hoặc Fanpage ở trên để bắt đầu.</Empty>}
           {toggle.error && <div className="card-body"><FormError error={toggle.error} /></div>}
           {rows.length > 0 && (
             <div className="table-wrap">
@@ -80,7 +95,7 @@ export function ChannelAccountsPage() {
                   {rows.map((a) => (
                     <tr key={a.id}>
                       <td data-label="Tên"><div className="cell-title">{a.displayName}</div>{a.externalId && <div className="cell-sub mono">{a.externalId}</div>}</td>
-                      <td data-label="Kênh">{a.channel === 'facebook' ? 'Fanpage' : 'Zalo'}</td>
+                      <td data-label="Kênh">{channelKindLabel(a.channel)}</td>
                       <td data-label="Trạng thái">
                         <Badge tone={STATUS_LABEL[a.status][1]} dot>{STATUS_LABEL[a.status][0]}</Badge>
                         {a.status === 'error' && a.lastError && <div className="cell-sub mono" title="Mã lỗi bridge báo gần nhất">{a.lastError}</div>}
@@ -356,5 +371,129 @@ function CustomerBotSwitchCard() {
         </Modal>
       )}
     </section>
+  );
+}
+
+/** Official Accounts. Login QR belongs to personal numbers, so this section never offers it. */
+function ZaloOaSection({ accounts, listed, onEdit }: {
+  accounts: ChannelAccount[]; listed: boolean; onEdit: (account: ChannelAccount) => void;
+}) {
+  const isAdmin = useActor().role === 'admin';
+  const connectOa = useAccountMutation<void, { url: string }>(() => connectZaloOa());
+  const toggle = useAccountMutation(({ id, ...input }: ChannelAccountUpdate & { id: string }) => updateAccount(id, input));
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h2>Zalo OA</h2>
+        <span className="spacer" />
+        {isAdmin && (
+          <button type="button" className="btn btn-primary" disabled={connectOa.isPending}
+            onClick={() => connectOa.mutate(undefined, { onSuccess: ({ url }) => { window.location.href = url; } })}>
+            Kết nối Zalo OA
+          </button>
+        )}
+      </div>
+      {(connectOa.error || toggle.error) && (
+        <div className="card-body stack-sm">
+          <FormError error={connectOa.error} />
+          <FormError error={toggle.error} />
+        </div>
+      )}
+      {listed && !accounts.length && <Empty title="Chưa có Zalo OA">Bấm Kết nối Zalo OA để ủy quyền Official Account.</Empty>}
+      {accounts.map((a, index) => {
+        const [statusLabel, statusTone] = STATUS_LABEL[a.status];
+        return (
+          <div key={a.id} className="card-body stack" style={index > 0 ? { borderTop: '1px solid var(--border)' } : undefined}>
+            <div className="row-wrap">
+              <div>
+                <div className="cell-title">{a.displayName}</div>
+                <div className="cell-sub mono">OA id {a.externalId ?? '—'}</div>
+              </div>
+              <span className="spacer" />
+              <Badge tone={statusTone} dot>{statusLabel}</Badge>
+            </div>
+            {a.status === 'error' && a.lastError && <div className="cell-sub mono">{a.lastError}</div>}
+            <div className="row-wrap">
+              <span className="small muted">Agent GoClaw</span>
+              <span className="mono">{a.agentKey ?? <span className="muted">Chưa đặt</span>}</span>
+              <button type="button" className="btn btn-sm" onClick={() => onEdit(a)} aria-label={`Sửa cấu hình ${a.displayName}`}>Sửa</button>
+              <button type="button" className="btn btn-sm" aria-pressed={a.botEnabled}
+                aria-label={`${a.botEnabled ? 'Tắt' : 'Bật'} bot của ${a.displayName}`}
+                disabled={toggle.isPending} onClick={() => toggle.mutate({ id: a.id, botEnabled: !a.botEnabled })}>
+                <Badge tone={a.botEnabled ? 'agent' : 'neutral'}>{a.botEnabled ? 'Bật' : 'Tắt'}</Badge>
+              </button>
+            </div>
+            {isAdmin && <RegistrationPolicyFields account={a} />}
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
+/** Same shape the Worker accepts: `https://zalo.me/g/` plus letters and digits. */
+const EXACT_GROUP_URL = /^https:\/\/zalo\.me\/g\/[A-Za-z0-9]+$/;
+
+function policyPayload(enabled: boolean, groupUrl: string): RegistrationPolicyUpdate {
+  const trimmed = groupUrl.trim();
+  return { enabled, groupUrl: trimmed ? trimmed : null };
+}
+
+/** Admin sets the 199k confirmation and the exact group link the bot is allowed to send. */
+function RegistrationPolicyFields({ account }: { account: ChannelAccount }) {
+  const toast = useToast();
+  const save = useAccountMutation((input: RegistrationPolicyUpdate & { id: string }) =>
+    setRegistrationPolicy(input.id, { enabled: input.enabled, groupUrl: input.groupUrl }));
+  const errors = fieldErrors(save.error);
+  const serverUrl = account.registrationGroupUrl ?? '';
+  const [enabled, setEnabled] = useState(account.registrationPolicy);
+  const [groupUrl, setGroupUrl] = useState(serverUrl);
+  const dirty = useRef(false);
+  useEffect(() => {
+    if (dirty.current) return;
+    setEnabled(account.registrationPolicy);
+    setGroupUrl(serverUrl);
+  }, [account.registrationPolicy, serverUrl]);
+  const persist = (nextEnabled: boolean, nextUrl: string) => {
+    dirty.current = true;
+    save.mutate(
+      { id: account.id, ...policyPayload(nextEnabled, nextUrl) },
+      {
+        onSuccess: () => { dirty.current = false; toast('Đã lưu chính sách đăng ký 199k'); },
+        // The server kept the previous checkbox. Show that, and let the next refresh replace the draft.
+        onError: () => { setEnabled(account.registrationPolicy); dirty.current = false; },
+      },
+    );
+  };
+  return (
+    <form className="stack-sm" onSubmit={(e) => { e.preventDefault(); persist(enabled, groupUrl); }}>
+      <div className="grid-2">
+        <div className="stack-sm">
+          <label className="row">
+            <input type="checkbox" checked={enabled} disabled={save.isPending}
+              aria-label={`Tự xác nhận đăng ký 199k của ${account.displayName}`}
+              onChange={(e) => {
+                const next = e.target.checked;
+                setEnabled(next);
+                const draft = groupUrl.trim();
+                // Turning the policy off must not send a half-typed link the API will reject.
+                const url = !next && draft !== '' && !EXACT_GROUP_URL.test(draft) ? (account.registrationGroupUrl ?? '') : groupUrl;
+                persist(next, url);
+              }} />
+            Tự xác nhận đăng ký 199k
+          </label>
+          <p className="field-hint">Bot xác nhận đăng ký khi khách gửi biên lai 199.000đ hợp lệ; câu xác nhận sai dạng bị chặn.</p>
+        </div>
+        <Field label="Link nhóm Zalo" htmlFor={`oa-group-${account.id}`} error={errors.groupUrl}>
+          <input id={`oa-group-${account.id}`} type="text" inputMode="url" spellCheck={false} maxLength={200}
+            placeholder="https://zalo.me/g/..." value={groupUrl} aria-invalid={Boolean(errors.groupUrl)}
+            onChange={(e) => { dirty.current = true; setGroupUrl(e.target.value); }} />
+        </Field>
+      </div>
+      <FormError error={save.error && !Object.keys(errors).length ? save.error : null} />
+      <div>
+        <button type="submit" className="btn btn-sm" disabled={save.isPending}>Lưu</button>
+      </div>
+    </form>
   );
 }

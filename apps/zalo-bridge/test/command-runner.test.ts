@@ -10,7 +10,11 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function setup(overrides: { complete?: (r: { text: string }) => Promise<string>; send?: RunnerAccounts['send'] } = {}) {
+function setup(overrides: {
+  complete?: (r: { text: string }) => Promise<string>;
+  send?: RunnerAccounts['send'];
+  downloadImage?: (url: string, dir: string) => Promise<string | null>;
+} = {}) {
   const results: { id: string; result: BridgeCommandResult }[] = [];
   const crm = {
     pollCommands: vi.fn(async () => [] as BridgeCommand[]),
@@ -19,7 +23,10 @@ function setup(overrides: { complete?: (r: { text: string }) => Promise<string>;
       return 'accepted';
     }),
   };
-  const goclaw = { complete: vi.fn(overrides.complete ?? (async () => 'reply')) };
+  const goclaw = {
+    complete: vi.fn(overrides.complete ?? (async () => 'reply')),
+    completeWithMedia: vi.fn(async () => 'media reply'),
+  };
   let msgId = 100;
   const accounts = {
     login: vi.fn(async () => {}),
@@ -28,7 +35,10 @@ function setup(overrides: { complete?: (r: { text: string }) => Promise<string>;
     profile: vi.fn(async (): Promise<ZaloUserProfile | null> => null),
   };
   const sleep = vi.fn(async (_ms: number) => {});
-  const runner = new CommandRunner({ crm, goclaw, accounts, sendMinDelayMs: 1500, sendMaxDelayMs: 4000, sleep, random: () => 0.5 });
+  const runner = new CommandRunner({
+    crm, goclaw, accounts, sendMinDelayMs: 1500, sendMaxDelayMs: 4000, sleep, random: () => 0.5,
+    imageDir: 'media-tmp', downloadImage: overrides.downloadImage,
+  });
   return { runner, crm, goclaw, accounts, sleep, results };
 }
 
@@ -106,6 +116,18 @@ describe('CommandRunner', () => {
     expect(accounts.send.mock.calls.every((call) => call[4] === 's1')).toBe(true);
     expect(sleep.mock.calls.map(([ms]) => ms)).toEqual([2750, 2750, 2750]);
     expect(results).toEqual([{ id: 's1', result: { attempts: 2, ok: true, externalMsgId: '100' } }]);
+  });
+
+  it('passes replyTo only on the first chunk', async () => {
+    const { runner, accounts } = setup();
+    const replyTo = { msgId: 'm-ask', senderId: 'u1', senderName: 'Hùng' };
+    const text = 'a\n' + 'b'.repeat(2000);
+    runner.dispatch(command('s1', 'send_zalo', { threadId: 'g1', threadKind: 'group', text, replyTo }, 'conv-1', 1));
+    await runner.idle();
+    expect(accounts.send).toHaveBeenCalledTimes(2);
+    expect(accounts.send.mock.calls[0]?.slice(0, 6)).toEqual(['acc-1', 'g1', 'group', 'a', 's1', replyTo]);
+    expect(accounts.send.mock.calls[1]?.[5]).toBeUndefined();
+    expect(accounts.send.mock.calls[1]?.[3]).toBe('b'.repeat(2000));
   });
 
   it('continues a partly sent message from the next chunk when the command is claimed again', async () => {
@@ -302,5 +324,58 @@ describe('CommandRunner', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('calls completeWithMedia with the one downloaded image path', async () => {
+    const downloadImage = vi.fn(async () => 'C:\\tmp\\one.png');
+    const { runner, goclaw, results } = setup({ downloadImage });
+    runner.dispatch(command('c1', 'run_completion', {
+      agentKey: 'bot', userId: 'u', text: 'biên lai', images: ['https://zdn.vn/a.png'],
+    }));
+    await runner.idle();
+    expect(downloadImage).toHaveBeenCalledWith('https://zdn.vn/a.png', 'media-tmp');
+    expect(goclaw.completeWithMedia).toHaveBeenCalledWith({
+      agentKey: 'bot', userId: 'u', text: 'biên lai', mediaPaths: ['C:\\tmp\\one.png'],
+    });
+    expect(goclaw.complete).not.toHaveBeenCalled();
+    expect(results).toEqual([{ id: 'c1', result: { attempts: 1, ok: true, text: 'media reply' } }]);
+  });
+
+  it('calls complete when the payload has no images', async () => {
+    const { runner, goclaw } = setup();
+    runner.dispatch(command('c1', 'run_completion', { agentKey: 'bot', userId: 'u', text: 'xin chào' }));
+    await runner.idle();
+    runner.dispatch(command('c2', 'run_completion', { agentKey: 'bot', userId: 'u', text: 'xin chào', images: [] }, 'conv-2'));
+    await runner.idle();
+    expect(goclaw.complete).toHaveBeenNthCalledWith(1, { agentKey: 'bot', userId: 'u', text: 'xin chào' });
+    expect(goclaw.complete).toHaveBeenNthCalledWith(2, { agentKey: 'bot', userId: 'u', text: 'xin chào' });
+    expect(goclaw.completeWithMedia).not.toHaveBeenCalled();
+  });
+
+  it('falls back to complete with a note when the image download fails', async () => {
+    const { runner, goclaw } = setup({ downloadImage: async () => null });
+    runner.dispatch(command('c1', 'run_completion', {
+      agentKey: 'bot', userId: 'u', text: 'biên lai', images: ['https://zdn.vn/a.png'],
+    }));
+    await runner.idle();
+    expect(goclaw.complete).toHaveBeenCalledWith({
+      agentKey: 'bot', userId: 'u', text: 'biên lai\n[Ảnh không tải được]',
+    });
+    expect(goclaw.completeWithMedia).not.toHaveBeenCalled();
+  });
+
+  it('sends the images that downloaded and notes the one that failed', async () => {
+    const { runner, goclaw } = setup({
+      downloadImage: async (url) => (url.endsWith('ok.png') ? 'C:\\tmp\\ok.png' : null),
+    });
+    runner.dispatch(command('c1', 'run_completion', {
+      agentKey: 'bot', userId: 'u', text: 'biên lai',
+      images: ['https://zdn.vn/ok.png', 'https://zdn.vn/bad.png'],
+    }));
+    await runner.idle();
+    expect(goclaw.completeWithMedia).toHaveBeenCalledWith({
+      agentKey: 'bot', userId: 'u', text: 'biên lai\n[Ảnh không tải được]', mediaPaths: ['C:\\tmp\\ok.png'],
+    });
+    expect(goclaw.complete).not.toHaveBeenCalled();
   });
 });

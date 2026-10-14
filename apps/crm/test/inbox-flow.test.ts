@@ -98,7 +98,10 @@ test('no reply is queued while the customer bot is off, the account bot is off, 
   expect(await commands('run_completion')).toHaveLength(0);
 
   await db.prepare("UPDATE channel_account SET bot_enabled = 1 WHERE id = 'ca-1'").run();
-  await ingest(message({ threadId: 'grp-1', threadKind: 'group', senderExternalId: 'member-1' }));
+  await ingest(message({
+    threadId: 'grp-1', threadKind: 'group', senderExternalId: 'member-1', text: 'Mai học bài gì ạ',
+    mentionsSelf: false, quotesSelf: false,
+  }));
   const groupReplies = await commands('run_completion');
   expect(groupReplies).toHaveLength(0);
   expect(groupReplies.some((command) => command.payload.zaloUserId !== undefined)).toBe(false);

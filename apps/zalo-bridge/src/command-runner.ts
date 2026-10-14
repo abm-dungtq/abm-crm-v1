@@ -2,8 +2,9 @@ import type { BridgeCommandResult } from '@abm/contracts';
 import { z } from 'zod';
 import { CodedError, errorCode, silentLogger, type Logger } from './config';
 import type { BridgeCommand, ResultDelivery } from './crm-client';
-import type { CompletionRequest } from './goclaw-client';
-import type { ThreadKind, ZaloUserProfile } from './zalo-client';
+import type { CompletionRequest, MediaCompletionRequest } from './goclaw-client';
+import { downloadImage as fetchCustomerImage } from './image-fetch';
+import type { ThreadKind, ZaloSendReply, ZaloUserProfile } from './zalo-client';
 
 /**
  * Executes bridge commands. Commands of one conversation run strictly one after another (never two GoClaw runs
@@ -29,8 +30,18 @@ const completionPayload = z.object({
   userId: z.string().min(1),
   text: z.string(),
   zaloUserId: z.string().min(1).optional(),
+  images: z.array(z.string().url()).max(3).optional(),
 });
-const sendPayload = z.object({ threadId: z.string().min(1), threadKind: z.enum(['direct', 'group']), text: z.string() });
+const sendPayload = z.object({
+  threadId: z.string().min(1),
+  threadKind: z.enum(['direct', 'group']),
+  text: z.string(),
+  replyTo: z.object({
+    msgId: z.string().min(1),
+    senderId: z.string().min(1),
+    senderName: z.string().max(200),
+  }).optional(),
+});
 const sessionPayload = z.object({ accountId: z.string().min(1) }).partial();
 
 export interface RunnerCrm {
@@ -39,11 +50,19 @@ export interface RunnerCrm {
 }
 export interface RunnerGoClaw {
   complete(request: CompletionRequest): Promise<string>;
+  completeWithMedia(request: MediaCompletionRequest): Promise<string>;
 }
 export interface RunnerAccounts {
   login(accountId: string): Promise<void>;
   logout(accountId: string): Promise<void>;
-  send(accountId: string, threadId: string, threadKind: ThreadKind, text: string, commandId: string): Promise<{ msgId: string }>;
+  send(
+    accountId: string,
+    threadId: string,
+    threadKind: ThreadKind,
+    text: string,
+    commandId: string,
+    reply?: ZaloSendReply,
+  ): Promise<{ msgId: string }>;
   /** Zalo profile of a direct customer. Null when the account has no live session or Zalo has no profile. */
   profile(accountId: string, zaloUserId: string): Promise<ZaloUserProfile | null>;
 }
@@ -57,6 +76,9 @@ export interface CommandRunnerOptions {
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
   log?: Logger;
+  /** Directory customer images are written to before a GoClaw image turn. */
+  imageDir?: string;
+  downloadImage?: (url: string, dir: string) => Promise<string | null>;
 }
 
 type Outcome = Omit<BridgeCommandResult, 'attempts'>;
@@ -115,11 +137,15 @@ export class CommandRunner {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly random: () => number;
   private readonly log: Logger;
+  private readonly imageDir: string;
+  private readonly downloadImage: (url: string, dir: string) => Promise<string | null>;
 
   constructor(private readonly options: CommandRunnerOptions) {
     this.sleep = options.sleep ?? defaultSleep;
     this.random = options.random ?? Math.random;
     this.log = options.log ?? silentLogger;
+    this.imageDir = options.imageDir ?? '';
+    this.downloadImage = options.downloadImage ?? fetchCustomerImage;
   }
 
   /** Polls and dispatches until `signal` aborts. Poll errors are logged and retried after a pause. */
@@ -190,10 +216,13 @@ export class CommandRunner {
       case 'run_completion': {
         const payload = completionPayload.safeParse(command.payload);
         if (!payload.success) return { ok: false, error: 'INVALID_PAYLOAD' };
-        const text = await this.completionText(command, payload.data);
-        const reply = await this.options.goclaw.complete({
-          agentKey: payload.data.agentKey, userId: payload.data.userId, text,
-        });
+        const images = await this.collectImages(payload.data.images ?? []);
+        let text = await this.completionText(command, payload.data);
+        if (images.failed) text += '\n[Ảnh không tải được]';
+        const request = { agentKey: payload.data.agentKey, userId: payload.data.userId, text };
+        const reply = images.paths.length
+          ? await this.options.goclaw.completeWithMedia({ ...request, mediaPaths: images.paths })
+          : await this.options.goclaw.complete(request);
         return { ok: true, text: reply.slice(0, MAX_RESULT_TEXT) };
       }
       case 'send_zalo':
@@ -208,6 +237,22 @@ export class CommandRunner {
       default:
         return { ok: false, error: 'UNSUPPORTED_COMMAND' };
     }
+  }
+
+  /** Downloads up to three customer images. A null path counts as a failure and is left out. */
+  private async collectImages(urls: string[]): Promise<{ paths: string[]; failed: boolean }> {
+    const paths: string[] = [];
+    let failed = false;
+    for (const url of urls) {
+      if (!this.imageDir) {
+        failed = true;
+        continue;
+      }
+      const path = await this.downloadImage(url, this.imageDir);
+      if (path) paths.push(path);
+      else failed = true;
+    }
+    return { paths, failed };
   }
 
   /**
@@ -286,7 +331,10 @@ export class CommandRunner {
     for (let index = progress?.delivered ?? 0; index < chunks.length; index += 1) {
       await this.sleep(min + Math.floor(this.random() * (max - min + 1)));
       try {
-        const { msgId } = await this.options.accounts.send(command.channelAccountId, payload.data.threadId, payload.data.threadKind, chunks[index]!, command.id);
+        const reply = index === 0 ? payload.data.replyTo : undefined;
+        const { msgId } = await this.options.accounts.send(
+          command.channelAccountId, payload.data.threadId, payload.data.threadKind, chunks[index]!, command.id, reply,
+        );
         firstMsgId ??= msgId;
         this.rememberProgress(command.id, { delivered: index + 1, firstMsgId });
       } catch (error) {

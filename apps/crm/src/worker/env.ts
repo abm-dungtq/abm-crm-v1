@@ -19,6 +19,14 @@ export interface Env {
   FB_VERIFY_TOKEN?: string;
   /** JSON object mapping Facebook page id to its page access token. */
   FB_PAGE_TOKENS?: string;
+  /** Zalo app id for Official Account OAuth v4. */
+  ZALO_OA_APP_ID?: string;
+  /** Zalo app secret sent as the OAuth `secret_key` header. It is not the webhook secret. */
+  ZALO_OA_APP_SECRET?: string;
+  /** OA secret key that signs webhook bodies. Zalo uses a different key than the app secret. */
+  ZALO_OA_WEBHOOK_SECRET?: string;
+  /** Base64 AES-256 key that encrypts OA access and refresh tokens at rest. */
+  ZALO_OA_TOKEN_KEY?: string;
   /** Public base URL of the CRM used in links sent outside the web app; defaults to the request origin. */
   APP_URL?: string;
 }

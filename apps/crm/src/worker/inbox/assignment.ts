@@ -90,7 +90,10 @@ export async function pickRoundRobin(db: D1Database, organizationId: string, now
  * Sets the assignee when it still is `expectedAssignee` (compare-and-set), then records the audit row and
  * queues the Lark notices. False when someone else changed the assignee meanwhile.
  */
-async function applyAssignment(db: D1Database, actor: Actor | null, conv: ConversationRef, assignee: Assignee, via: 'manual' | 'round_robin', appBase: string, now: string) {
+async function applyAssignment(
+  db: D1Database, actor: Actor | null, conv: ConversationRef, assignee: Assignee,
+  via: 'manual' | 'round_robin', appBase: string, now: string, options?: { skipPrivateNotice?: boolean },
+) {
   const updated = await db.prepare(`UPDATE conversation SET assignee_user_id = ?, assigned_at = ?, updated_at = ?
     WHERE id = ? AND assignee_user_id IS ?`).bind(assignee.id, now, now, conv.id, conv.assignee_user_id).run();
   if (updated.meta.changes !== 1) return false;
@@ -99,10 +102,30 @@ async function applyAssignment(db: D1Database, actor: Actor | null, conv: Conver
     conv.id, JSON.stringify({ assigneeUserId: conv.assignee_user_id }), JSON.stringify({ assigneeUserId: assignee.id, via }), now).run();
   const text = `Giao ${conv.display_name ?? conv.external_thread_id} cho ${assignee.displayName} – ${appBase}/inbox/${conv.id}`;
   await enqueueCommand(db, { kind: 'send_lark', target: 'worker', conversationId: conv.id, payload: { text } });
-  if (assignee.larkOpenId) {
+  if (assignee.larkOpenId && !options?.skipPrivateNotice) {
     await enqueueCommand(db, { kind: 'send_lark', target: 'worker', conversationId: conv.id, payload: { text, openId: assignee.larkOpenId } });
   }
   return true;
+}
+
+/**
+ * Ensures the conversation is assigned to the newly created lead's owner, recording the standard assignment
+ * audit and group Lark notice while leaving the private Lark notice to the caller (which sends the lead code).
+ */
+export async function assignConversationToLeadOwner(
+  db: D1Database, actor: Actor, conversationId: string, ownerUserId: string, appBase = '',
+): Promise<Assignee | null> {
+  const conv = await loadConversationRef(db, conversationId);
+  if (!conv || conv.organization_id !== actor.organizationId) return null;
+  const row = await db.prepare(`SELECT id, display_name, lark_open_id FROM app_user
+    WHERE id = ? AND organization_id = ? AND status = 'active' AND role IN (${ASSIGNABLE_ROLES.map(() => '?').join(', ')})`)
+    .bind(ownerUserId, actor.organizationId, ...ASSIGNABLE_ROLES).first<AssigneeRow>();
+  if (!row) return null;
+  const assignee = toAssignee(row);
+  if (conv.assignee_user_id !== assignee.id) {
+    await applyAssignment(db, actor, conv, assignee, 'manual', appBase, new Date().toISOString(), { skipPrivateNotice: true });
+  }
+  return assignee;
 }
 
 /** Base URL for links in Lark notices: APP_URL, else the request origin, without a trailing slash. */

@@ -5,6 +5,7 @@ import { adminRoutes } from './admin-routes';
 import { notifyCommitted } from './approval-notify';
 import { bridgeRoutes } from './inbox/bridge-routes';
 import { facebookWebhookRoutes } from './inbox/facebook-webhook';
+import { zaloOaRoutes } from './inbox/zalo-oa-webhook';
 import { inboxRoutes } from './inbox/inbox-routes';
 import { runScheduled } from './inbox/scheduled';
 import { mcpRoutes } from './mcp-routes';
@@ -43,6 +44,8 @@ app.route('/mcp', mcpRoutes);
 app.route('/bridge', bridgeRoutes);
 // Meta signs Messenger webhooks with the app secret, so they are mounted before the browser origin and session checks.
 app.route('/channels/facebook', facebookWebhookRoutes);
+// Zalo signs OA webhooks with the OA secret and redirects OAuth here, so both are mounted before the session checks.
+app.route('/channels/zalo-oa', zaloOaRoutes);
 app.use('*', originGuard);
 app.route('/auth', publicAuth);
 

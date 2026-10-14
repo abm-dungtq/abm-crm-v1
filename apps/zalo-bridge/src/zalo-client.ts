@@ -9,18 +9,27 @@
  *   api.getOwnId()                                    Zalo uid of the logged-in number
  *   api.listener.on('message', m)                     m.type ThreadType.User | Group, m.threadId, m.isSelf,
  *                                                     m.data.msgId / content (string or object) / uidFrom / dName / ts
+ *                                                     group only: m.data.mentions?: { uid, pos, len, type }[] (type 1 or uid "-1" is @all)
+ *                                                     m.data.quote?: { ownerId, cliMsgId, globalMsgId, ... }
  *   api.listener.on('closed', (code, reason))         after zca-js gave up retrying; CloseReason 3000 = duplicate
  *                                                     web session, 3003 = kicked
  *   api.listener.start({ retryOnClose: true }) / stop()
- *   api.sendMessage({ msg }, threadId, ThreadType)    -> { message: { msgId: number } | null, attachment: [...] }
+ *   api.sendMessage({ msg, mentions?, quote? }, id, ThreadType)
+ *                                                     quote copies content, msgType, propertyExt, uidFrom, msgId, cliMsgId, ts, ttl
+ *                                                     -> { message: { msgId: number } | null, attachment: [...] }
  *   api.getAllGroups()                                -> { gridVerMap: { [groupId]: version } }
- *   api.getGroupInfo(ids)                             -> { gridInfoMap: { [groupId]: { name, ... } } }
+ *   api.getGroupInfo(ids)                             -> { gridInfoMap: { [groupId]: { name, memVerList, currentMems, ... } } }
+ *   api.getGroupMembersInfo(ids)                      -> { profiles: { [id]: { displayName, zaloName, ... } } }
  *   api.getUserInfo(userId)                           -> { changed_profiles: { [userId | userId_0]: User } }
  *                                                     User.displayName, else User.zaloName; Gender.Male = 0, Gender.Female = 1
  */
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { CloseReason, Gender, LoginQRCallbackEventType, ThreadType, Zalo, type API, type Credentials, type Message, type UserInfoResponse } from 'zca-js';
+import {
+  CloseReason, Gender, LoginQRCallbackEventType, ThreadType, Zalo,
+  type API, type Credentials, type GroupMemberProfile, type Message, type MessageContent,
+  type SendMessageQuote, type TMessage, type UserInfoResponse,
+} from 'zca-js';
 import { z } from 'zod';
 import { CodedError } from './config';
 
@@ -39,6 +48,17 @@ export interface IncomingMessage {
   attachments: ZaloAttachment[];
   /** ISO 8601 instant. */
   sentAt: string;
+  /** True when a group message @-mentions this account. Always false for a direct message and for @all. */
+  mentionsSelf: boolean;
+  /** True when a group message quotes a message this account sent. Always false for a direct message. */
+  quotesSelf: boolean;
+}
+
+/** The group message a reply should quote, and the member it should tag. */
+export interface ZaloSendReply {
+  msgId: string;
+  senderId: string;
+  senderName: string;
 }
 
 export interface ZaloGroup { threadId: string; name: string }
@@ -62,10 +82,12 @@ export interface QrCode {
 export interface ZaloSession {
   /** Zalo uid of the logged-in number. */
   readonly ownId: string;
-  send(threadId: string, threadKind: ThreadKind, text: string): Promise<{ msgId: string }>;
+  send(threadId: string, threadKind: ThreadKind, text: string, reply?: ZaloSendReply): Promise<{ msgId: string }>;
   /** Profile of one Zalo user. Null when `changed_profiles` has no entry for that id. */
   getUserProfile(userId: string): Promise<ZaloUserProfile | null>;
   listGroups(): Promise<ZaloGroup[]>;
+  /** Members of one group: Zalo uid and display name. */
+  listGroupMembers(groupId: string): Promise<{ id: string; name: string }[]>;
   onMessage(cb: (message: IncomingMessage) => void): void;
   /** Called once when the connection ends for good; not called after close(). */
   onClose(cb: (close: SessionClose) => void): void;
@@ -85,8 +107,12 @@ export interface ZaloConnector {
  */
 const MAX_QR_CODES = 4;
 const GROUP_INFO_BATCH = 50;
+const MEMBER_INFO_BATCH = 50;
 const MAX_GROUPS = 1000;
+const MAX_GROUP_MEMBERS = 5000;
 const MAX_TEXT = 20_000;
+/** Recent incoming group messages kept so a reply can quote one of them. */
+const QUOTE_CACHE_MAX = 1000;
 
 const savedSessionSchema = z.object({
   version: z.literal(1),
@@ -118,7 +144,7 @@ function profileName(value: unknown): string {
   return clip(value.replace(/[\r\n[\]"]/g, ''), PROFILE_NAME_MAX).trim();
 }
 
-function suffixedProfile(profiles: Readonly<Record<string, RawChangedProfile>>, userId: string): RawChangedProfile | undefined {
+function suffixedProfile<T>(profiles: Readonly<Record<string, T>>, userId: string): T | undefined {
   const prefix = `${userId}_`;
   for (const [key, value] of Object.entries(profiles)) {
     if (key.startsWith(prefix)) return value;
@@ -152,8 +178,33 @@ function isHttpUrl(value: unknown): value is string {
   }
 }
 
+/** A mention-all entry (type 1, or uid "-1") does not address the bot. */
+function mentionsBot(message: Message, ownId: string): boolean {
+  if (message.type !== ThreadType.Group || !ownId) return false;
+  const mentions = message.data.mentions;
+  if (!mentions?.length) return false;
+  return mentions.some((entry) => entry.type !== 1 && String(entry.uid) !== '-1' && String(entry.uid) === ownId);
+}
+
+/** True only when a group message quotes a message this account sent. */
+function quotesBot(message: Message, ownId: string): boolean {
+  if (message.type !== ThreadType.Group || !ownId) return false;
+  return String(message.data.quote?.ownerId ?? '') === ownId;
+}
+
+/** memVerList entries look like "<uid>_<ver>". The uid is everything before the last underscore. */
+function memberIdFromVer(entry: string): string {
+  const cut = entry.lastIndexOf('_');
+  return cut >= 0 ? entry.slice(0, cut) : entry;
+}
+
+function memberDisplayName(profile: GroupMemberProfile | undefined): string {
+  const name = profile?.displayName || profile?.zaloName || '';
+  return clip(name, 200);
+}
+
 /** Maps a zca-js message to the bridge shape; null when it lacks the identifiers the Worker needs. */
-export function normalizeMessage(message: Message): IncomingMessage | null {
+export function normalizeMessage(message: Message, ownId: string): IncomingMessage | null {
   const data = message.data;
   const msgId = String(data.msgId ?? '');
   const threadId = String(message.threadId ?? '');
@@ -179,6 +230,8 @@ export function normalizeMessage(message: Message): IncomingMessage | null {
     text,
     attachments,
     sentAt: new Date(Number.isFinite(ts) && ts > 0 ? ts : Date.now()).toISOString(),
+    mentionsSelf: mentionsBot(message, ownId),
+    quotesSelf: quotesBot(message, ownId),
   };
 }
 
@@ -192,6 +245,8 @@ class ZcaSession implements ZaloSession {
   readonly ownId: string;
   private readonly messageCallbacks: ((message: IncomingMessage) => void)[] = [];
   private readonly closeCallbacks: ((close: SessionClose) => void)[] = [];
+  /** Incoming group messages, oldest first, keyed by msgId. */
+  private readonly groupQuotes = new Map<string, TMessage>();
   private stopped = false;
 
   constructor(private readonly api: API) {
@@ -199,7 +254,8 @@ class ZcaSession implements ZaloSession {
     if (!this.ownId) throw new CodedError('ZALO_NO_OWN_ID');
     const listener = api.listener;
     listener.on('message', (raw) => {
-      const message = normalizeMessage(raw);
+      this.rememberGroupQuote(raw);
+      const message = normalizeMessage(raw, this.ownId);
       if (!message) return;
       for (const cb of this.messageCallbacks) cb(message);
     });
@@ -214,11 +270,57 @@ class ZcaSession implements ZaloSession {
     listener.start({ retryOnClose: true });
   }
 
-  async send(threadId: string, threadKind: ThreadKind, text: string) {
-    const result = await this.api.sendMessage({ msg: text }, threadId, threadKind === 'group' ? ThreadType.Group : ThreadType.User);
+  async send(threadId: string, threadKind: ThreadKind, text: string, reply?: ZaloSendReply) {
+    const result = await this.api.sendMessage(
+      this.outgoing(threadKind, text, reply),
+      threadId,
+      threadKind === 'group' ? ThreadType.Group : ThreadType.User,
+    );
     const msgId = result.message?.msgId;
     if (msgId === undefined || msgId === null) throw new CodedError('ZALO_SEND_NO_MSG_ID');
     return { msgId: String(msgId) };
+  }
+
+  /** A direct thread, or a send with no reply, goes out as plain text. A missing cached message is not an error. */
+  private outgoing(threadKind: ThreadKind, text: string, reply?: ZaloSendReply): MessageContent {
+    if (!reply || threadKind !== 'group') return { msg: text };
+    const quote = this.quoteFor(reply.msgId);
+    if (!reply.senderName.trim()) return quote ? { msg: text, quote } : { msg: text };
+    const content: MessageContent = {
+      msg: `@${reply.senderName} ${text}`,
+      mentions: [{ pos: 0, uid: reply.senderId, len: reply.senderName.length + 1 }],
+    };
+    if (quote) content.quote = quote;
+    return content;
+  }
+
+  private rememberGroupQuote(message: Message) {
+    if (message.type !== ThreadType.Group) return;
+    const msgId = String(message.data.msgId ?? '');
+    if (!msgId) return;
+    this.groupQuotes.delete(msgId);
+    this.groupQuotes.set(msgId, message.data);
+    while (this.groupQuotes.size > QUOTE_CACHE_MAX) {
+      const oldest = this.groupQuotes.keys().next().value;
+      if (oldest === undefined) break;
+      this.groupQuotes.delete(oldest);
+    }
+  }
+
+  /** Copies exactly the fields SendMessageQuote requires from a cached raw message. */
+  private quoteFor(msgId: string): SendMessageQuote | undefined {
+    const raw = this.groupQuotes.get(msgId);
+    if (!raw) return undefined;
+    return {
+      content: raw.content,
+      msgType: raw.msgType,
+      propertyExt: raw.propertyExt,
+      uidFrom: raw.uidFrom,
+      msgId: raw.msgId,
+      cliMsgId: raw.cliMsgId,
+      ts: raw.ts,
+      ttl: raw.ttl,
+    };
   }
 
   async getUserProfile(userId: string): Promise<ZaloUserProfile | null> {
@@ -238,6 +340,25 @@ class ZcaSession implements ZaloSession {
       }
     }
     return groups;
+  }
+
+  async listGroupMembers(groupId: string): Promise<{ id: string; name: string }[]> {
+    const info = await this.api.getGroupInfo(groupId);
+    const group = info.gridInfoMap?.[groupId];
+    const fromVer = (group?.memVerList ?? []).map(memberIdFromVer).filter((id) => id.length > 0);
+    const ids = (fromVer.length ? fromVer : (group?.currentMems ?? []).map((member) => member.id).filter((id) => id.length > 0))
+      .slice(0, MAX_GROUP_MEMBERS);
+    const members: { id: string; name: string }[] = [];
+    for (let i = 0; i < ids.length; i += MEMBER_INFO_BATCH) {
+      const batch = ids.slice(i, i + MEMBER_INFO_BATCH);
+      const result = await this.api.getGroupMembersInfo(batch);
+      const profiles = result.profiles ?? {};
+      // zca-js asks for `${id}_0`, so the map may be keyed by either form, as with getUserInfo.
+      for (const id of batch) {
+        members.push({ id, name: memberDisplayName(profiles[id] ?? profiles[`${id}_0`] ?? suffixedProfile(profiles, id)) });
+      }
+    }
+    return members;
   }
 
   onMessage(cb: (message: IncomingMessage) => void) {
@@ -270,6 +391,11 @@ class ZcaSession implements ZaloSession {
 
 const newZalo = () => new Zalo({ selfListen: true, logging: false });
 
+/** Wraps a logged-in zca-js API. Both login paths return this. */
+export function openZcaSession(api: API): ZaloSession {
+  return new ZcaSession(api);
+}
+
 /** Logs in by QR code. Offers up to four codes; a declined or unscanned login rejects with QR_DECLINED / QR_EXPIRED. */
 export async function loginWithQr(onQr: (qr: QrCode) => void): Promise<ZaloSession> {
   let codes = 0;
@@ -292,7 +418,7 @@ export async function loginWithQr(onQr: (qr: QrCode) => void): Promise<ZaloSessi
           return;
       }
     });
-    return new ZcaSession(api);
+    return openZcaSession(api);
   } catch (error) {
     if (failure) throw new CodedError(failure);
     if (error instanceof CodedError) throw error;
@@ -325,7 +451,7 @@ export async function loginWithSaved(file: string): Promise<ZaloSession> {
   } catch {
     throw new CodedError('ZALO_LOGIN_FAILED');
   }
-  return new ZcaSession(api);
+  return openZcaSession(api);
 }
 
 export const zcaConnector: ZaloConnector = { loginWithQr, loginWithSaved };

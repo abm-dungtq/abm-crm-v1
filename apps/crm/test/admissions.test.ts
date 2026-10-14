@@ -51,7 +51,7 @@ async function makeContract(status = 'active') {
   return r.json.data as { id: string; version: number };
 }
 
-/** Walks a lead to the point where it may be won: contacted, need confirmed, trial skipped. */
+/** Walks a lead to the point where it may be won: contacted, need confirmed, trial skipped, program set. */
 async function readyToWin(user: string, leadId: string) {
   for (const stepCode of ['contacted', 'need_confirmed']) {
     const r = await command(user, 'markJourneyStep', { leadId, expectedVersion: await leadVersion(leadId), stepCode });
@@ -59,6 +59,9 @@ async function readyToWin(user: string, leadId: string) {
   }
   const skipped = await command(user, 'skipTrial', { leadId, expectedVersion: await leadVersion(leadId), reason: 'Khách đã biết trung tâm' });
   expect(skipped.status, JSON.stringify(skipped.json)).toBe(200);
+  const productId = await makeProduct();
+  const prog = await command(user, 'setLeadProgram', { leadId, expectedVersion: await leadVersion(leadId), productId });
+  expect(prog.status, JSON.stringify(prog.json)).toBe(200);
 }
 
 beforeEach(() => resetDb(db, seedSql));
@@ -99,13 +102,24 @@ describe('creating a learner lead', () => {
     expect(await count("SELECT COUNT(*) AS n FROM lead WHERE pipeline = 'learner'")).toBe(1);
   });
 
-  test('the holder adding a lead for the same phone reuses the customer and keeps the hold', async () => {
+  test('the holder is blocked from opening a second active learner lead, and reuses the customer after closing the first', async () => {
     const first = await seedCustomer('u-lan');
     const before = await db.prepare('SELECT hold_expires_at FROM contact WHERE id = ?').bind(first.contactId).first<{ hold_expires_at: string }>();
+    const activeDup = await newLead('u-lan', { phone: '+84 912 345 678', needSummary: 'Học thêm TOEIC' });
+    expect(activeDup.status).toBe(409);
+    expect(activeDup.json.error?.code).toBe('DUPLICATE_SUSPECTED');
+    expect(activeDup.json.error?.message).toContain('Khách đã có lead học viên đang mở');
+
+    const closed = await command('u-lan', 'closeLearnerLead', {
+      leadId: first.leadId, expectedVersion: await leadVersion(first.leadId), outcome: 'lost', reason: 'price',
+    });
+    expect(closed.status, JSON.stringify(closed.json)).toBe(200);
+
     const second = await newLead('u-lan', { phone: '+84 912 345 678', needSummary: 'Học thêm TOEIC' });
     expect(second.status, JSON.stringify(second.json)).toBe(200);
     expect(second.json.data.contactId).toBe(first.contactId);
     expect(await count("SELECT COUNT(*) AS n FROM lead WHERE contact_id = ? AND pipeline = 'learner'", first.contactId)).toBe(2);
+    expect(await count("SELECT COUNT(*) AS n FROM lead WHERE contact_id = ? AND pipeline = 'learner' AND status = 'active'", first.contactId)).toBe(1);
     expect((await db.prepare('SELECT hold_expires_at FROM contact WHERE id = ?').bind(first.contactId).first<{ hold_expires_at: string }>())!.hold_expires_at)
       .toBe(before!.hold_expires_at);
   });
@@ -138,6 +152,44 @@ describe('creating a learner lead', () => {
     expect(ok.status).toBe(200);
     expect(await count('SELECT COUNT(*) AS n FROM customer_product WHERE contact_id = ? AND detached_at IS NULL', ok.json.data.contactId)).toBe(1);
   });
+
+  test('stores productId and courseId on lead creation and updates them with setLeadProgram', async () => {
+    const productA = await makeProduct('Khóa AI 199K');
+    const productB = await makeProduct('Khóa AI Chuyên sâu');
+    const offProduct = await makeProduct('Khóa Ngừng bán', false);
+    const courseA = (await command('u-admin', 'upsertCourse', { productId: productA, name: 'AI Cơ bản K1', status: 'active' })).json.data.id as string;
+    const courseB = (await command('u-admin', 'upsertCourse', { productId: productB, name: 'AI Chuyên sâu K1', status: 'active' })).json.data.id as string;
+
+    expect((await newLead('u-lan', { productId: offProduct })).status).toBe(422);
+    expect((await newLead('u-lan', { productId: productA, courseId: courseB })).status).toBe(422);
+
+    const created = await newLead('u-lan', { productId: productA, courseId: courseA });
+    expect(created.status, JSON.stringify(created.json)).toBe(200);
+    const { leadId, contactId } = created.json.data as { leadId: string; contactId: string };
+    expect(await db.prepare('SELECT product_id, course_id FROM lead WHERE id = ?').bind(leadId).first())
+      .toEqual({ product_id: productA, course_id: courseA });
+
+    const learnerDetail = (await get('u-lan', `/learners/${contactId}`)).json.data;
+    expect(learnerDetail.leads[0]).toMatchObject({
+      id: leadId, productId: productA, productName: 'Khóa AI 199K', courseId: courseA, courseName: 'AI Cơ bản K1',
+    });
+    expect((await get('u-lan', '/learners')).json.data.items[0]).toMatchObject({
+      contactId, productId: productA, productName: 'Khóa AI 199K', courseId: courseA, courseName: 'AI Cơ bản K1', course: 'AI Cơ bản K1',
+    });
+
+    const badUpdate = await command('u-lan', 'setLeadProgram', {
+      leadId, expectedVersion: await leadVersion(leadId), productId: productB, courseId: courseA,
+    });
+    expect(badUpdate.status).toBe(422);
+
+    const updated = await command('u-lan', 'setLeadProgram', {
+      leadId, expectedVersion: await leadVersion(leadId), productId: productB, courseId: courseB,
+    });
+    expect(updated.status, JSON.stringify(updated.json)).toBe(200);
+    expect(await db.prepare('SELECT product_id, course_id FROM lead WHERE id = ?').bind(leadId).first())
+      .toEqual({ product_id: productB, course_id: courseB });
+    expect(await count("SELECT COUNT(*) AS n FROM audit_log WHERE entity = 'lead' AND entity_id = ? AND command = 'setLeadProgram'", leadId)).toBe(1);
+  });
 });
 
 describe('journey', () => {
@@ -168,7 +220,7 @@ describe('journey', () => {
     expect((await command('u-hung', 'markJourneyStep', { leadId, expectedVersion: 1, stepCode: 'contacted' })).status).toBe(200);
   });
 
-  test('winning needs the trial done or skipped; then the lead is won and enrolled', async () => {
+  test('winning needs the trial done or skipped and a program selected; then the lead is won and enrolled', async () => {
     const { leadId } = await seedCustomer();
     for (const stepCode of ['contacted', 'need_confirmed']) {
       await command('u-lan', 'markJourneyStep', { leadId, expectedVersion: await leadVersion(leadId), stepCode });
@@ -177,6 +229,15 @@ describe('journey', () => {
     expect(blocked.status).toBe(422);
     expect(blocked.json.error?.message).toContain('Học thử');
     await command('u-lan', 'skipTrial', { leadId, expectedVersion: await leadVersion(leadId), reason: 'Khách đã biết trung tâm' });
+
+    const missingProgram = await command('u-lan', 'winLearnerLead', { leadId, expectedVersion: await leadVersion(leadId) });
+    expect(missingProgram.status).toBe(422);
+    expect(missingProgram.json.error?.message).toContain('chương trình học');
+
+    const productId = await makeProduct();
+    const setProg = await command('u-lan', 'setLeadProgram', { leadId, expectedVersion: await leadVersion(leadId), productId });
+    expect(setProg.status, JSON.stringify(setProg.json)).toBe(200);
+
     const won = await command('u-lan', 'winLearnerLead', { leadId, expectedVersion: await leadVersion(leadId), note: 'Đã đóng cọc' });
     expect(won.status, JSON.stringify(won.json)).toBe(200);
     expect(await db.prepare('SELECT stage, status, next_action_task_id FROM lead WHERE id = ?').bind(leadId).first())

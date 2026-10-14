@@ -6,6 +6,7 @@ import { runDueSchedules } from './group-schedules';
 import { enqueueDailyGroupSummaries } from './group-summaries';
 import { extractIdleConversations } from './intake';
 import { processWorkerCommands } from './worker-commands';
+import { refreshZaloOaTokens } from './zalo-oa-oauth';
 
 /** Cron Trigger work. Every task logs and continues on failure, so the scheduled handler never throws. */
 
@@ -14,7 +15,7 @@ export const EVERY_MINUTE_CRON = '* * * * *';
 export const DAILY_SUMMARY_CRON = '0 14 * * *';
 const SLA_BATCH = 50;
 
-type ScheduledEnv = Pick<Env, 'DB' | 'LARK_APP_ID' | 'LARK_APP_SECRET' | 'LARK_INBOX_CHAT_ID' | 'APP_URL'>;
+type ScheduledEnv = Pick<Env, 'DB' | 'LARK_APP_ID' | 'LARK_APP_SECRET' | 'LARK_INBOX_CHAT_ID' | 'APP_URL' | 'ZALO_OA_APP_ID' | 'ZALO_OA_APP_SECRET' | 'ZALO_OA_TOKEN_KEY'>;
 
 interface OverdueRow {
   id: string;
@@ -124,6 +125,9 @@ export async function runScheduled(env: ScheduledEnv, cron: string, now = new Da
   // Before the Worker's commands, so the Lark notice of a handoff goes out in the same minute.
   await step('stale_replies', () => abandonStaleReplies(env.DB, env, now));
   await step('offline_session_commands', () => failOfflineSessionCommands(env.DB, now));
+  if (now.getUTCMinutes() % 10 === 0) {
+    await step('zalo_oa_refresh', () => refreshZaloOaTokens(env.DB, env, now));
+  }
   await step('worker_commands', () => processWorkerCommands(env));
   await step('sla', () => checkSla(env.DB, now, env.APP_URL));
   await step('stuck_outgoing', () => sweepStuckOutgoing(env.DB, now));

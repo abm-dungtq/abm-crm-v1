@@ -331,6 +331,10 @@ export interface ChannelAccount {
   lastSeenAt: string | null;
   /** Error code the bridge last reported while the account is in error; only Admin receives it. */
   lastError: string | null;
+  /** Zalo OA only. When on, the bot may confirm a valid 199k receipt. */
+  registrationPolicy: boolean;
+  /** Exact https://zalo.me/g/... link. Required while registrationPolicy is on. */
+  registrationGroupUrl: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -347,6 +351,11 @@ export interface ChannelAccountUpdate {
   quietStart?: string | null;
   quietEnd?: string | null;
   agentKey?: string;
+}
+/** PUT /inbox/accounts/:id/registration-policy. An empty link is sent as null. */
+export interface RegistrationPolicyUpdate {
+  enabled: boolean;
+  groupUrl?: string | null;
 }
 
 /** `enabled` true means the customer-facing bot is switched OFF everywhere. */
@@ -414,10 +423,28 @@ export interface ZaloGroup {
   displayName: string | null;
   summaryEnabled: boolean;
   scheduledOptOut: boolean;
+  botReplyEnabled: boolean;
+  /** Null uses the default learner-care agent. */
+  agentKey: string | null;
+  /** ISO time until which Long stays quiet after someone typed on the bot account. */
+  botPausedUntil: string | null;
   lastMessageAt: string | null;
   activeSchedules: number;
 }
-export interface ZaloGroupUpdate { summaryEnabled?: boolean; scheduledOptOut?: boolean }
+export interface ZaloGroupUpdate {
+  summaryEnabled?: boolean;
+  scheduledOptOut?: boolean;
+  botReplyEnabled?: boolean;
+  /** Null clears a custom agent so the group uses the default. */
+  agentKey?: string | null;
+}
+/** One Zalo account in a group. `isStaff` applies to every group of that channel account. */
+export interface ZaloGroupMember {
+  externalUserId: string;
+  displayName: string | null;
+  isStaff: boolean;
+  updatedAt: string;
+}
 
 export type GroupScheduleStatus = 'draft' | 'pending_approval' | 'active' | 'paused';
 export type ScheduleSkipReason = 'feature_off' | 'bot_switch_on' | 'account_unavailable' | 'group_opted_out' | 'quiet_hours' | 'daily_cap';

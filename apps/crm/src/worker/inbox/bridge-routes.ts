@@ -4,7 +4,10 @@ import { bridgeCommandResultSchema, bridgeEventsBodySchema } from '@abm/contract
 import type { z } from 'zod';
 import { background } from '../env';
 import { bridgeAuth, type BridgeBindings } from './bridge-auth';
-import { BOT_OFF, BOT_SEND_BLOCKED_SQL, applyCompletionResult, handOffSilentBot, markMessageSent } from './conversation-flow';
+import {
+  BOT_OFF, BOT_SEND_BLOCKED_SQL, BOT_SILENT_REASON, applyCompletionResult, asCompletionPayload, handOffSilentBot,
+  markMessageSent, notifyGroupHelp,
+} from './conversation-flow';
 import { MAX_COMMAND_ATTEMPTS, claimCommands, completeCommand, dropBotSend, failCommand, type ClaimedCommand } from './dispatcher';
 import { applyGroupSummaryResult } from './group-summaries';
 import { ingestEvents } from './ingest';
@@ -149,12 +152,18 @@ bridgeRoutes.post('/commands/:id/result', async (c) => {
   const command = { id: row.id, kind: row.kind, payload: JSON.parse(row.payload_json) as unknown };
   const result = input.data;
 
+  const payload = asCompletionPayload(command.payload);
   const purpose = row.kind === 'run_completion' ? (command.payload as { purpose?: unknown } | null)?.purpose : undefined;
   if (!result.ok) {
     const moved = await failSend(db, command, result.attempts, result.error || 'BRIDGE_ERROR');
-    // The bot's reply failed for good: the customer would wait forever, so people take over.
+    // The bot's reply failed for good. A direct chat is handed to people; a group only notifies Lark.
     if (moved && result.attempts >= MAX_COMMAND_ATTEMPTS && purpose === 'reply' && row.conversation_id) {
-      const outcome = await handOffSilentBot(db, c.env, row.conversation_id, new URL(c.req.url).origin);
+      const kind = await db.prepare('SELECT kind FROM conversation WHERE id = ?').bind(row.conversation_id).first<{ kind: string }>();
+      const origin = new URL(c.req.url).origin;
+      const outcome = kind?.kind === 'group'
+        ? await notifyGroupHelp(db, c.env, row.conversation_id, BOT_SILENT_REASON, payload.triggerMessageId, origin,
+            { commandId: row.id, replyTo: payload.replyTo })
+        : await handOffSilentBot(db, c.env, row.conversation_id, origin);
       if (outcome.workerCommandQueued) await background(c, processWorkerCommands(c.env));
     }
     return c.json(ok({ ignored: !moved }));
@@ -175,7 +184,8 @@ bridgeRoutes.post('/commands/:id/result', async (c) => {
   if (!completed) return c.json(ok({ ignored: true }));
 
   if (row.kind === 'run_completion' && row.conversation_id) {
-    const outcome = await applyCompletionResult(db, c.env, row.conversation_id, result.text ?? '', new URL(c.req.url).origin);
+    const outcome = await applyCompletionResult(db, c.env, row.conversation_id, result.text ?? '', new URL(c.req.url).origin,
+      { ...payload, commandId: row.id });
     if (outcome.workerCommandQueued) await background(c, processWorkerCommands(c.env));
   } else if (SEND_KINDS.has(row.kind)) {
     const messageId = (command.payload as { messageId?: unknown } | null)?.messageId;

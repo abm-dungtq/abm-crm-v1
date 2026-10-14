@@ -1,9 +1,10 @@
-import { normalizeEmail, normalizePhone, type ApiResult } from '@abm/contracts';
+import { foldText, normalizeEmail, normalizePhone, type ApiResult } from '@abm/contracts';
 import { z } from 'zod';
 import { fail, ok } from '../command-result';
 import { runCommand } from '../commands';
 import type { Actor } from '../env';
 import { customerScope } from '../scope';
+import { assignConversationToLeadOwner } from './assignment';
 import { completeCommand, enqueueCommand, failCommand } from './dispatcher';
 
 /**
@@ -24,14 +25,29 @@ const EXTRACT_SCAN_BATCH = 50;
 const LINE_MAX_CHARS = 1000;
 const MERGE_TRIES = 3;
 
-export const INTAKE_FIELDS = ['name', 'phone', 'email', 'need', 'interest', 'note'] as const;
+export const INTAKE_FIELDS = ['name', 'phone', 'email', 'program', 'need', 'interest', 'note'] as const;
 export type IntakeField = (typeof INTAKE_FIELDS)[number];
 export type IntakeValues = Partial<Record<IntakeField, string>>;
-/** Shape of `lead_intake.fields_json`: current values, plus differing values awaiting staff confirmation. */
-export type IntakeFields = IntakeValues & { proposed?: IntakeValues };
+/** Shape of `lead_intake.fields_json`: current values, suggested productId, plus differing values awaiting staff confirmation. */
+export type IntakeFields = IntakeValues & { productId?: string; proposed?: IntakeValues };
 
 const EXTRACT_INSTRUCTION = 'Trích thông tin khách hàng từ hội thoại dưới đây. Chỉ trả về một JSON object với các khoá '
-  + 'name, phone, email, need, interest, note; bỏ khoá không có thông tin; không thêm chữ ngoài JSON; chỉ lấy thông tin do khách nói.';
+  + 'name, phone, email, program, need, interest, note; bỏ khoá không có thông tin; không thêm chữ ngoài JSON; chỉ lấy thông tin do khách nói. '
+  + 'Chỉ lấy họ tên thật khách tự giới thiệu; không lấy đại từ xưng hô (anh, chị, em, cô, chú, bác, sếp, bạn…) hay biệt danh; '
+  + 'khoá program ghi tên chương trình/khóa học hoặc mức phí khách nói đã đóng (ví dụ "199k").';
+
+const HONORIFIC_PREFIXES = new Set(['anh', 'chi', 'em', 'co', 'chu', 'bac', 'sep', 'ban', 'thay']);
+const SINGLE_PRONOUNS = new Set(['minh', 'toi', 'to', 'da', 'vang', 'ad', 'admin', 'shop', 'khach']);
+
+/** Rejects bare pronouns or an honorific followed by at most one word (e.g. "Chị", "Sếp Tú", "anh Long"). */
+export function isValidCustomerName(name: string): boolean {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return false;
+  const first = foldText(words[0]!);
+  if (words.length === 1 && (HONORIFIC_PREFIXES.has(first) || SINGLE_PRONOUNS.has(first))) return false;
+  if (words.length === 2 && HONORIFIC_PREFIXES.has(first)) return false;
+  return true;
+}
 
 /** A missing, null or blank value means the agent found nothing for that key. */
 const optionalText = (schema: z.ZodString) => z.preprocess(
@@ -43,6 +59,7 @@ const extractedSchema = z.object({
   name: optionalText(z.string().trim().max(120)),
   phone: optionalText(z.string().trim().max(20).refine((v) => v.replace(/\D/g, '').length >= 9, 'Số điện thoại cần ít nhất 9 chữ số')),
   email: optionalText(z.string().trim().email().max(160)),
+  program: optionalText(z.string().trim().max(200)),
   need: optionalText(z.string().trim().max(1000)),
   interest: optionalText(z.string().trim().max(1000)),
   note: optionalText(z.string().trim().max(1000)),
@@ -64,9 +81,55 @@ export function parseExtraction(text: string): IntakeValues | null {
   const values: IntakeValues = {};
   for (const field of INTAKE_FIELDS) {
     const value = parsed.data[field];
-    if (value) values[field] = value;
+    if (!value) continue;
+    if (field === 'name' && !isValidCustomerName(value)) continue;
+    values[field] = value;
   }
   return values;
+}
+
+/** Extracts a VND price from a short phrase such as "199k", "199.000", or "1.5tr". */
+export function parsePriceVnd(text: string): number | null {
+  const normalized = foldText(text);
+  const kMatch = /(\d+(?:[.,]\d+)?)\s*(?:k|nghin|ngan)\b/.exec(normalized);
+  if (kMatch) {
+    const num = Number(kMatch[1]!.replace(',', '.'));
+    if (Number.isFinite(num) && num > 0) return Math.round(num * 1000);
+  }
+  const trMatch = /(\d+(?:[.,]\d+)?)\s*(?:tr|trieu)\b/.exec(normalized);
+  if (trMatch) {
+    const num = Number(trMatch[1]!.replace(',', '.'));
+    if (Number.isFinite(num) && num > 0) return Math.round(num * 1_000_000);
+  }
+  const digitsMatch = /\b(\d{1,3}(?:[.,]\d{3})+|\d{4,9})\s*(?:d|vnd)?\b/.exec(normalized);
+  if (digitsMatch) {
+    const num = Number(digitsMatch[1]!.replace(/[.,]/g, ''));
+    if (Number.isFinite(num) && num >= 1000) return num;
+  }
+  return null;
+}
+
+async function matchProgramProduct(db: D1Database, organizationId: string, programText: string): Promise<{ id: string; name: string } | null> {
+  const products = (await db.prepare('SELECT id, name, price_vnd FROM product WHERE organization_id = ? AND active = 1 ORDER BY created_at, id')
+    .bind(organizationId).all<{ id: string; name: string; price_vnd: number }>()).results;
+  if (!products.length) return null;
+  const price = parsePriceVnd(programText);
+  if (price !== null) {
+    const byPrice = products.find((p) => p.price_vnd === price);
+    if (byPrice) return { id: byPrice.id, name: byPrice.name };
+  }
+  const lower = programText.trim().toLowerCase();
+  const folded = foldText(programText);
+  const exact = products.find((p) => p.name.trim().toLowerCase() === lower || foldText(p.name) === folded);
+  if (exact) return { id: exact.id, name: exact.name };
+  if (folded.length >= 2) {
+    const partial = products.find((p) => {
+      const pf = foldText(p.name);
+      return pf.length >= 2 && (pf.includes(folded) || folded.includes(pf));
+    });
+    if (partial) return { id: partial.id, name: partial.name };
+  }
+  return null;
 }
 
 const sameValue = (field: IntakeField, a: string, b: string) => {
@@ -79,7 +142,7 @@ const sameValue = (field: IntakeField, a: string, b: string) => {
  * Rule for a new extraction: an empty field is filled, a different value is kept as a proposal for staff,
  * and the same value drops a stale proposal for that field.
  */
-export function mergeIntakeFields(current: IntakeFields, extracted: IntakeValues): IntakeFields {
+export function mergeIntakeFields(current: IntakeFields, extracted: IntakeValues & { productId?: string }): IntakeFields {
   const next: IntakeFields = { ...current, proposed: { ...current.proposed } };
   for (const field of INTAKE_FIELDS) {
     const value = extracted[field];
@@ -88,6 +151,9 @@ export function mergeIntakeFields(current: IntakeFields, extracted: IntakeValues
     if (!existing) next[field] = value;
     else if (sameValue(field, existing, value)) delete next.proposed![field];
     else next.proposed![field] = value;
+  }
+  if (extracted.productId && (!current.productId || next.program === extracted.program)) {
+    next.productId = extracted.productId;
   }
   if (!Object.keys(next.proposed!).length) delete next.proposed;
   return next;
@@ -174,22 +240,78 @@ export async function extractIdleConversations(db: D1Database, now = new Date())
 
 export interface ExtractionCommand { id: string; attempts: number; conversationId: string | null }
 
+const FIELD_LABELS: Record<IntakeField, string> = {
+  name: 'Tên',
+  phone: 'SĐT',
+  email: 'Email',
+  program: 'Chương trình',
+  need: 'Nhu cầu',
+  interest: 'Quan tâm',
+  note: 'Ghi chú',
+};
+
+const channelPointType = (channel: 'zalo' | 'facebook' | 'zalo_oa') =>
+  channel === 'facebook' ? 'fb_psid' : channel === 'zalo_oa' ? 'zalo_oa_uid' : 'zalo_uid';
+
 /**
  * Applies the extractor's answer for a claimed command. An answer that is not a valid JSON object fails the
  * command with EXTRACT_INVALID and writes nothing. A valid answer completes the command, then fills the
- * conversation's pending intake (creating it when the answer has any value). Returns false when the claim no
- * longer owns the command, so the result was dropped.
+ * conversation's pending intake (or logs an activity note on an existing open lead when the customer already
+ * has one). Returns false when the claim no longer owns the command, so the result was dropped.
  */
 export async function applyExtractionResult(db: D1Database, command: ExtractionCommand, text: string): Promise<boolean> {
   const extracted = parseExtraction(text);
   if (!extracted) return failCommand(db, command.id, command.attempts, 'EXTRACT_INVALID');
   const conv = command.conversationId
-    ? await db.prepare('SELECT id, organization_id, contact_id FROM conversation WHERE id = ?').bind(command.conversationId)
-      .first<{ id: string; organization_id: string; contact_id: string | null }>()
+    ? await db.prepare(`SELECT c.id, c.organization_id, c.contact_id, c.external_thread_id, a.channel
+        FROM conversation c JOIN channel_account a ON a.id = c.channel_account_id
+        WHERE c.id = ?`).bind(command.conversationId)
+      .first<{ id: string; organization_id: string; contact_id: string | null; external_thread_id: string; channel: 'zalo' | 'facebook' | 'zalo_oa' }>()
     : null;
   if (!conv) return failCommand(db, command.id, command.attempts, 'INVALID_PAYLOAD');
   if (!(await completeCommand(db, command.id, command.attempts, { fields: extracted }))) return false;
   if (!Object.keys(extracted).length) return true;
+
+  let contactId = conv.contact_id;
+  if (!contactId) {
+    const pointType = channelPointType(conv.channel);
+    const matchedContact = await db.prepare(`
+      SELECT c.id FROM contact_point cp JOIN contact c ON c.id = cp.contact_id
+      WHERE cp.type = ? AND cp.normalized_value = ? AND c.organization_id = ? AND c.archived_at IS NULL
+      ORDER BY c.updated_at DESC, cp.created_at DESC LIMIT 1
+    `).bind(pointType, conv.external_thread_id, conv.organization_id).first<{ id: string }>();
+    if (matchedContact) {
+      contactId = matchedContact.id;
+      const nowIso = new Date().toISOString();
+      await db.prepare('UPDATE conversation SET contact_id = ?, updated_at = ? WHERE id = ? AND contact_id IS NULL')
+        .bind(contactId, nowIso, conv.id).run();
+    }
+  }
+
+  if (contactId) {
+    const openLead = await db.prepare(`
+      SELECT id FROM lead
+      WHERE contact_id = ? AND organization_id = ? AND status IN ('queue', 'active')
+      ORDER BY created_at DESC, rowid DESC LIMIT 1
+    `).bind(contactId, conv.organization_id).first<{ id: string }>();
+    if (openLead) {
+      const parts = INTAKE_FIELDS.flatMap((f) => (extracted[f] ? [`${FIELD_LABELS[f]}: ${extracted[f]}`] : []));
+      if (parts.length) {
+        const nowIso = new Date().toISOString();
+        await db.batch([
+          db.prepare(`INSERT INTO activity (id, lead_id, type, summary, actor_user_id, actor_kind, occurred_at, created_at)
+            VALUES (?, ?, 'note', ?, NULL, 'system', ?, ?)`).bind(
+            crypto.randomUUID(), openLead.id, `Trích xuất tự động từ hội thoại: ${parts.join('; ')}`, nowIso, nowIso,
+          ),
+          db.prepare('UPDATE conversation SET last_extracted_at = ?, updated_at = ? WHERE id = ?').bind(nowIso, nowIso, conv.id),
+        ]);
+      }
+      return true;
+    }
+  }
+
+  const matchedProduct = extracted.program ? await matchProgramProduct(db, conv.organization_id, extracted.program) : null;
+  const extractedWithProduct: IntakeFields = matchedProduct ? { ...extracted, productId: matchedProduct.id } : extracted;
 
   // Compare-and-set on the row just read: a concurrent result is merged again on top of the newer row.
   for (let attempt = 0; attempt < MERGE_TRIES; attempt += 1) {
@@ -197,12 +319,13 @@ export async function applyExtractionResult(db: D1Database, command: ExtractionC
     const pending = await db.prepare(`SELECT id, fields_json FROM lead_intake WHERE conversation_id = ? AND status = 'pending'
       ORDER BY created_at LIMIT 1`).bind(conv.id).first<{ id: string; fields_json: string }>();
     const res = pending
-      ? await db.prepare(`UPDATE lead_intake SET fields_json = ?, updated_at = ? WHERE id = ? AND status = 'pending' AND fields_json = ?`)
-        .bind(JSON.stringify(mergeIntakeFields(readFields(pending.fields_json), extracted)), now, pending.id, pending.fields_json).run()
+      ? await db.prepare(`UPDATE lead_intake SET fields_json = ?, contact_id = COALESCE(contact_id, ?), updated_at = ?
+          WHERE id = ? AND status = 'pending' AND fields_json = ?`)
+        .bind(JSON.stringify(mergeIntakeFields(readFields(pending.fields_json), extractedWithProduct)), contactId, now, pending.id, pending.fields_json).run()
       : await db.prepare(`INSERT INTO lead_intake (id, organization_id, conversation_id, contact_id, fields_json, status, created_at, updated_at)
           SELECT ?, ?, ?, ?, ?, 'pending', ?, ?
           WHERE NOT EXISTS (SELECT 1 FROM lead_intake WHERE conversation_id = ? AND status = 'pending')`)
-        .bind(crypto.randomUUID(), conv.organization_id, conv.id, conv.contact_id, JSON.stringify(extracted), now, now, conv.id).run();
+        .bind(crypto.randomUUID(), conv.organization_id, conv.id, contactId, JSON.stringify(extractedWithProduct), now, now, conv.id).run();
     if (res.meta.changes === 1) return true;
   }
   console.error('extract_merge_contended', command.id);
@@ -214,9 +337,11 @@ export async function applyExtractionResult(db: D1Database, command: ExtractionC
 interface IntakeRow {
   id: string;
   conversation_id: string;
+  intake_contact_id: string | null;
+  conversation_contact_id: string | null;
   fields_json: string;
   status: 'pending' | 'classified' | 'discarded';
-  channel: 'zalo' | 'facebook';
+  channel: 'zalo' | 'facebook' | 'zalo_oa';
   external_thread_id: string;
 }
 
@@ -224,7 +349,8 @@ const intakeNotFound = () => fail('NOT_FOUND', 'Không tìm thấy lead chờ ph
 const notPending = () => fail('STALE_VERSION', 'Lead chờ phân loại đã được xử lý. Tải lại để xem bản mới nhất.');
 
 /** An intake of the actor's organization, with the channel and thread of its conversation. */
-const loadIntake = (db: D1Database, actor: Actor, intakeId: string) => db.prepare(`SELECT i.id, i.conversation_id, i.fields_json, i.status,
+const loadIntake = (db: D1Database, actor: Actor, intakeId: string) => db.prepare(`SELECT i.id, i.conversation_id,
+    i.contact_id AS intake_contact_id, c.contact_id AS conversation_contact_id, i.fields_json, i.status,
     a.channel, c.external_thread_id
   FROM lead_intake i JOIN conversation c ON c.id = i.conversation_id JOIN channel_account a ON a.id = c.channel_account_id
   WHERE i.id = ? AND i.organization_id = ?`).bind(intakeId, actor.organizationId).first<IntakeRow>();
@@ -247,14 +373,15 @@ function moveIntake(db: D1Database, actor: Actor, intakeId: string, status: 'cla
 }
 
 /**
- * Statements that link the conversation to a contact and add the channel contact point (Zalo user id or
- * Facebook page-scoped id) when the contact lacks it. Both run only while `guard` holds.
+ * Statements that link the conversation to a contact and add the channel contact point (Zalo user id,
+ * Zalo OA user id, or Facebook page-scoped id) when the contact lacks it. Both run only while `guard` holds.
  */
-function linkStatements(db: D1Database, intake: IntakeRow, contactId: string, now: string, guard: Guard) {
-  const type = intake.channel === 'facebook' ? 'fb_psid' : 'zalo_uid';
+function linkStatements(db: D1Database, intake: IntakeRow, contactId: string, now: string, guard: Guard, keepExistingConvContact = false) {
+  const type = channelPointType(intake.channel);
   const thread = intake.external_thread_id;
+  const setConvSql = keepExistingConvContact ? 'contact_id = COALESCE(contact_id, ?)' : 'contact_id = ?';
   return [
-    db.prepare(`UPDATE conversation SET contact_id = ?, updated_at = ? WHERE id = ? AND ${guard.sql}`)
+    db.prepare(`UPDATE conversation SET ${setConvSql}, updated_at = ? WHERE id = ? AND ${guard.sql}`)
       .bind(contactId, now, intake.conversation_id, ...guard.binds),
     db.prepare(`INSERT INTO contact_point (id, contact_id, type, value, normalized_value, created_at)
       SELECT ?, ?, ?, ?, ?, ?
@@ -268,33 +395,50 @@ export interface ClassifyRequest { pipeline: IntakePipeline; input: Record<strin
 
 /**
  * A staff member turns an intake into a real lead with the existing command: `createLead` for `b2b`,
- * `createLearnerLead` for `learner`, with `source` set to the conversation's channel. Every other field
+ * `createLearnerLead` for `learner`. `source` is the conversation's channel, except `zalo_oa`, which is
+ * stored as `zalo` because that is a lead source and `zalo_oa` is not. Every other field
  * comes from the staff form as sent, so `confirmNotDuplicate` is only ever the staff member's own choice,
  * and a command error (DUPLICATE_SUSPECTED, VALIDATION_FAILED, ...) is returned unchanged with the intake
  * still pending. On success the intake is classified, the conversation is linked to the lead's contact, the
- * channel contact point is added, and the last 20 messages are kept as a note on the lead.
+ * channel contact point is added, the last 20 messages are kept as a note on the lead, and the conversation
+ * is assigned to the lead's owner with a Lark notice.
  */
-export async function classifyIntake(db: D1Database, actor: Actor, intakeId: string, request: ClassifyRequest):
+export async function classifyIntake(db: D1Database, actor: Actor, intakeId: string, request: ClassifyRequest, appBase = ''):
   Promise<ApiResult<{ intakeId: string; leadId: string; contactId: string }>> {
   const intake = await loadIntake(db, actor, intakeId);
   if (!intake) return intakeNotFound();
   if (intake.status !== 'pending') return notPending();
   const name = request.pipeline === 'b2b' ? 'createLead' : 'createLearnerLead';
   // A retry with the same form replays the lead a failed earlier attempt already created instead of creating another.
-  const result = await runCommand(db, actor, name, { ...request.input, source: intake.channel }, `intake:${intake.id}`);
+  const source = intake.channel === 'zalo_oa' ? 'zalo' : intake.channel;
+  const existingContactId = intake.conversation_contact_id ?? intake.intake_contact_id ?? undefined;
+  const explicitContactId = typeof request.input.contactId === 'string' && request.input.contactId.trim() !== '';
+  const cmdInput = {
+    ...(existingContactId && !explicitContactId ? { contactId: existingContactId } : {}),
+    ...request.input,
+    source,
+  };
+  const result = await runCommand(db, actor, name, cmdInput, `intake:${intake.id}`);
   if (!result.ok) return result;
   const leadId = (result.data as { leadId?: unknown }).leadId;
   if (typeof leadId !== 'string') throw new Error(`${name} returned no lead id`);
-  const lead = await db.prepare('SELECT contact_id FROM lead WHERE id = ?').bind(leadId).first<{ contact_id: string }>();
+  const lead = await db.prepare(`
+    SELECT l.contact_id, l.code, l.owner_user_id, c.display_name AS contact_name, p.name AS product_name
+    FROM lead l
+    JOIN contact c ON c.id = l.contact_id
+    LEFT JOIN product p ON p.id = l.product_id
+    WHERE l.id = ?
+  `).bind(leadId).first<{ contact_id: string; code: string; owner_user_id: string | null; contact_name: string; product_name: string | null }>();
   if (!lead) throw new Error(`${name} lead not found after commit`);
 
   const now = new Date().toISOString();
   const lines = await transcript(db, intake.conversation_id, ACTIVITY_MESSAGE_COUNT);
-  const note = `Hội thoại ${intake.channel === 'facebook' ? 'Facebook' : 'Zalo'} (${lines.length} tin gần nhất):\n${lines.join('\n')}`;
+  const channelLabel = intake.channel === 'facebook' ? 'Facebook' : intake.channel === 'zalo_oa' ? 'Zalo OA' : 'Zalo';
+  const note = `Hội thoại ${channelLabel} (${lines.length} tin gần nhất):\n${lines.join('\n')}`;
   const move = moveIntake(db, actor, intake.id, 'classified', now, { leadId, contactId: lead.contact_id });
   const [moved] = await db.batch([
     move.statement,
-    ...linkStatements(db, intake, lead.contact_id, now, move.guard),
+    ...linkStatements(db, intake, lead.contact_id, now, move.guard, !explicitContactId),
     db.prepare(`INSERT INTO activity (id, lead_id, type, summary, actor_user_id, actor_kind, occurred_at, created_at)
       SELECT ?, ?, 'note', ?, ?, ?, ?, ? WHERE ${move.guard.sql}`)
       .bind(crypto.randomUUID(), leadId, note, actor.id, actor.kind, now, now, ...move.guard.binds),
@@ -304,6 +448,28 @@ export async function classifyIntake(db: D1Database, actor: Actor, intakeId: str
   ]);
   // Someone else classified the intake meanwhile: the lead created here stands on its own and is not linked.
   if (moved!.meta.changes !== 1) return notPending();
+
+  if (lead.owner_user_id) {
+    const assignee = await assignConversationToLeadOwner(db, actor, intake.conversation_id, lead.owner_user_id, appBase);
+    if (assignee?.larkOpenId) {
+      const detailUrl = request.pipeline === 'b2b'
+        ? `${appBase}/leads/${leadId}`
+        : `${appBase}/learners/${lead.contact_id}`;
+      const parts = [
+        `Bạn có lead mới ${lead.code}`,
+        lead.contact_name,
+        ...(lead.product_name ? [lead.product_name] : []),
+        detailUrl,
+      ];
+      await enqueueCommand(db, {
+        kind: 'send_lark',
+        target: 'worker',
+        conversationId: intake.conversation_id,
+        payload: { text: parts.join(' – '), openId: assignee.larkOpenId },
+      });
+    }
+  }
+
   return ok({ intakeId: intake.id, leadId, contactId: lead.contact_id });
 }
 

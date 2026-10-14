@@ -16,5 +16,6 @@ exports/
 .admin-bootstrap.local
 apps/zalo-bridge/.sessions/
 apps/zalo-bridge/logs/
+apps/zalo-bridge/media-tmp/
 apps/zalo-bridge/.env
 !apps/zalo-bridge/.env.example

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BridgeEvent } from '@abm/contracts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AccountManager, ECHO_HOLD_MS, MAX_RECONNECT_FAILURES, reconnectDelayMs } from '../src/account-manager';
+import { AccountManager, ECHO_HOLD_MS, GROUP_MEMBERS_REFRESH_MS, MAX_RECONNECT_FAILURES, reconnectDelayMs } from '../src/account-manager';
 import { CodedError } from '../src/config';
 import type { IncomingMessage, QrCode, SessionClose, ZaloConnector, ZaloSession, ZaloUserProfile } from '../src/zalo-client';
 
@@ -16,6 +16,7 @@ class FakeSession implements ZaloSession {
   send = vi.fn(async () => ({ msgId: String(this.nextMsgId++) }));
   getUserProfile = vi.fn(async (_userId: string): Promise<ZaloUserProfile | null> => null);
   listGroups = vi.fn(async () => [{ threadId: 'g1', name: 'Nhóm 1' }]);
+  listGroupMembers = vi.fn(async (_groupId: string) => [{ id: 'mem-1', name: 'An' }]);
   onMessage(cb: (m: IncomingMessage) => void) { this.messageCb = cb; }
   onClose(cb: (c: SessionClose) => void) { this.closeCb = cb; }
   save = vi.fn(async (file: string) => { await writeFile(file, '{}'); });
@@ -24,7 +25,7 @@ class FakeSession implements ZaloSession {
 
 const selfMessage = (msgId: string): IncomingMessage => ({
   threadId: 'cust-1', threadKind: 'direct', msgId, fromSelf: true, senderId: 'own-uid', senderName: 'Shop',
-  text: 'xin chào', attachments: [], sentAt: '2026-10-08T07:00:00.000Z',
+  text: 'xin chào', attachments: [], sentAt: '2026-10-08T07:00:00.000Z', mentionsSelf: false, quotesSelf: false,
 });
 
 let dir: string;
@@ -41,8 +42,11 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-function manager(connector: ZaloConnector) {
-  return new AccountManager({ connector, sessionsDir: dir, emit: (batch) => events.push(...batch) });
+function manager(connector: ZaloConnector, log?: (level: string, event: string, fields?: unknown) => void) {
+  return new AccountManager({
+    connector, sessionsDir: dir, emit: (batch) => events.push(...batch), memberScanDelayMs: 0,
+    ...(log ? { log: (level, event, fields) => log(level, event, fields) } : {}),
+  });
 }
 
 async function loggedIn() {
@@ -150,6 +154,95 @@ describe('AccountManager', () => {
     const accounts = manager({ loginWithQr: vi.fn(), loginWithSaved: vi.fn() });
     await expect(accounts.login('../evil')).rejects.toThrow('INVALID_ACCOUNT_ID');
     await expect(accounts.logout('stateless-users')).rejects.toThrow('INVALID_ACCOUNT_ID');
+  });
+
+  it('forwards mention and quote flags on group messages and omits them on direct messages', async () => {
+    const { session } = await loggedIn();
+    session.messageCb!({
+      threadId: 'g1', threadKind: 'group', msgId: 'm-g', fromSelf: false, senderId: 'u1', senderName: 'An',
+      text: 'Long ơi', attachments: [], sentAt: '2026-10-13T01:00:00.000Z', mentionsSelf: true, quotesSelf: false,
+    });
+    expect(messages().at(-1)).toMatchObject({
+      type: 'message', threadKind: 'group', msgId: 'm-g', mentionsSelf: true, quotesSelf: false,
+    });
+    session.messageCb!({
+      threadId: 'cust-1', threadKind: 'direct', msgId: 'm-d', fromSelf: false, senderId: 'cust-1', senderName: 'Lan',
+      text: 'chào', attachments: [], sentAt: '2026-10-13T01:00:01.000Z', mentionsSelf: true, quotesSelf: true,
+    });
+    const direct = messages().at(-1)!;
+    expect(direct.threadKind).toBe('direct');
+    expect(direct).not.toHaveProperty('mentionsSelf');
+    expect(direct).not.toHaveProperty('quotesSelf');
+  });
+
+  it('passes replyTo through to the session', async () => {
+    const { accounts, session } = await loggedIn();
+    const reply = { msgId: 'm1', senderId: 'u1', senderName: 'Hùng' };
+    await accounts.send('acc-1', 'g1', 'group', 'xin chào', 'cmd-9', reply);
+    expect(session.send).toHaveBeenCalledWith('g1', 'group', 'xin chào', reply);
+  });
+
+  it('emits group_members after group_list and keeps going when one group fails', async () => {
+    const session = new FakeSession();
+    session.listGroups.mockResolvedValue([
+      { threadId: 'g1', name: 'Nhóm A' },
+      { threadId: 'g2', name: 'Nhóm B' },
+    ]);
+    session.listGroupMembers.mockImplementation(async (groupId: string) => {
+      if (groupId === 'g1') throw new CodedError('ZALO_MEMBERS_FAILED');
+      return [{ id: 'u2', name: 'Lan' }];
+    });
+    const logs: { event: string; fields?: unknown }[] = [];
+    const connector: ZaloConnector = { loginWithQr: vi.fn(async () => session), loginWithSaved: vi.fn() };
+    const accounts = manager(connector, (_level, event, fields) => logs.push({ event, fields }));
+    await accounts.login('acc-1');
+    await vi.advanceTimersByTimeAsync(0);
+    const types = events.map((event) => event.type);
+    const listAt = types.indexOf('group_list');
+    const membersAt = types.indexOf('group_members');
+    expect(listAt).toBeGreaterThanOrEqual(0);
+    expect(membersAt).toBeGreaterThan(listAt);
+    expect(events.filter((event) => event.type === 'group_members')).toEqual([
+      { type: 'group_members', accountExternalId: 'own-uid', threadId: 'g2', members: [{ id: 'u2', name: 'Lan' }] },
+    ]);
+    expect(logs).toContainEqual({ event: 'account.group_members_failed', fields: { accountId: 'acc-1', code: 'ZALO_MEMBERS_FAILED' } });
+    expect(JSON.stringify(logs)).not.toContain('Lan');
+  });
+
+  it('waits between groups and skips a refresh while a member scan is still running', async () => {
+    const session = new FakeSession();
+    session.listGroups.mockResolvedValue([
+      { threadId: 'g1', name: 'Nhóm A' },
+      { threadId: 'g2', name: 'Nhóm B' },
+    ]);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    session.listGroupMembers.mockImplementation(async (groupId: string) => {
+      if (groupId === 'g1') await held;
+      return [];
+    });
+    const connector: ZaloConnector = { loginWithQr: vi.fn(async () => session), loginWithSaved: vi.fn() };
+    const accounts = new AccountManager({ connector, sessionsDir: dir, emit: (batch) => events.push(...batch), memberScanDelayMs: 1000 });
+    await accounts.login('acc-1');
+    await vi.advanceTimersByTimeAsync(GROUP_MEMBERS_REFRESH_MS);
+    expect(session.listGroups).toHaveBeenCalledTimes(1);
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(session.listGroupMembers).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(session.listGroupMembers).toHaveBeenCalledTimes(2);
+  });
+
+  it('refreshes group members every 6 hours and clears the interval when the session closes', async () => {
+    const { session } = await loggedIn();
+    expect(GROUP_MEMBERS_REFRESH_MS).toBe(6 * 60 * 60 * 1000);
+    expect(session.listGroups).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(GROUP_MEMBERS_REFRESH_MS);
+    expect(session.listGroups).toHaveBeenCalledTimes(2);
+    expect(events.filter((event) => event.type === 'group_members')).toHaveLength(2);
+    session.closeCb!({ code: 'ZALO_KICKED', fatal: true });
+    await vi.advanceTimersByTimeAsync(GROUP_MEMBERS_REFRESH_MS);
+    expect(session.listGroups).toHaveBeenCalledTimes(2);
   });
 
   it('does not treat the GoClaw cleanup id list as a Zalo session', async () => {

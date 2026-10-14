@@ -1,14 +1,15 @@
 # Agent GoClaw cho Inbox đa kênh
 
-Ba agent GoClaw phục vụ Inbox Zalo cá nhân và Fanpage. Quy tắc bot khách hàng xem [ADR-009](../adr/adr-009-customer-facing-bot.md); hàng lệnh xem [ADR-010](../adr/adr-010-leased-command-dispatcher.md).
+Bốn agent GoClaw phục vụ Inbox Zalo cá nhân và Fanpage. Quy tắc bot khách hàng xem [ADR-009](../adr/adr-009-customer-facing-bot.md); hàng lệnh xem [ADR-010](../adr/adr-010-leased-command-dispatcher.md).
 
 | Agent | Gọi khi | `X-GoClaw-User-Id` | Tool |
 | --- | --- | --- | --- |
 | Agent khách hàng (khoá theo `channel_account.agent_key`) | Khách nhắn trong hội thoại 1-1 ở chế độ `ai` | `zalo:<số>:<thread>` hoặc `facebook:<page>:<psid>`, một phiên mỗi hội thoại | Theo cấu hình kiến thức đã duyệt phía GoClaw |
+| `cham-soc-hoc-vien` (hoặc `conversation.group_agent_key`) | Học viên gọi bot trong nhóm Zalo đã bật bot | Như hội thoại 1-1: một phiên mỗi nhóm | `datetime` |
 | `crm-extractor` | Handoff, trả lại AI, hội thoại 1-1 im 15 phút, nhân viên bấm "Cập nhật CRM" | `crm-extract:<uuid>`, mỗi lần một phiên mới | Không có |
 | `group-summarizer` | Tóm tắt nhóm Zalo hằng ngày | `group-summary:<uuid>`, mỗi lần một phiên mới | Không có |
 
-Cả ba agent dùng provider/model `deepseek-flash`. Agent `crm-extractor` và `group-summarizer` không được gắn tool nào.
+Cả bốn agent dùng provider/model `deepseek-flash`. Agent `crm-extractor` và `group-summarizer` không được gắn tool nào.
 
 Thay đổi cấu hình GoClaw (tạo agent, sửa prompt, đổi model) cần user đồng ý trước, theo cổng đồng ý trong [plan Inbox](../../plans/261008-1430-omnichannel-inbox-goclaw/plan.md).
 
@@ -35,7 +36,7 @@ Agent `sale-tu-van`: chuyên viên tư vấn và hỗ trợ khách của ABM tr�
 - Với hội thoại Zalo 1-1, payload `run_completion` (`purpose: 'reply'`) có thêm `zaloUserId`, là mã thread của khách.
 - Sidecar gọi `getUserInfo` của zca-js để lấy tên hiển thị và giới tính (`0` là nam, `1` là nữ). Kết quả được nhớ 24 giờ, không có hồ sơ thì nhớ 1 giờ, mỗi lần tra chờ tối đa 5 giây.
 - Sidecar thêm một dòng `[Hồ sơ Zalo của khách: tên "..."; giới tính: nam|nữ|không rõ]` vào đầu tin gửi GoClaw.
-- Tra lỗi thì sidecar gửi tin như cũ, không thêm dòng này. Facebook và nhóm không có dòng này.
+- Tra lỗi thì sidecar gửi tin như cũ, không thêm dòng này. Facebook không có dòng này. Ở nhóm, `zaloUserId` là người hỏi.
 
 **Tài khoản Zalo là nick cá nhân.** Khi nhường việc cho người thật, bot không bao giờ nói với khách là "chuyển cho nhân viên/chuyên viên". Bot đưa một lý do đúng thực tế, ví dụ "em kiểm tra lại lịch rồi nhắn Anh/Chị", "em đối soát giao dịch rồi xác nhận lại", rồi kết thúc tin bằng một dòng riêng `[HANDOFF: <lý do ngắn>]`.
 
@@ -103,6 +104,39 @@ Trả về tối đa 8 gạch đầu dòng tiếng Việt, gồm:
 
 Không chép số điện thoại, email hay thông tin cá nhân khác vào bản tóm tắt. Không thêm lời chào hay kết luận ngoài các gạch đầu dòng.
 ```
+
+## 4. `cham-soc-hoc-vien`
+
+Long chăm sóc học viên trong các nhóm Zalo của ABM. Nick Zalo này chỉ dùng cho chatbot. Nguồn: [hợp đồng brainstorm](../../plans/reports/brainstorm-261013-1546-zalo-group-learner-care.md), [plan](../../plans/261013-1546-zalo-group-learner-care/plan.md).
+
+**Khi nào Long trả lời.** Nhóm phải bật "Long trả lời trong nhóm" (`conversation.bot_reply_enabled`, mặc định tắt). Tài khoản phải bật bot, và `customer_bot_switch` phải chưa tắt bot. Khi đủ các điều kiện đó, Long trả lời khi:
+
+- có người @mention nick bot (bridge gắn `mentionsSelf`; @all không tính);
+- có người trả lời vào một tin của Long (`quotesSelf`);
+- tin có chữ "Long ơi", không phân biệt hoa thường.
+
+Không giới hạn số tin trong nhóm. Câu trả lời của Long cũng không tính vào hạn mức gửi mỗi ngày của tài khoản (lệnh gửi có `replyTo`). Tin đăng theo lịch vẫn tính.
+
+**Tin gửi GoClaw.** Mỗi nhóm là một phiên. Text có dạng `[Nhóm Zalo "<tên nhóm>"] <người gửi>: <tin>`. Câu trả lời trích lại tin hỏi và tag người hỏi ở đầu tin. Vì vậy agent không mở đầu bằng tên người hỏi.
+
+**Người ABM và nhân viên gõ tay.**
+
+- Leader/Admin đánh dấu "Người ABM" trong danh sách thành viên nhóm. Danh sách lưu theo tài khoản Zalo (`zalo_staff_member`).
+- Bridge gửi danh sách thành viên (`group_members`) khi kết nối và 6 giờ một lần, giãn 1,5 giây giữa các nhóm.
+- Tin của Người ABM không gọi Long và huỷ các câu trả lời đang chờ của nhóm. Câu trả lời bị bỏ nếu Người ABM đã nhắn sau tin hỏi.
+- Nhân viên gõ tay vào nhóm bằng nick bot hoặc từ web thì Long im 30 phút ở nhóm đó (`bot_paused_until`).
+
+**HANDOFF trong nhóm.** CRM chỉ báo nhóm Lark, không đổi chế độ hội thoại. Trả lời lỗi cũng chỉ báo Lark. Các trường hợp: lịch học, link, record; lỗi truy cập; khiếu nại; câu hỏi ngoài kiến thức; người hỏi muốn gặp người thật. Học phí, cọc và số tài khoản không bao giờ được nói trong nhóm: Long mời học viên nhắn riêng.
+
+**Kiến thức.** KB01, KB02, KB04–KB09 của bộ v8, bỏ KB03 và các dòng giá (khoảng 94.000 ký tự). Không dùng dữ liệu khoá học trong CRM. Admin đổi được agent cho từng nhóm (`group_agent_key`, chỉ chữ thường, số và `-`).
+
+**Dựng, áp dụng và thử.** Các script nằm ở `D:\Goclaw\plans\261013-cham-soc-hoc-vien\`:
+
+- `node build-kb.mjs` dựng `out/CAPABILITIES.md`.
+- `node apply-agent.mjs` tạo hoặc cập nhật agent và context file.
+- `node run-group-tests.mjs` chạy 15 ca G01–G15.
+
+Mỗi lượt tốn khoảng 47.000 token đầu vào.
 
 ## Cài lại bridge
 

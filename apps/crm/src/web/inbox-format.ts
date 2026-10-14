@@ -3,6 +3,27 @@ import type { ConversationFilter, InboxMessage } from './types';
 
 // Pure inbox helpers of the web app, kept free of React so they can be tested on their own.
 
+const CHANNEL_KIND_LABEL: Record<ChannelKind, string> = {
+  zalo: 'Zalo',
+  facebook: 'Fanpage',
+  zalo_oa: 'Zalo OA',
+};
+
+/** Short name of a channel: a personal Zalo number, a Fanpage, or a Zalo Official Account. */
+export function channelKindLabel(channel: ChannelKind): string {
+  return CHANNEL_KIND_LABEL[channel];
+}
+
+/**
+ * Badge of one conversation. A Zalo OA reads "Zalo OA". A personal number keeps its account name,
+ * because several company numbers share the channel.
+ */
+export function conversationChannelLabel(c: { channel: ChannelKind; accountName: string }): string {
+  if (c.channel === 'zalo_oa') return 'Zalo OA';
+  if (c.channel === 'facebook') return 'Fanpage';
+  return `Zalo · ${c.accountName}`;
+}
+
 /** Query string of GET /inbox/conversations; empty filters are left out. */
 export function conversationsPath(filter: ConversationFilter = {}) {
   const params = new URLSearchParams();

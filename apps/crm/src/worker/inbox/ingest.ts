@@ -1,7 +1,10 @@
 import type { BridgeEvent } from '@abm/contracts';
 import { isConstraintFailure } from '../guarded-tx';
 import { slaDueSql } from './assignment';
-import { ATTACHMENT_ONLY_TEXT, appendStaffContext, markMessageSent, scheduleCompletion } from './conversation-flow';
+import {
+  ATTACHMENT_ONLY_TEXT, BOT_CALL_RE, GROUP_PAUSE_MS, appendStaffContext, cancelPendingGroupReplies, markMessageSent,
+  scheduleCompletion, scheduleGroupReply,
+} from './conversation-flow';
 import { enqueueCommand } from './dispatcher';
 
 /**
@@ -14,6 +17,7 @@ type MessageEvent = Extract<BridgeEvent, { type: 'message' }>;
 type AccountStatusEvent = Extract<BridgeEvent, { type: 'account_status' }>;
 type QrEvent = Extract<BridgeEvent, { type: 'qr' }>;
 type GroupListEvent = Extract<BridgeEvent, { type: 'group_list' }>;
+type GroupMembersEvent = Extract<BridgeEvent, { type: 'group_members' }>;
 
 /** A fromSelf event without command id matches a system message sent within this window. */
 const ECHO_WINDOW_MS = 120_000;
@@ -23,7 +27,15 @@ const ECHO_MATCH_CHARS = 2000;
 export interface IngestResult { accepted: number; rejected: number }
 
 /** Channel account a message belongs to. */
-export interface ChannelAccountRef { id: string; organization_id: string }
+export interface ChannelAccountRef {
+  id: string;
+  organization_id: string;
+  /**
+   * Set only for an Official Account customer message. A redelivery then finishes a follow-up that stopped
+   * after the insert. Facebook and personal Zalo leave it unset, so a duplicate there still changes nothing.
+   */
+  channel?: 'zalo_oa';
+}
 interface ConversationRef { id: string; mode: 'ai' | 'human' | 'paused' }
 
 /** One message of any channel, in the shape the shared ingest path stores. */
@@ -38,6 +50,10 @@ export interface InboundMessage {
   senderName: string | null;
   text: string;
   attachments?: { url: string; name?: string; mimeType?: string }[];
+  /** Group only: the message @-mentions the bot. Direct messages leave this unset. */
+  mentionsSelf?: boolean;
+  /** Group only: the message quotes a message the bot sent. */
+  quotesSelf?: boolean;
 }
 
 /** Decides whether a fromSelf message echoes a message the system sent; when it does, it marks that message sent. */
@@ -78,13 +94,167 @@ async function applyEcho(db: D1Database, conversationId: string, event: MessageE
   return true;
 }
 
+const MEMBER_BATCH = 100;
+
+/** Inserts or refreshes one group member. A blank name does not wipe a name already stored. */
+function upsertGroupMember(db: D1Database, conversationId: string, externalUserId: string, displayName: string | null, now: string) {
+  const name = displayName?.trim() || null;
+  return db.prepare(`INSERT INTO zalo_group_member (conversation_id, external_user_id, display_name, updated_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(conversation_id, external_user_id) DO UPDATE SET
+      display_name = COALESCE(excluded.display_name, zalo_group_member.display_name),
+      updated_at = excluded.updated_at`).bind(conversationId, externalUserId, name, now);
+}
+
+const touchGroupInbound = (db: D1Database, conversationId: string, now: string) =>
+  db.prepare('UPDATE conversation SET last_inbound_at = ?, last_message_at = ?, updated_at = ? WHERE id = ?')
+    .bind(now, now, now, conversationId);
+
+/**
+ * Stores one group message. Someone typing on the bot's account pauses the group for 30 minutes without
+ * leaving `ai`. An ABM staff member cancels pending replies and never starts one. Anyone else starts a reply
+ * only when they mention the bot, quote it, or call "Long ơi".
+ */
+async function ingestGroupMessage(db: D1Database, account: ChannelAccountRef, event: InboundMessage, now: Date, isEcho: EchoMatcher) {
+  const nowIso = now.toISOString();
+  const conv = await upsertConversation(db, account, event.threadId, 'group', null, nowIso).first<ConversationRef>();
+  if (!conv) throw new Error('conversation upsert returned no row');
+  if (event.fromSelf && await isEcho(conv.id)) return;
+
+  const messageId = crypto.randomUUID();
+  const inserted = await db.prepare(`INSERT INTO message
+      (id, conversation_id, direction, sender_kind, sender_external_id, external_msg_id, body, attachments_json, status, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(conversation_id, external_msg_id) DO NOTHING`)
+    .bind(messageId, conv.id, event.fromSelf ? 'out' : 'in', event.fromSelf ? 'staff_phone' : 'customer', event.senderExternalId,
+      event.msgId, event.text, event.attachments?.length ? JSON.stringify(event.attachments) : null,
+      event.fromSelf ? 'sent' : 'received', nowIso)
+    .run();
+  if (inserted.meta.changes === 0) return;
+
+  if (event.fromSelf) {
+    const pauseUntil = new Date(now.getTime() + GROUP_PAUSE_MS).toISOString();
+    await db.batch([
+      db.prepare('UPDATE conversation SET bot_paused_until = ?, last_message_at = ?, updated_at = ? WHERE id = ?')
+        .bind(pauseUntil, nowIso, nowIso, conv.id),
+      cancelPendingGroupReplies(db, conv.id, nowIso),
+    ]);
+    return;
+  }
+
+  await upsertGroupMember(db, conv.id, event.senderExternalId, event.senderName, nowIso).run();
+  const staff = await db.prepare('SELECT 1 AS hit FROM zalo_staff_member WHERE channel_account_id = ? AND external_user_id = ?')
+    .bind(account.id, event.senderExternalId).first<{ hit: number }>();
+  if (staff) {
+    await db.batch([touchGroupInbound(db, conv.id, nowIso), cancelPendingGroupReplies(db, conv.id, nowIso)]);
+    return;
+  }
+  await touchGroupInbound(db, conv.id, nowIso).run();
+  if (event.mentionsSelf || event.quotesSelf || BOT_CALL_RE.test(event.text.normalize('NFC'))) {
+    await scheduleGroupReply(db, conv.id, messageId, event, now);
+  }
+}
+
+/** The customer line stored for staff while the conversation is not in `ai`. */
+const customerContextLine = (text: string) => `Khách: ${text || ATTACHMENT_ONLY_TEXT}`;
+
+/**
+ * The turn `scheduleCompletion` appends, including a pending staff-context prefix. A redelivery uses the same
+ * string to see that this turn is already on the pending reply.
+ */
+function completionTurn(staffContext: string | null, text: string): string {
+  const body = text || ATTACHMENT_ONLY_TEXT;
+  const context = staffContext ?? '';
+  return (context ? `[Nhân viên đã trao đổi: ${context}]\n` : '') + body;
+}
+
+/** True when that exact line is already one line of the pending staff context. */
+function contextHasLine(pending: string | null, line: string): boolean {
+  const text = pending ?? '';
+  return text === line || text.startsWith(`${line}\n`) || text.endsWith(`\n${line}`) || text.includes(`\n${line}\n`);
+}
+
+const touchInbound = (db: D1Database, conversationId: string, nowIso: string) =>
+  db.prepare(`UPDATE conversation SET last_inbound_at = ?1, last_message_at = ?1, updated_at = ?1,
+      sla_due_at = CASE WHEN mode = 'human' AND kind = 'direct' THEN COALESCE(sla_due_at, ${slaDueSql('?1')}) ELSE sla_due_at END
+    WHERE id = ?2`).bind(nowIso, conversationId);
+
+/**
+ * Conversation bookkeeping for one new customer message, then the bot run when the thread is in `ai`.
+ * The two writes stay in this order: a throw from the bot run leaves the message and the touch committed,
+ * and an Official Account redelivery finishes the run.
+ */
+async function queueInboundCustomer(db: D1Database, conv: ConversationRef, messageId: string, event: InboundMessage, now: Date) {
+  const nowIso = now.toISOString();
+  const text = event.text || ATTACHMENT_ONLY_TEXT;
+  const updates = [touchInbound(db, conv.id, nowIso)];
+  if (conv.mode !== 'ai') updates.push(appendStaffContext(db, conv.id, customerContextLine(text), nowIso));
+  await db.batch(updates);
+  if (conv.mode === 'ai') await scheduleCompletion(db, conv.id, messageId, event.text, now);
+}
+
+/**
+ * True when this customer message already has its bot run: its own completion command, or a pending reply
+ * that was updated with this turn at or after the message was stored.
+ */
+async function oaReplyAlreadyQueued(
+  db: D1Database, conversationId: string, message: { id: string; created_at: string }, staffContext: string | null, text: string,
+): Promise<boolean> {
+  const owned = await db.prepare('SELECT 1 AS hit FROM channel_command WHERE dedupe_key = ?')
+    .bind(`completion:${message.id}`).first<{ hit: number }>();
+  if (owned) return true;
+  const pending = await db.prepare(`SELECT payload_json, updated_at FROM channel_command
+    WHERE conversation_id = ? AND kind = 'run_completion' AND status = 'pending'
+      AND json_extract(payload_json, '$.purpose') = 'reply'`)
+    .bind(conversationId).first<{ payload_json: string; updated_at: string }>();
+  if (!pending || pending.updated_at < message.created_at) return false;
+  let stored = '';
+  try {
+    const payload = JSON.parse(pending.payload_json) as { text?: unknown };
+    stored = typeof payload.text === 'string' ? payload.text : '';
+  } catch {
+    return false;
+  }
+  const turn = completionTurn(staffContext, text);
+  return stored === turn || stored.endsWith(`\n${turn}`);
+}
+
+/**
+ * Official Account only. The insert of this customer message succeeded on an earlier delivery and a later
+ * write threw, so Zalo sends the event again and the insert matches the existing row. Run the missed
+ * follow-up. A delivery that already finished is left as it is, so the reply text is not appended twice.
+ */
+async function resumeZaloOaCustomer(db: D1Database, conversationId: string, event: InboundMessage, now: Date) {
+  const message = await db.prepare(`SELECT id, created_at FROM message
+    WHERE conversation_id = ? AND external_msg_id = ? AND direction = 'in'`)
+    .bind(conversationId, event.msgId).first<{ id: string; created_at: string }>();
+  if (!message) return;
+  const state = await db.prepare('SELECT mode, last_inbound_at, staff_context_pending FROM conversation WHERE id = ?')
+    .bind(conversationId).first<{ mode: ConversationRef['mode']; last_inbound_at: string | null; staff_context_pending: string | null }>();
+  if (!state) return;
+  const touched = state.last_inbound_at !== null && state.last_inbound_at >= message.created_at;
+  if (state.mode === 'ai') {
+    if (await oaReplyAlreadyQueued(db, conversationId, message, state.staff_context_pending, event.text)) return;
+    if (!touched) await touchInbound(db, conversationId, now.toISOString()).run();
+    await scheduleCompletion(db, conversationId, message.id, event.text, now);
+    return;
+  }
+  if (touched && contextHasLine(state.staff_context_pending, customerContextLine(event.text))) return;
+  await queueInboundCustomer(db, { id: conversationId, mode: state.mode }, message.id, event, now);
+}
+
 /**
  * Stores one message of a known channel account. A fromSelf message that `isEcho`
  * recognises adds nothing; any other fromSelf message is a staff reply typed outside the CRM (`staff_phone`)
  * and hands the conversation to people. A customer message queues the bot's reply in `ai` mode.
- * The same external message id twice stores one message.
+ * The same external message id twice stores one message. An Official Account customer redelivery also
+ * finishes the conversation update and the bot run when the first attempt stopped after the insert.
  */
 export async function ingestMessage(db: D1Database, account: ChannelAccountRef, event: InboundMessage, now: Date, isEcho: EchoMatcher) {
+  if (event.threadKind === 'group') {
+    await ingestGroupMessage(db, account, event, now, isEcho);
+    return;
+  }
   const nowIso = now.toISOString();
   // A direct thread is named after the customer; our own messages and group members do not rename it.
   const senderName = event.senderName?.trim();
@@ -102,7 +272,10 @@ export async function ingestMessage(db: D1Database, account: ChannelAccountRef, 
       event.msgId, event.text, event.attachments?.length ? JSON.stringify(event.attachments) : null,
       event.fromSelf ? 'sent' : 'received', nowIso)
     .run();
-  if (inserted.meta.changes === 0) return;
+  if (inserted.meta.changes === 0) {
+    if (!event.fromSelf && account.channel === 'zalo_oa') await resumeZaloOaCustomer(db, conv.id, event, now);
+    return;
+  }
   const text = event.text || ATTACHMENT_ONLY_TEXT;
 
   if (event.fromSelf) {
@@ -117,12 +290,7 @@ export async function ingestMessage(db: D1Database, account: ChannelAccountRef, 
 
   // In a direct `human` conversation the customer now waits for staff: the reply deadline starts unless one is
   // already running. Group chatter has no reply deadline.
-  const updates = [db.prepare(`UPDATE conversation SET last_inbound_at = ?1, last_message_at = ?1, updated_at = ?1,
-      sla_due_at = CASE WHEN mode = 'human' AND kind = 'direct' THEN COALESCE(sla_due_at, ${slaDueSql('?1')}) ELSE sla_due_at END
-    WHERE id = ?2`).bind(nowIso, conv.id)];
-  if (conv.mode !== 'ai') updates.push(appendStaffContext(db, conv.id, `Khách: ${text}`, nowIso));
-  await db.batch(updates);
-  if (conv.mode === 'ai') await scheduleCompletion(db, conv.id, messageId, event.text, now);
+  await queueInboundCustomer(db, conv, messageId, event, now);
 }
 
 async function ingestZaloMessage(db: D1Database, event: MessageEvent, now: Date) {
@@ -199,6 +367,18 @@ async function ingestQr(db: D1Database, event: QrEvent, now: string) {
   return res.meta.changes === 1;
 }
 
+/** Upserts the member list of one group. A group the CRM does not know yet is skipped. */
+export async function ingestGroupMembers(db: D1Database, event: GroupMembersEvent, now: string): Promise<boolean> {
+  const account = await findZaloAccount(db, event.accountExternalId);
+  if (!account) return false;
+  const conv = await db.prepare('SELECT id FROM conversation WHERE channel_account_id = ? AND external_thread_id = ?')
+    .bind(account.id, event.threadId).first<{ id: string }>();
+  if (!conv) return true;
+  const statements = event.members.map((member) => upsertGroupMember(db, conv.id, member.id, member.name, now));
+  for (let i = 0; i < statements.length; i += MEMBER_BATCH) await db.batch(statements.slice(i, i + MEMBER_BATCH));
+  return true;
+}
+
 async function ingestGroupList(db: D1Database, event: GroupListEvent, now: string) {
   const account = await findZaloAccount(db, event.accountExternalId);
   if (!account) return false;
@@ -214,6 +394,7 @@ export async function ingestEvents(db: D1Database, events: BridgeEvent[]): Promi
     const now = new Date();
     try {
       const ok = event.type === 'message' ? await ingestZaloMessage(db, event, now)
+        : event.type === 'group_members' ? await ingestGroupMembers(db, event, now.toISOString())
         : event.type === 'account_status' ? await ingestAccountStatus(db, event, now.toISOString())
         : event.type === 'qr' ? await ingestQr(db, event, now.toISOString())
         : await ingestGroupList(db, event, now.toISOString());

@@ -228,3 +228,39 @@ test('the reply deadline starts when people take over and clears when staff answ
   await web('u-lan', 'POST', '/inbox/conversations/conv-1/mode', { mode: 'human' });
   expect((await conversation()).sla_due_at).toBeTruthy();
 });
+
+test('Lark error 230013 stops retrying immediately and marks the user lark_link_status as error', async () => {
+  await setMode('round_robin');
+  await onDuty('u-lan');
+  await db.prepare("UPDATE app_user SET lark_open_id = 'ou_invisible_lan', lark_link_status = 'linked' WHERE id = 'u-lan'").run();
+  await handoff(db, { APP_URL }, 'conv-1', 'khách hỏi học phí');
+
+  let privateAttempts = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url.includes('/auth/v3/tenant_access_token/internal')) return json({ code: 0, tenant_access_token: 't-fake', expire: 7200 });
+    if (url.includes('receive_id_type=open_id')) {
+      privateAttempts += 1;
+      return json({ code: 230013, msg: 'Bot has NO availability to this user' });
+    }
+    return json({ code: 0, data: {} });
+  });
+
+  await processWorkerCommands({ ...env, ...lark });
+  await processWorkerCommands({ ...env, ...lark });
+
+  expect(privateAttempts).toBe(1);
+  const cmds = await larkCommands();
+  const privateCmd = cmds.find((c) => c.payload.openId === 'ou_invisible_lan');
+  expect(privateCmd).toMatchObject({
+    status: 'failed',
+    attempts: 1,
+    next_run_at: null,
+  });
+  expect(privateCmd.last_error).toContain('230013');
+
+  const user = await db.prepare("SELECT lark_link_status, lark_checked_at FROM app_user WHERE id = 'u-lan'").first<any>();
+  expect(user.lark_link_status).toBe('error');
+  expect(user.lark_checked_at).toBeTruthy();
+});
+

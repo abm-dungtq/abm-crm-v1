@@ -2,8 +2,9 @@ import type { Env } from '../env';
 import { LarkError, sendText, sendToChat } from '../lark';
 import { claimCommands, completeCommand, failCommand, type ClaimedCommand } from './dispatcher';
 import { sendMessengerCommand } from './facebook-send';
+import { sendZaloOaCommand } from './zalo-oa-send';
 
-type WorkerCommandEnv = Pick<Env, 'DB' | 'LARK_APP_ID' | 'LARK_APP_SECRET' | 'LARK_INBOX_CHAT_ID' | 'FB_PAGE_TOKENS'>;
+type WorkerCommandEnv = Pick<Env, 'DB' | 'LARK_APP_ID' | 'LARK_APP_SECRET' | 'LARK_INBOX_CHAT_ID' | 'FB_PAGE_TOKENS' | 'ZALO_OA_APP_ID' | 'ZALO_OA_APP_SECRET' | 'ZALO_OA_TOKEN_KEY'>;
 
 const CLAIM_LIMIT = 20;
 
@@ -19,6 +20,15 @@ async function runLarkCommand(env: WorkerCommandEnv, command: ClaimedCommand) {
     if (typeof openId === 'string') await sendText(env, openId, text);
     else if (chatId) await sendToChat(env, chatId, text);
   } catch (error) {
+    if (error instanceof LarkError && /\bcode 230013\b/.test(error.message)) {
+      const now = new Date();
+      if (typeof openId === 'string') {
+        const nowIso = now.toISOString();
+        await db.prepare(`UPDATE app_user SET lark_link_status = 'error', lark_checked_at = ?, updated_at = ? WHERE lark_open_id = ?`)
+          .bind(nowIso, nowIso, openId).run();
+      }
+      return failCommand(db, command.id, command.attempts, error.message, now, true);
+    }
     return failCommand(db, command.id, command.attempts, error instanceof LarkError ? error.message : 'LARK_SEND_FAILED');
   }
   return completeCommand(db, command.id, command.attempts, { sent: true });
@@ -27,6 +37,7 @@ async function runLarkCommand(env: WorkerCommandEnv, command: ClaimedCommand) {
 async function runCommand(env: WorkerCommandEnv, command: ClaimedCommand) {
   if (command.kind === 'send_lark') return runLarkCommand(env, command);
   if (command.kind === 'send_messenger') return sendMessengerCommand(env, command);
+  if (command.kind === 'send_zalo_oa') return sendZaloOaCommand(env, command);
   return failCommand(env.DB, command.id, command.attempts, 'UNSUPPORTED_COMMAND');
 }
 

@@ -22,6 +22,7 @@ export interface LeadListRow {
   owner_user_id: string | null; owner_name: string | null; team_id: string | null; team_name: string | null;
   contact_name: string; account_id: string | null; account_name: string | null;
   na_id: string | null; na_title: string | null; na_due_at: string | null;
+  product_id: string | null; product_name: string | null; course_id: string | null; course_name: string | null;
 }
 
 export function leadHealth(row: Pick<LeadListRow, 'stage' | 'status' | 'first_contact_at' | 'assigned_at' | 'stage_entered_at' | 'na_due_at'> & { pipeline?: string }, now = new Date()): LeadHealth {
@@ -49,13 +50,16 @@ export const LEAD_SELECT = `
     l.assigned_at, l.stage_entered_at, l.last_activity_at, l.created_at, l.updated_at, l.closed_at, l.lost_reason,
     l.version, l.pipeline, l.owner_user_id, u.display_name AS owner_name, l.team_id, t.name AS team_name,
     c.display_name AS contact_name, a.id AS account_id, a.name AS account_name,
-    na.id AS na_id, na.title AS na_title, na.due_at AS na_due_at
+    na.id AS na_id, na.title AS na_title, na.due_at AS na_due_at,
+    l.product_id, pr.name AS product_name, l.course_id, co.name AS course_name
   FROM lead l
   JOIN contact c ON c.id = l.contact_id
   LEFT JOIN account a ON a.id = l.account_id
   LEFT JOIN app_user u ON u.id = l.owner_user_id
   LEFT JOIN team t ON t.id = l.team_id
-  LEFT JOIN task na ON na.id = l.next_action_task_id`;
+  LEFT JOIN task na ON na.id = l.next_action_task_id
+  LEFT JOIN product pr ON pr.id = l.product_id
+  LEFT JOIN course co ON co.id = l.course_id`;
 
 export function toLeadItem(row: LeadListRow, now: Date) {
   return {
@@ -63,6 +67,8 @@ export function toLeadItem(row: LeadListRow, now: Date) {
     needSummary: row.need_summary, expectedValue: row.expected_value, version: row.version,
     firstContactAt: row.first_contact_at, assignedAt: row.assigned_at, stageEnteredAt: row.stage_entered_at,
     lastActivityAt: row.last_activity_at, createdAt: row.created_at, closedAt: row.closed_at, lostReason: row.lost_reason,
+    productId: row.product_id ?? null, productName: row.product_name ?? null,
+    courseId: row.course_id ?? null, courseName: row.course_name ?? null,
     owner: row.owner_user_id ? { id: row.owner_user_id, name: row.owner_name } : null,
     team: row.team_id ? { id: row.team_id, name: row.team_name } : null,
     contactName: row.contact_name,

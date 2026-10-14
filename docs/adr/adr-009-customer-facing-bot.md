@@ -15,6 +15,14 @@ Ngày: 2026-10-08
 - Bot chỉ ghi vào `lead_intake` (lead chờ phân loại): thông tin agent trích từ hội thoại, gắn với hội thoại.
 - `contact` và `lead` thật chỉ do nhân viên tạo, khi chọn pipeline `b2b` hoặc `learner` trên giao diện, bằng lệnh sẵn có `createLead` / `createLearnerLead`. Bot không bao giờ tự tạo `lead`, không ghi trực tiếp `contact` hay `lead`.
 - Thông tin mới khác thông tin đã có trong CRM chỉ được dùng khi nhân viên xác nhận trên giao diện.
+- **Nhóm Zalo (từ 13/10/2026).**
+  - Chế độ `ai`/`human`/`paused` không áp cho nhóm.
+  - Bot chỉ trả lời ở nhóm bật `bot_reply_enabled`, và chỉ khi học viên @mention nick bot, trả lời vào tin của bot hoặc gõ "Long ơi".
+  - Agent mặc định của nhóm là `cham-soc-hoc-vien`, không có dữ liệu học phí hay số tài khoản.
+  - HANDOFF trong nhóm chỉ báo Lark, không đổi chế độ.
+  - Khi nhân viên gõ tay vào nhóm (từ nick bot hoặc từ web), bot im ở nhóm đó 30 phút (`bot_paused_until`).
+  - Tin của người được đánh dấu "Người ABM" (`zalo_staff_member`) không gọi bot, và huỷ các câu trả lời đang chờ.
+  - Chi tiết ở [goclaw-inbox-agents](../integrations/goclaw-inbox-agents.md#4-cham-soc-hoc-vien).
 - Hợp đồng brainstorm ghi "ghi đè trường đã có đi qua `approval`". ADR này chọn nhân viên xác nhận ngay trong `lead_intake` thay cho bảng `approval`, vì bảng `approval` chỉ dành cho lead (`lead_id NOT NULL`) và lúc trích thông tin chưa có lead. Thay đổi này chấp nhận được vì bot không bao giờ ghi trực tiếp vào `contact` hay `lead`: mọi ghi vào dữ liệu chuẩn vẫn do một người đã xác thực thực hiện và có `audit_log`.
 
 ## Lịch sử tách đôi

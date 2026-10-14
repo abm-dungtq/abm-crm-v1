@@ -6,12 +6,17 @@ import { ConfigError, consoleLogger as log, errorCode, loadConfig, type BridgeCo
 import { CrmClient } from './crm-client';
 import { GoClawClient } from './goclaw-client';
 import { GoClawSessionCleanup, gatewayWsUrl } from './goclaw-session-cleanup';
+import { cleanupOldImages } from './image-fetch';
 import { zcaConnector } from './zalo-client';
 
 /** Zalo sessions are stored next to the package, in a git-ignored directory. */
 const SESSIONS_DIR = fileURLToPath(new URL('../.sessions/', import.meta.url));
+/** Customer images for a GoClaw image turn. One directory above the session files. */
+const MEDIA_TMP_DIR = join(SESSIONS_DIR, '..', 'media-tmp');
 /** Events held back by an unreachable Worker are retried this often. */
 const FLUSH_INTERVAL_MS = 15_000;
+/** Temp images older than a day are removed on this cadence. */
+const IMAGE_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 /** Shutdown waits this long for running commands to report before exiting. */
 const SHUTDOWN_GRACE_MS = 10_000;
 
@@ -36,17 +41,30 @@ async function main() {
       await cleanup.record(request.userId);
       return goclawClient.complete(request);
     },
+    completeWithMedia: async (request: Parameters<GoClawClient['completeWithMedia']>[0]) => {
+      await cleanup.record(request.userId);
+      return goclawClient.completeWithMedia(request);
+    },
   };
   const accounts = new AccountManager({
     connector: zcaConnector, sessionsDir: SESSIONS_DIR, log,
     emit: (events) => void crm.pushEvents(events),
   });
   const runner = new CommandRunner({
-    crm, goclaw, accounts, sendMinDelayMs: config.sendMinDelayMs, sendMaxDelayMs: config.sendMaxDelayMs, log,
+    crm, goclaw, accounts, sendMinDelayMs: config.sendMinDelayMs, sendMaxDelayMs: config.sendMaxDelayMs,
+    imageDir: MEDIA_TMP_DIR, log,
   });
 
   const controller = new AbortController();
   const flushTimer = setInterval(() => void crm.flush(), FLUSH_INTERVAL_MS);
+  // A bridge that restarts inside the hour must still delete yesterday's customer images.
+  const sweepImages = () => {
+    void cleanupOldImages(MEDIA_TMP_DIR).catch((error: unknown) => {
+      log('error', 'images.cleanup_failed', { code: errorCode(error) });
+    });
+  };
+  sweepImages();
+  const imageTimer = setInterval(sweepImages, IMAGE_CLEANUP_INTERVAL_MS);
   let shuttingDown = false;
   const shutdown = async (signal: string) => {
     if (shuttingDown) return;
@@ -54,6 +72,7 @@ async function main() {
     log('info', 'bridge.stopping', { signal });
     controller.abort();
     clearInterval(flushTimer);
+    clearInterval(imageTimer);
     cleanup.stop();
     accounts.stopAll();
     await Promise.race([

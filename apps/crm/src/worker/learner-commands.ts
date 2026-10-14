@@ -18,12 +18,43 @@ interface Owner { id: string; display_name: string; team_id: string; department_
 interface LearnerLeadRow {
   id: string; contact_id: string; owner_user_id: string | null; team_id: string | null; department_id: string;
   stage: string; status: string; version: number; next_action_task_id: string | null;
+  product_id: string | null; course_id: string | null;
 }
 interface StepRow { id: string; step_code: string; label: string; status: 'open' | 'done' | 'skipped'; version: number }
+type ContactCandidate = ContactState & { has_active_learner_lead?: number };
 
 const MAX_PHONE_LOOKUP = ROSTER_MAX_ROWS;
 const stepLabel = (code: string) => LEARNER_JOURNEY.find((s) => s.code === code)?.label ?? code;
 const learnerStage = (code: string) => stageLabel(code, 'learner');
+
+export async function validateLeadProgram(
+  db: D1Database, organizationId: string, productId?: string | null, courseId?: string | null,
+): Promise<{ error: ApiFail } | { productId: string | null; courseId: string | null; productName: string | null; courseName: string | null }> {
+  const pid = productId ?? null;
+  const cid = courseId ?? null;
+  if (!pid && cid) {
+    return { error: fail('VALIDATION_FAILED', 'Khóa học phải đi kèm chương trình học', { fields: { productId: 'Bắt buộc khi chọn khóa học' } }) };
+  }
+  let productName: string | null = null;
+  if (pid) {
+    const product = await db.prepare('SELECT id, name FROM product WHERE id = ? AND organization_id = ? AND active = 1')
+      .bind(pid, organizationId).first<{ id: string; name: string }>();
+    if (!product) {
+      return { error: fail('VALIDATION_FAILED', 'Chương trình học không hợp lệ hoặc đã ngừng bán', { fields: { productId: 'Không hợp lệ' } }) };
+    }
+    productName = product.name;
+  }
+  let courseName: string | null = null;
+  if (cid) {
+    const course = await db.prepare('SELECT id, name, product_id FROM course WHERE id = ? AND organization_id = ?')
+      .bind(cid, organizationId).first<{ id: string; name: string; product_id: string }>();
+    if (!course || course.product_id !== pid) {
+      return { error: fail('VALIDATION_FAILED', 'Khóa học không thuộc chương trình đã chọn', { fields: { courseId: 'Không thuộc chương trình' } }) };
+    }
+    courseName = course.name;
+  }
+  return { productId: pid, courseId: cid, productName, courseName };
+}
 
 // ---------- shared reads ----------
 
@@ -48,20 +79,22 @@ async function resolveOwner(db: D1Database, actor: Actor, ownerUserId: string | 
   return { owner: { id: actor.id, display_name: actor.displayName, team_id: actor.teamId, department_id: actor.departmentId } };
 }
 
+const ACTIVE_LEARNER_LEAD_SQL = `EXISTS (SELECT 1 FROM lead al WHERE al.contact_id = c.id AND al.pipeline = 'learner' AND al.status = 'active') AS has_active_learner_lead`;
+
 async function loadContactState(db: D1Database, organizationId: string, contactId: string) {
-  return db.prepare(`SELECT ${CONTACT_STATE_COLUMNS} FROM contact c WHERE c.id = ? AND c.organization_id = ? AND c.archived_at IS NULL`)
-    .bind(contactId, organizationId).first<ContactState>();
+  return db.prepare(`SELECT ${CONTACT_STATE_COLUMNS}, ${ACTIVE_LEARNER_LEAD_SQL} FROM contact c WHERE c.id = ? AND c.organization_id = ? AND c.archived_at IS NULL`)
+    .bind(contactId, organizationId).first<ContactCandidate>();
 }
 
 /** Learner customers that already use one of these phone numbers, found with a single query. */
 async function loadPhoneIndex(db: D1Database, organizationId: string, phones: string[]) {
-  const index = new Map<string, ContactState[]>();
+  const index = new Map<string, ContactCandidate[]>();
   if (!phones.length) return index;
-  const rows = await db.prepare(`SELECT cp.normalized_value AS phone, ${CONTACT_STATE_COLUMNS}
+  const rows = await db.prepare(`SELECT cp.normalized_value AS phone, ${CONTACT_STATE_COLUMNS}, ${ACTIVE_LEARNER_LEAD_SQL}
     FROM contact_point cp JOIN contact c ON c.id = cp.contact_id
     WHERE cp.type = 'phone' AND cp.normalized_value IN (SELECT value FROM json_each(?)) AND c.organization_id = ?
       AND c.archived_at IS NULL AND EXISTS (SELECT 1 FROM lead l WHERE l.contact_id = c.id AND l.pipeline = 'learner')
-    ORDER BY c.updated_at DESC`).bind(JSON.stringify(phones), organizationId).all<ContactState & { phone: string }>();
+    ORDER BY c.updated_at DESC`).bind(JSON.stringify(phones), organizationId).all<ContactCandidate & { phone: string }>();
   for (const { phone, ...state } of rows.results) index.set(phone, [...(index.get(phone) ?? []), state]);
   return index;
 }
@@ -72,6 +105,7 @@ async function loadOpenTasks(db: D1Database, leadId: string) {
 
 const poolMessage = 'Khách đang ở hồ chung, hãy bấm Nhận trước';
 const heldByOtherMessage = 'Khách đang do sale khác giữ';
+const activeLearnerLeadMessage = 'Khách đã có lead học viên đang mở';
 
 // ---------- creating a learner lead ----------
 
@@ -84,20 +118,26 @@ interface LeadDraft {
   partnerContractId?: string;
   sourceNote?: string;
   needSummary: string;
+  productId?: string | null;
+  courseId?: string | null;
   nextAction: { title: string; dueAt: string };
 }
 
-type ContactPlan = { kind: 'new' } | { kind: 'own'; state: ContactState } | { kind: 'adopt'; state: ContactState };
+type ContactPlan = { kind: 'new' } | { kind: 'own'; state: ContactCandidate } | { kind: 'adopt'; state: ContactCandidate };
 
 /**
  * Decides which customer a new lead attaches to. `candidates` are the learner customers found by the
  * phone number (or the one chosen by id). A customer held by someone else blocks the lead without
- * naming that person; one in the pool must be claimed first; one the owner already holds is reused.
+ * naming that person; one in the pool must be claimed first; one the owner already holds is reused
+ * only when it has no active learner lead.
  */
-function decideContact(candidates: ContactState[], owner: Owner, now: Date, byId: boolean): { error: ApiFail } | { contact: ContactPlan } {
+function decideContact(candidates: ContactCandidate[], owner: Owner, now: Date, byId: boolean): { error: ApiFail } | { contact: ContactPlan } {
   if (candidates.some((c) => heldNow(c, now) && c.owner_user_id !== owner.id)) return { error: fail('FORBIDDEN', heldByOtherMessage) };
   const own = candidates.find((c) => heldNow(c, now));
-  if (own) return { contact: { kind: 'own', state: own } };
+  if (own) {
+    if (own.has_active_learner_lead) return { error: fail('DUPLICATE_SUSPECTED', activeLearnerLeadMessage) };
+    return { contact: { kind: 'own', state: own } };
+  }
   if (candidates.some((c) => c.has_learner_lead)) return { error: fail('VALIDATION_FAILED', poolMessage) };
   // A chosen customer without any learner lead (for example a B2B contact) is taken over by the owner.
   const chosen = byId ? candidates[0] : undefined;
@@ -142,6 +182,18 @@ function writeLearnerLead(db: D1Database, tx: GuardedTx, actor: Actor, plan: Lea
     } else if (!touched.has(contactId)) {
       tx.update('contact', contactId, contact.state.version, {});
     }
+    if (phone) {
+      tx.raw(db.prepare(`INSERT INTO contact_point (id, contact_id, type, value, normalized_value, created_at)
+        SELECT ?1, ?2, 'phone', ?3, ?4, ?5
+        WHERE NOT EXISTS (SELECT 1 FROM contact_point WHERE contact_id = ?2 AND type = 'phone' AND normalized_value = ?4)`)
+        .bind(crypto.randomUUID(), contactId, draft.phone, phone, now));
+    }
+    if (email) {
+      tx.raw(db.prepare(`INSERT INTO contact_point (id, contact_id, type, value, normalized_value, created_at)
+        SELECT ?1, ?2, 'email', ?3, ?4, ?5
+        WHERE NOT EXISTS (SELECT 1 FROM contact_point WHERE contact_id = ?2 AND type = 'email' AND normalized_value = ?4)`)
+        .bind(crypto.randomUUID(), contactId, draft.email, email, now));
+    }
     touched.add(contactId);
   }
 
@@ -155,11 +207,15 @@ function writeLearnerLead(db: D1Database, tx: GuardedTx, actor: Actor, plan: Lea
     stage: 'new', status: 'active', next_action_task_id: taskId, assigned_at: now, stage_entered_at: now,
     created_by_user_id: actor.id, pipeline: 'learner',
     partner_contract_id: draft.source === 'partner' ? draft.partnerContractId ?? null : null,
+    product_id: draft.productId ?? null,
+    course_id: draft.courseId ?? null,
   }, {
     cols: ['code'],
     exprs: [`(SELECT printf('L-%04d', next_value) FROM lead_counter WHERE organization_id = ?)`],
     binds: [actor.organizationId],
   });
+  // Guard against two concurrent requests both creating an active learner lead for the same customer.
+  tx.assert(`SELECT COUNT(*) = 1 FROM lead WHERE contact_id = ? AND pipeline = 'learner' AND status = 'active'`, [contactId]);
   tx.raw(db.prepare('UPDATE lead_counter SET next_value = next_value + 1 WHERE organization_id = ?').bind(actor.organizationId));
   tx.insertVersioned('task', {
     id: taskId, lead_id: leadId, title: draft.nextAction.title, due_at: new Date(draft.nextAction.dueAt).toISOString(),
@@ -172,7 +228,10 @@ function writeLearnerLead(db: D1Database, tx: GuardedTx, actor: Actor, plan: Lea
     });
   }
   tx.activity(leadId, 'note', `Tạo lead học viên, nguồn ${draft.source}${draft.sourceNote ? ` (${draft.sourceNote})` : ''}`);
-  tx.audit('lead', leadId, null, { pipeline: 'learner', source: draft.source, contactId, owner: owner.id, contact: contact.kind });
+  tx.audit('lead', leadId, null, {
+    pipeline: 'learner', source: draft.source, contactId, owner: owner.id, contact: contact.kind,
+    product_id: draft.productId ?? null, course_id: draft.courseId ?? null,
+  });
   return { leadId, contactId };
 }
 
@@ -211,6 +270,9 @@ async function createLearnerLead({ db, actor, input, tx }: Ctx<CreateLearnerLead
     if ('error' in contract) return contract.error;
     assertContractActive(tx, input.partnerContractId!);
   }
+  const program = await validateLeadProgram(db, actor.organizationId, input.productId, input.courseId);
+  if ('error' in program) return program.error;
+
   const productIds = [...new Set(input.productIds ?? [])];
   if (productIds.length) {
     const sellable = await db.prepare('SELECT COUNT(*) AS n FROM product WHERE organization_id = ? AND active = 1 AND id IN (SELECT value FROM json_each(?))')
@@ -220,7 +282,7 @@ async function createLearnerLead({ db, actor, input, tx }: Ctx<CreateLearnerLead
 
   const phone = input.phone ? normalizePhone(input.phone) : null;
   const email = input.email ? normalizeEmail(input.email) : null;
-  let candidates: ContactState[];
+  let candidates: ContactCandidate[];
   if (input.contactId) {
     const state = await loadContactState(db, actor.organizationId, input.contactId);
     if (!state) return fail('NOT_FOUND', 'Không tìm thấy khách');
@@ -238,7 +300,10 @@ async function createLearnerLead({ db, actor, input, tx }: Ctx<CreateLearnerLead
     const already = new Set(attached.results.map((r) => r.product_id));
     attachProductIds = productIds.filter((p) => !already.has(p));
   }
-  const created = writeLearnerLead(db, tx, actor, { draft: input, owner, contact: decided.contact, phone, email, attachProductIds }, new Set());
+  const created = writeLearnerLead(db, tx, actor, {
+    draft: { ...input, productId: program.productId, courseId: program.courseId },
+    owner, contact: decided.contact, phone, email, attachProductIds,
+  }, new Set());
   return ok(created);
 }
 
@@ -247,7 +312,7 @@ async function createLearnerLead({ db, actor, input, tx }: Ctx<CreateLearnerLead
 export async function loadLearnerLead(
   db: D1Database, actor: Actor, leadId: string, expectedVersion: number, statuses: readonly string[] = ['active'],
 ): Promise<{ error: ApiFail } | { lead: LearnerLeadRow }> {
-  const lead = await db.prepare(`SELECT id, contact_id, owner_user_id, team_id, department_id, stage, status, version, next_action_task_id
+  const lead = await db.prepare(`SELECT id, contact_id, owner_user_id, team_id, department_id, stage, status, version, next_action_task_id, product_id, course_id
     FROM lead WHERE id = ? AND organization_id = ? AND pipeline = 'learner'`).bind(leadId, actor.organizationId).first<LearnerLeadRow>();
   const mayEdit = lead && (actor.role === 'admin' || lead.owner_user_id === actor.id || (actor.role === 'leader' && lead.team_id === actor.teamId));
   if (!lead || !mayEdit) return { error: fail('NOT_FOUND', 'Không tìm thấy lead học viên trong phạm vi của bạn') };
@@ -331,6 +396,7 @@ async function winLearnerLead({ db, actor, input, tx }: Ctx<WinLearnerLeadInput>
   if (steps.get('need_confirmed')?.status !== 'done') missing.push(stepLabel('need_confirmed'));
   const trial = steps.get('trial')?.status;
   if (trial !== 'done' && trial !== 'skipped') missing.push(`${stepLabel('trial')} (hoặc bỏ qua kèm lý do)`);
+  if (!lead.product_id) missing.push('chương trình học');
   if (!lead.owner_user_id) missing.push('người phụ trách');
   if (missing.length) return fail('VALIDATION_FAILED', `Chưa thể chốt thắng. Còn thiếu: ${missing.join(', ')}`);
   await closeLead(db, tx, lead, input.expectedVersion, { stage: 'won', status: 'won', won_note: input.note ?? null });

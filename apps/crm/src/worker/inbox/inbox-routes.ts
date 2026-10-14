@@ -16,6 +16,7 @@ import {
   INTAKE_FIELDS, classifyIntake, confirmProposedField, discardIntake, enqueueExtraction, linkIntakeContact, type IntakeFields,
 } from './intake';
 import { processWorkerCommands } from './worker-commands';
+import { ZaloOaNotConfigured, beginZaloOaConnect } from './zalo-oa-oauth';
 
 /** Inbox API for the web app. Inbox roles see every conversation of the organization; channel accounts are admin-only. */
 export const inboxRoutes = new Hono<AppBindings>();
@@ -58,7 +59,15 @@ const createAccountInput = z.object({
   displayName: z.string().trim().min(1).max(200),
   agentKey,
   externalId: z.string().trim().regex(/^\d{1,32}$/, 'Page ID là dãy số').optional(),
-}).refine((v) => v.channel !== 'facebook' || v.externalId !== undefined, { message: 'Cần Page ID', path: ['externalId'] });
+}).refine((v) => v.channel !== 'facebook' || v.externalId !== undefined, { message: 'Cần Page ID', path: ['externalId'] })
+  .refine((v) => v.channel !== 'zalo_oa', { message: 'Zalo OA kết nối bằng OAuth', path: ['channel'] });
+const GROUP_URL = /^https:\/\/zalo\.me\/g\/[A-Za-z0-9]+$/;
+const registrationPolicyInput = z.object({
+  enabled: z.boolean(),
+  groupUrl: z.union([z.string().trim().regex(GROUP_URL, 'Link nhóm Zalo không hợp lệ'), z.null()]).optional(),
+}).superRefine((v, ctx) => {
+  if (v.enabled && !v.groupUrl) ctx.addIssue({ code: 'custom', message: 'Cần link nhóm Zalo khi bật chính sách', path: ['groupUrl'] });
+});
 const updateAccountInput = z.object({
   botEnabled: z.boolean().optional(),
   sendPaused: z.boolean().optional(),
@@ -273,11 +282,13 @@ interface AccountRow {
   id: string; channel: string; externalId: string | null; displayName: string; agentKey: string | null; botEnabled: number;
   sendPaused: number; dailySendCap: number; quietStart: string | null; quietEnd: string | null; status: string;
   qrImage: string | null; qrExpiresAt: string | null; lastSeenAt: string | null; lastError: string | null; createdAt: string; updatedAt: string;
+  registrationPolicy: number; registrationGroupUrl: string | null;
 }
 const ACCOUNT_SELECT = `SELECT id, channel, external_id AS externalId, display_name AS displayName, agent_key AS agentKey,
     bot_enabled AS botEnabled, send_paused AS sendPaused, daily_send_cap AS dailySendCap, quiet_start AS quietStart,
     quiet_end AS quietEnd, status, qr_image AS qrImage, qr_expires_at AS qrExpiresAt, last_seen_at AS lastSeenAt,
-    last_error AS lastError, created_at AS createdAt, updated_at AS updatedAt
+    last_error AS lastError, created_at AS createdAt, updated_at AS updatedAt,
+    registration_policy AS registrationPolicy, registration_group_url AS registrationGroupUrl
   FROM channel_account`;
 /** Whole seconds until the QR expires, from Worker time. Zero when it has already expired; null when there is no QR. */
 function qrExpiresInSeconds(expiresAt: string | null, nowMs: number): number | null {
@@ -294,6 +305,7 @@ function qrExpiresInSeconds(expiresAt: string | null, nowMs: number): number | n
  */
 const presentAccount = (row: AccountRow, actor: Actor, nowMs = Date.now()) => ({
   ...row, botEnabled: row.botEnabled === 1, sendPaused: row.sendPaused === 1,
+  registrationPolicy: row.registrationPolicy === 1,
   qrImage: actor.role === 'admin' ? row.qrImage : null,
   lastError: actor.role === 'admin' ? row.lastError : null,
   qrExpiresInSeconds: qrExpiresInSeconds(row.qrExpiresAt, nowMs),
@@ -385,6 +397,36 @@ async function queueSessionCommand(c: Ctx, kind: 'zalo_login' | 'zalo_logout') {
 inboxRoutes.post('/accounts/:id/connect', adminOnly, (c) => queueSessionCommand(c, 'zalo_login'));
 inboxRoutes.post('/accounts/:id/disconnect', adminOnly, (c) => queueSessionCommand(c, 'zalo_logout'));
 
+inboxRoutes.post('/channel-accounts/zalo-oa/connect', adminOnly, async (c) => {
+  try {
+    return c.json(ok(await beginZaloOaConnect(c.env.DB, c.env, c.get('actor').id)));
+  } catch (error) {
+    if (error instanceof ZaloOaNotConfigured) return c.json(fail('NOT_CONFIGURED', error.message), 503);
+    throw error;
+  }
+});
+
+inboxRoutes.put('/accounts/:id/registration-policy', adminOnly, async (c) => {
+  const input = await body(c, registrationPolicyInput);
+  if ('error' in input) return input.error;
+  const actor = c.get('actor');
+  const db = c.env.DB;
+  const current = await loadAccount(db, actor, c.req.param('id')!);
+  if (!current) return c.json(notFound, 404);
+  if (current.channel !== 'zalo_oa') return c.json(fail('VALIDATION_FAILED', 'Chỉ tài khoản Zalo OA có chính sách đăng ký'), 422);
+  const enabled = input.data.enabled;
+  const groupUrl = input.data.groupUrl ?? null;
+  const now = new Date().toISOString();
+  const before = { registrationPolicy: current.registrationPolicy === 1, registrationGroupUrl: current.registrationGroupUrl };
+  const after = { registrationPolicy: enabled, registrationGroupUrl: groupUrl };
+  await db.batch([
+    db.prepare('UPDATE channel_account SET registration_policy = ?, registration_group_url = ?, updated_at = ? WHERE id = ?')
+      .bind(enabled ? 1 : 0, groupUrl, now, current.id),
+    auditRow(db, actor, 'inbox.setRegistrationPolicy', 'channel_account', current.id, before, after, now),
+  ]);
+  return c.json(ok(presentAccount((await loadAccount(db, actor, current.id))!, actor)));
+});
+
 inboxRoutes.get('/customer-bot-switch', adminOnly, async (c) => {
   const row = await c.env.DB.prepare('SELECT enabled, updated_at FROM customer_bot_switch WHERE id = 1').first<{ enabled: number; updated_at: string | null }>();
   return c.json(ok({ enabled: row?.enabled === 1, updatedAt: row?.updated_at ?? null }));
@@ -457,7 +499,8 @@ inboxRoutes.get('/intakes', async (c) => {
 inboxRoutes.post('/intakes/:id/classify', async (c) => {
   const input = await body(c, classifyInput);
   if ('error' in input) return input.error;
-  return commandResponse(c, await classifyIntake(c.env.DB, c.get('actor'), c.req.param('id'), input.data));
+  const appBase = linkBase(c.env.APP_URL, new URL(c.req.url).origin);
+  return commandResponse(c, await classifyIntake(c.env.DB, c.get('actor'), c.req.param('id'), input.data, appBase));
 });
 
 inboxRoutes.post('/intakes/:id/discard', async (c) =>
@@ -490,10 +533,16 @@ inboxRoutes.post('/conversations/:id/extract', async (c) => {
 
 // ---------- Zalo groups and recurring posts ----------
 
+const groupAgentKey = z.string().trim().min(1).max(128).regex(/^[a-z0-9-]+$/, 'Agent chỉ gồm chữ thường, số và dấu -').nullable();
 const groupPatchInput = z.object({
   summaryEnabled: z.boolean().optional(),
   scheduledOptOut: z.boolean().optional(),
-}).refine((v) => v.summaryEnabled !== undefined || v.scheduledOptOut !== undefined, { message: 'Không có thay đổi' });
+  botReplyEnabled: z.boolean().optional(),
+  /** Null clears a custom agent so the group uses the default learner-care agent. */
+  agentKey: groupAgentKey.optional(),
+}).refine((v) => v.summaryEnabled !== undefined || v.scheduledOptOut !== undefined
+  || v.botReplyEnabled !== undefined || v.agentKey !== undefined, { message: 'Không có thay đổi' });
+const staffMarkInput = z.object({ isStaff: z.boolean() });
 const weekdaysMask = z.number().int().min(1).max(127);
 const templateText = z.string().trim().min(1).max(SCHEDULE_TEXT_MAX);
 const createScheduleInput = z.object({ conversationId: intakeIdInput, templateText, weekdaysMask, timeOfDay: hhmm });
@@ -503,15 +552,18 @@ const updateScheduleInput = z.object({ templateText: templateText.optional(), we
 interface GroupRow {
   id: string; channelAccountId: string; accountName: string; accountStatus: string; sendPaused: number; externalThreadId: string;
   displayName: string | null; summaryEnabled: number; scheduledOptOut: number; lastMessageAt: string | null; activeSchedules: number;
+  botReplyEnabled: number; agentKey: string | null; botPausedUntil: string | null;
 }
 const GROUP_SELECT = `SELECT c.id, c.channel_account_id AS channelAccountId, a.display_name AS accountName, a.status AS accountStatus,
     a.send_paused AS sendPaused, c.external_thread_id AS externalThreadId, c.display_name AS displayName,
     c.summary_enabled AS summaryEnabled, c.scheduled_opt_out AS scheduledOptOut, c.last_message_at AS lastMessageAt,
-    (SELECT COUNT(*) FROM group_schedule s WHERE s.conversation_id = c.id AND s.status = 'active') AS activeSchedules
+    (SELECT COUNT(*) FROM group_schedule s WHERE s.conversation_id = c.id AND s.status = 'active') AS activeSchedules,
+    c.bot_reply_enabled AS botReplyEnabled, c.group_agent_key AS agentKey, c.bot_paused_until AS botPausedUntil
   FROM conversation c JOIN channel_account a ON a.id = c.channel_account_id`;
 const GROUP_PAGE = 1000;
 const presentGroup = (row: GroupRow) => ({
   ...row, sendPaused: row.sendPaused === 1, summaryEnabled: row.summaryEnabled === 1, scheduledOptOut: row.scheduledOptOut === 1,
+  botReplyEnabled: row.botReplyEnabled === 1,
 });
 const loadGroup = (db: D1Database, actor: Actor, id: string) =>
   db.prepare(`${GROUP_SELECT} WHERE c.id = ? AND c.organization_id = ? AND c.kind = 'group'`).bind(id, actor.organizationId).first<GroupRow>();
@@ -540,18 +592,75 @@ inboxRoutes.patch('/groups/:id', async (c) => {
   if (input.data.scheduledOptOut === false && current.scheduledOptOut === 1 && !MANAGER_ROLES.has(actor.role)) {
     return c.json(fail('FORBIDDEN', 'Chỉ quản lý được cho nhóm nhận lại tin định kỳ'), 403);
   }
+  if (input.data.botReplyEnabled !== undefined && !SETTINGS_ROLES.has(actor.role)) {
+    return c.json(fail('FORBIDDEN', 'Chỉ trưởng nhóm hoặc quản trị được bật bot trong nhóm'), 403);
+  }
+  if (input.data.agentKey !== undefined && actor.role !== 'admin') {
+    return c.json(fail('FORBIDDEN', 'Chỉ quản trị được đổi agent của nhóm'), 403);
+  }
   const next = {
     summaryEnabled: input.data.summaryEnabled ?? current.summaryEnabled === 1,
     scheduledOptOut: input.data.scheduledOptOut ?? current.scheduledOptOut === 1,
+    botReplyEnabled: input.data.botReplyEnabled ?? current.botReplyEnabled === 1,
+    agentKey: input.data.agentKey === undefined ? current.agentKey : input.data.agentKey,
   };
   const now = new Date().toISOString();
   await db.batch([
-    db.prepare('UPDATE conversation SET summary_enabled = ?, scheduled_opt_out = ?, updated_at = ? WHERE id = ?')
-      .bind(next.summaryEnabled ? 1 : 0, next.scheduledOptOut ? 1 : 0, now, current.id),
+    db.prepare(`UPDATE conversation SET summary_enabled = ?, scheduled_opt_out = ?, bot_reply_enabled = ?, group_agent_key = ?, updated_at = ?
+      WHERE id = ?`).bind(next.summaryEnabled ? 1 : 0, next.scheduledOptOut ? 1 : 0, next.botReplyEnabled ? 1 : 0, next.agentKey, now, current.id),
     auditRow(db, actor, 'inbox.updateGroup', 'conversation', current.id,
-      { summaryEnabled: current.summaryEnabled === 1, scheduledOptOut: current.scheduledOptOut === 1 }, next, now),
+      {
+        summaryEnabled: current.summaryEnabled === 1, scheduledOptOut: current.scheduledOptOut === 1,
+        botReplyEnabled: current.botReplyEnabled === 1, agentKey: current.agentKey,
+      }, next, now),
   ]);
   return c.json(ok(presentGroup((await loadGroup(db, actor, current.id))!)));
+});
+
+/** Members of one Zalo group, staff first, then by name. */
+inboxRoutes.get('/groups/:id/members', async (c) => {
+  const actor = c.get('actor');
+  const group = await loadGroup(c.env.DB, actor, c.req.param('id'));
+  if (!group) return c.json(notFound, 404);
+  const rows = await c.env.DB.prepare(`SELECT m.external_user_id AS externalUserId, m.display_name AS displayName,
+      CASE WHEN s.external_user_id IS NULL THEN 0 ELSE 1 END AS isStaff, m.updated_at AS updatedAt
+    FROM zalo_group_member m
+    LEFT JOIN zalo_staff_member s ON s.channel_account_id = ? AND s.external_user_id = m.external_user_id
+    WHERE m.conversation_id = ?
+    ORDER BY isStaff DESC, m.display_name COLLATE NOCASE, m.external_user_id`)
+    .bind(group.channelAccountId, group.id)
+    .all<{ externalUserId: string; displayName: string | null; isStaff: number; updatedAt: string }>();
+  return c.json(ok(rows.results.map((row) => ({ ...row, isStaff: row.isStaff === 1 }))));
+});
+
+/** Marks or clears one group member as ABM staff for every group of this Zalo account. */
+inboxRoutes.put('/groups/:id/members/:externalUserId/staff', settingsManager, async (c) => {
+  const input = await body(c, staffMarkInput);
+  if ('error' in input) return input.error;
+  const actor = c.get('actor');
+  const db = c.env.DB;
+  const group = await loadGroup(db, actor, c.req.param('id') ?? '');
+  if (!group) return c.json(notFound, 404);
+  const externalUserId = c.req.param('externalUserId') ?? '';
+  const member = await db.prepare('SELECT display_name FROM zalo_group_member WHERE conversation_id = ? AND external_user_id = ?')
+    .bind(group.id, externalUserId).first<{ display_name: string | null }>();
+  if (!member) return c.json(notFound, 404);
+  const existing = await db.prepare('SELECT 1 AS hit FROM zalo_staff_member WHERE channel_account_id = ? AND external_user_id = ?')
+    .bind(group.channelAccountId, externalUserId).first<{ hit: number }>();
+  const now = new Date().toISOString();
+  if (input.data.isStaff) {
+    await db.prepare(`INSERT INTO zalo_staff_member (channel_account_id, external_user_id, display_name, marked_by_user_id, created_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(channel_account_id, external_user_id) DO UPDATE SET
+        display_name = excluded.display_name, marked_by_user_id = excluded.marked_by_user_id`)
+      .bind(group.channelAccountId, externalUserId, member.display_name, actor.id, now).run();
+  } else {
+    await db.prepare('DELETE FROM zalo_staff_member WHERE channel_account_id = ? AND external_user_id = ?')
+      .bind(group.channelAccountId, externalUserId).run();
+  }
+  await auditRow(db, actor, 'inbox.setGroupStaff', 'conversation', group.id,
+    { externalUserId, isStaff: existing !== null }, { externalUserId, isStaff: input.data.isStaff }, now).run();
+  return c.json(ok({ externalUserId, isStaff: input.data.isStaff }));
 });
 
 inboxRoutes.get('/group-schedules', async (c) =>

@@ -4,8 +4,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ChannelAccountStatus } from '@abm/contracts';
 import { useActor } from '../actor-context';
 import {
-  ApiFailure, createGroupSchedule, deleteGroupSchedule, getConversation, getInboxSettings, listAccounts, listGroupSchedules, listGroups,
-  moveGroupSchedule, updateGroup, updateGroupSchedule, updateInboxSettings, type GroupScheduleAction,
+  ApiFailure, createGroupSchedule, deleteGroupSchedule, getConversation, getInboxSettings, listAccounts, listGroupMembers, listGroupSchedules,
+  listGroups, moveGroupSchedule, setGroupStaff, updateGroup, updateGroupSchedule, updateInboxSettings, type GroupScheduleAction,
 } from '../api';
 import { Icon } from '../components/icons';
 import { InboxThread, conversationName, fmtShortTime } from '../components/inbox-thread';
@@ -14,9 +14,9 @@ import { fmtDateTime } from '../format';
 import { WEEKDAYS, weekdaysLabel } from '../inbox-format';
 import type {
   ChannelAccountList, GroupSchedule, GroupScheduleInput, GroupScheduleStatus, InboxConversation, InboxSettings, ScheduleSkipReason, ZaloGroup,
-  ZaloGroupUpdate,
+  ZaloGroupMember, ZaloGroupUpdate,
 } from '../types';
-import { MANAGER_ROLES } from './inbox';
+import { MANAGER_ROLES, SETTINGS_ROLES } from './inbox';
 import { SETTINGS_KEY } from './inbox-settings';
 
 /** Same limit as the Worker's schedule text. */
@@ -52,7 +52,25 @@ const ACCOUNT_STATE: Record<ChannelAccountStatus, [string, Tone] | null> = {
 
 const groupName = (g: Pick<ZaloGroup, 'displayName'>) => conversationName({ displayName: g.displayName, kind: 'group' });
 const groupsKey = (account: string) => ['inbox', 'groups', account] as const;
+const membersKey = (groupId: string) => ['inbox', 'group-members', groupId] as const;
 const schedulesKey = (conversationId: string | undefined) => ['inbox', 'group-schedules', conversationId ?? 'all'] as const;
+const pauseClock = new Intl.DateTimeFormat('vi-VN', {
+  timeZone: 'Asia/Ho_Chi_Minh', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+});
+/** Search appears once a group roster is longer than this. */
+const MEMBER_SEARCH_AT = 30;
+
+/** "Long đang tạm im đến HH:mm" while the pause is still in the future, in Vietnam time. */
+function pauseUntilLabel(until: string | null): string | null {
+  if (!until) return null;
+  const at = new Date(until);
+  if (!(at.getTime() > Date.now())) return null;
+  const parts = Object.fromEntries(pauseClock.formatToParts(at).map((p) => [p.type, p.value]));
+  if (!parts.hour || !parts.minute) return null;
+  return `Long đang tạm im đến ${parts.hour}:${parts.minute}`;
+}
+
+const memberLabel = (m: ZaloGroupMember) => m.displayName?.trim() || m.externalUserId;
 
 /** Group and schedule writes refresh every inbox query afterwards, including after a failure. */
 function useInboxMutation<I, T>(fn: (input: I) => Promise<T>) {
@@ -76,7 +94,7 @@ export function ZaloGroupsPage() {
       <div className="page-head">
         <div>
           <h1>Nhóm Zalo</h1>
-          <p className="sub">Bot không trả lời trong nhóm. Nhân viên nhắn tay, đặt tin định kỳ (cần duyệt) và nhận tóm tắt hằng ngày lúc 21:00 qua Lark.</p>
+          <p className="sub">Long chỉ trả lời trong nhóm đã bật, khi học viên @tag Long, trả lời tin của Long hoặc gõ “Long ơi”. Nhân viên nhắn tay, đặt tin định kỳ (cần duyệt) và nhận tóm tắt hằng ngày lúc 21:00 qua Lark.</p>
         </div>
         <select aria-label="Lọc theo tài khoản Zalo" value={account} onChange={(e) => setAccount(e.target.value)}>
           <option value="">Mọi tài khoản</option>
@@ -125,7 +143,7 @@ export function ZaloGroupsPage() {
   );
 }
 
-/** `/zalo-groups/$groupId`: the group's messages and composer, its switches and its schedules. */
+/** `/zalo-groups/$groupId`: the group's messages and composer, its switches, members and schedules. */
 export function ZaloGroupPage() {
   const { groupId } = useParams({ from: '/zalo-groups/$groupId' });
   const conversation = useQuery<InboxConversation, ApiFailure>({
@@ -184,10 +202,11 @@ export function ZaloGroupPage() {
             {groups.data && !group && <span className="small muted">Không tìm thấy cài đặt của nhóm này.</span>}
           </div>
           <p className="small text-2 row" style={{ alignItems: 'flex-start' }}>
-            <Icon name="info" />Bot không trả lời trong nhóm. Tóm tắt hằng ngày gửi vào Lark lúc 21:00 nếu hôm đó nhóm có tin.
+            <Icon name="info" />Long chỉ trả lời trong nhóm đã bật. Tóm tắt hằng ngày gửi vào Lark lúc 21:00 nếu hôm đó nhóm có tin.
           </p>
         </aside>
       </div>
+      <MembersCard groupId={c.id} />
       <SchedulesCard conversationId={c.id} />
     </div>
   );
@@ -204,16 +223,31 @@ function AccountState({ group: g }: { group: ZaloGroup }) {
   );
 }
 
-/** "Tóm tắt hằng ngày" for anyone; "Không nhận tin định kỳ" can be turned off again only by a manager. */
+/** Daily summary for anyone. Recurring-post opt-out reopens for a manager. Long replies and ABM marks follow SETTINGS_ROLES; the agent is admin-only. */
 function GroupSwitches({ group: g }: { group: ZaloGroup }) {
   const actor = useActor();
   const toast = useToast();
   const update = useInboxMutation<ZaloGroupUpdate, ZaloGroup>((input) => updateGroup(g.id, input));
   const save = (input: ZaloGroupUpdate, done: string) => update.mutate(input, { onSuccess: () => toast(done) });
   const name = groupName(g);
+  const canSettings = SETTINGS_ROLES.includes(actor.role);
   const optOutLocked = g.scheduledOptOut && !MANAGER_ROLES.includes(actor.role);
+  const paused = pauseUntilLabel(g.botPausedUntil);
   return (
     <div className="stack-sm">
+      <label className="row" title={canSettings ? undefined : 'Chỉ trưởng nhóm hoặc quản trị được bật bot trong nhóm'}>
+        <input type="checkbox" checked={g.botReplyEnabled} disabled={update.isPending || !canSettings} aria-label={`Long trả lời trong nhóm ${name}`}
+          onChange={(e) => save({ botReplyEnabled: e.target.checked }, e.target.checked ? `Long sẽ trả lời trong ${name}` : `Long không trả lời trong ${name}`)} />
+        Long trả lời trong nhóm
+      </label>
+      <span className="small muted">Khi học viên @tag Long, trả lời vào tin của Long hoặc gõ “Long ơi”</span>
+      {paused && <span className="small">{paused}</span>}
+      {actor.role === 'admin' && (
+        <GroupAgentField group={g} pending={update.isPending} onSave={(agentKey) => save(
+          { agentKey },
+          agentKey ? `Đã đặt agent ${agentKey} cho ${name}` : `${name} dùng lại agent mặc định`,
+        )} />
+      )}
       <label className="row">
         <input type="checkbox" checked={g.summaryEnabled} disabled={update.isPending} aria-label={`Tóm tắt hằng ngày nhóm ${name}`}
           onChange={(e) => save({ summaryEnabled: e.target.checked }, e.target.checked ? `Đã bật tóm tắt hằng ngày cho ${name}` : `Đã tắt tóm tắt hằng ngày cho ${name}`)} />
@@ -226,6 +260,93 @@ function GroupSwitches({ group: g }: { group: ZaloGroup }) {
       </label>
       {optOutLocked && <span className="small muted">Chỉ quản lý được bỏ chọn.</span>}
       <FormError error={update.error} />
+    </div>
+  );
+}
+
+/** Admin sets the group's agent. An empty value clears it to the default. */
+function GroupAgentField({ group: g, pending, onSave }: { group: ZaloGroup; pending: boolean; onSave: (agentKey: string | null) => void }) {
+  const server = g.agentKey ?? '';
+  const [value, setValue] = useState(server);
+  const [seen, setSeen] = useState(server);
+  if (seen !== server) {
+    setSeen(server);
+    setValue(server);
+  }
+  const next = value.trim() || null;
+  const unchanged = next === g.agentKey;
+  const commit = () => { if (!pending && !unchanged) onSave(next); };
+  return (
+    <Field label="Agent" htmlFor={`group-agent-${g.id}`}>
+      <span className="row">
+        <input id={`group-agent-${g.id}`} type="text" maxLength={128} placeholder="cham-soc-hoc-vien" value={value}
+          disabled={pending} style={{ maxWidth: 200 }} onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commit(); } }} />
+        <button type="button" className="btn btn-sm" disabled={pending || unchanged} onClick={commit}>Lưu</button>
+      </span>
+    </Field>
+  );
+}
+
+/** Roster of one group. The ABM checkbox is enabled for leader and admin only. */
+function MembersCard({ groupId }: { groupId: string }) {
+  const actor = useActor();
+  const [query, setQuery] = useState('');
+  const members = useQuery<ZaloGroupMember[], ApiFailure>({
+    queryKey: membersKey(groupId),
+    queryFn: () => listGroupMembers(groupId),
+    refetchInterval: LIST_POLL_MS,
+    refetchIntervalInBackground: false,
+  });
+  const canMark = SETTINGS_ROLES.includes(actor.role);
+  const showSearch = (members.data?.length ?? 0) > MEMBER_SEARCH_AT;
+  const needle = showSearch ? query.trim().toLocaleLowerCase('vi') : '';
+  const rows = members.data?.filter((m) => !needle || memberLabel(m).toLocaleLowerCase('vi').includes(needle)
+    || m.externalUserId.toLocaleLowerCase('vi').includes(needle));
+  return (
+    <section className="card">
+      <div className="card-head"><h2>Thành viên nhóm</h2></div>
+      <div className="card-body stack">
+        <p className="small text-2">Long không trả lời người ABM và nhường câu hỏi khi người ABM đã trả lời. Danh sách tự cập nhật mỗi 6 giờ và khi có người nhắn.</p>
+        {members.isLoading && <Loading rows={3} />}
+        {members.error && <ErrorState error={members.error} onRetry={() => members.refetch()} />}
+        {showSearch && (
+          <input type="search" aria-label="Tìm thành viên" placeholder="Tìm theo tên…" value={query} onChange={(e) => setQuery(e.target.value)} />
+        )}
+        {members.data && !members.data.length && <span className="small muted">Chưa có thành viên.</span>}
+        {rows && !!members.data?.length && !rows.length && <span className="small muted">Không thấy thành viên khớp.</span>}
+        {!!rows?.length && (
+          <div className="stack-sm">
+            {rows.map((m) => <MemberRow key={m.externalUserId} groupId={groupId} member={m} canMark={canMark} />)}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function MemberRow({ groupId, member: m, canMark }: { groupId: string; member: ZaloGroupMember; canMark: boolean }) {
+  const toast = useToast();
+  const name = memberLabel(m);
+  const mark = useInboxMutation<boolean, { externalUserId: string; isStaff: boolean }>(
+    (isStaff) => setGroupStaff(groupId, m.externalUserId, isStaff),
+  );
+  return (
+    <div className="stack-sm">
+      <div className="row-wrap">
+        <span>{name}</span>
+        <label className="row" title={canMark ? undefined : 'Chỉ trưởng nhóm hoặc quản trị được đánh dấu người ABM'}>
+          <input type="checkbox" checked={m.isStaff} disabled={!canMark || mark.isPending} aria-label={`Người ABM ${name}`}
+            onChange={(e) => {
+              const isStaff = e.target.checked;
+              mark.mutate(isStaff, {
+                onSuccess: () => toast(isStaff ? `Đã đánh dấu ${name} là người ABM` : `Đã bỏ đánh dấu người ABM của ${name}`),
+              });
+            }} />
+          Người ABM
+        </label>
+      </div>
+      <FormError error={mark.error} />
     </div>
   );
 }

@@ -11,7 +11,7 @@ ADR-001 chọn Cloudflare Queues và transactional outbox cho side effects. Bả
 ## Quyết định
 
 - Bảng `channel_command` với `status` (`pending`/`claimed`/`done`/`failed`), `attempts`, `claimed_at`, `lease_expires_at`, `next_run_at`, `dedupe_key` UNIQUE, cùng `kind`, `target`, `payload_json`, `result_json`. Ghi lệnh cùng batch với thay đổi nghiệp vụ tạo ra nó; `dedupe_key` chống tạo trùng.
-- Lệnh `target='bridge'` (gửi Zalo, gọi GoClaw, đăng nhập/đăng xuất Zalo) do sidecar long-poll và claim, lease 300 giây (lớn hơn timeout GoClaw 180 giây). Kết quả chỉ được áp khi `UPDATE ... WHERE id = ? AND status = 'claimed' AND attempts = ?` đổi đúng 1 dòng; kết quả của lease đã hết hạn bị bỏ qua.
+- Lệnh `target='bridge'` (gửi Zalo, gọi GoClaw, đăng nhập/đăng xuất Zalo) do sidecar long-poll và claim, lease 300 giây (lớn hơn thời gian tối đa một lượt GoClaw của bridge: chờ 25 giây, quá thì huỷ lượt đó và hỏi lại ngay một lần, chờ tối đa 90 giây; lượt có ảnh chờ 45 rồi 90 giây). Kết quả chỉ được áp khi `UPDATE ... WHERE id = ? AND status = 'claimed' AND attempts = ?` đổi đúng 1 dòng; kết quả của lease đã hết hạn bị bỏ qua.
 - Lệnh `target='worker'` (gửi Messenger, gửi Lark) do Worker xử lý ngay bằng `waitUntil`; Cron Trigger chạy mỗi phút thử lại lệnh đến hạn và lệnh có lease hết hạn.
 - Tối đa 5 lần thử. Lần lỗi thứ n hẹn `next_run_at` sau 2^attempts phút; quá 5 lần thì `failed`.
 - Không cần gói Workers Paid. Queues vẫn là lựa chọn hợp lệ cho side effect khác khi có nhu cầu.
