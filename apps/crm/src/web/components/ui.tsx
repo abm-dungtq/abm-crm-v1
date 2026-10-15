@@ -143,12 +143,29 @@ export function Modal({ open, title, onClose, children, footer }: { open: boolea
   );
 }
 
-export function Field({ label, required, error, hint, children, htmlFor }: { label: string; required?: boolean; error?: string; hint?: string; children: ReactNode; htmlFor?: string }) {
+export function Field({
+  label,
+  required,
+  error,
+  hint,
+  counter,
+  children,
+  htmlFor,
+}: {
+  label: string;
+  required?: boolean;
+  error?: string;
+  hint?: string;
+  counter?: ReactNode;
+  children: ReactNode;
+  htmlFor?: string;
+}) {
+  const msg = error ? <span className="field-error" role="alert">{error}</span> : hint ? <span className="field-hint">{hint}</span> : null;
   return (
     <div className="field">
       <label htmlFor={htmlFor}>{label}{required && <span className="req" aria-hidden="true"> *</span>}</label>
       {children}
-      {error ? <span className="field-error" role="alert">{error}</span> : hint ? <span className="field-hint">{hint}</span> : null}
+      {counter ? <div className="field-foot">{msg ?? <span />}{counter}</div> : msg}
     </div>
   );
 }

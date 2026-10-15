@@ -1,7 +1,10 @@
 import { expect, test } from 'vitest';
+import {
+  INTAKE_FIELD_LABEL, SUMMARY_MAX, buildClassifyPayload, clampActivityText, prefillClassifyForm, summaryBullets,
+} from '../src/web/components/note-format';
 import { compressImage, fitImageDimensions, IMAGE_DECODE_ERROR, IMAGE_MAX_BYTES, toJpgFilename } from '../src/web/image-compress';
 import { canChannelSendImages, conversationsPath, mergeMessages, senderLabel, weekdaysLabel } from '../src/web/inbox-format';
-import type { InboxMessage } from '../src/web/types';
+import { INTAKE_FIELDS, type InboxMessage, type LeadIntake } from '../src/web/types';
 
 const msg = (id: string, createdAt: string, overrides: Partial<InboxMessage> = {}): InboxMessage => ({
   id, direction: 'in', senderKind: 'customer', senderExternalId: null, sentByUserId: null, sentByName: null, externalMsgId: null,
@@ -111,5 +114,82 @@ test('compressImage steps quality down and scales further until the JPEG is at m
       throw new Error('decode failed');
     }),
   ).rejects.toThrow(IMAGE_DECODE_ERROR);
+});
+
+test('intake summary field is registered, parsed into bullet items, prefilled in the classify form, and sent only when non-empty', () => {
+  expect(INTAKE_FIELDS).toContain('summary');
+  for (const field of INTAKE_FIELDS) {
+    expect(INTAKE_FIELD_LABEL[field]).toBeTruthy();
+  }
+
+  expect(summaryBullets(undefined)).toEqual([]);
+  expect(summaryBullets('  - Khách hỏi khóa AI 199k \n- Đã báo lịch tối thứ 7\n\n• Hẹn gọi lại chiều mai ')).toEqual([
+    'Khách hỏi khóa AI 199k',
+    'Đã báo lịch tối thứ 7',
+    'Hẹn gọi lại chiều mai',
+  ]);
+
+  const fakeIntake: LeadIntake = {
+    id: 'in-1',
+    conversationId: 'conv-1',
+    conversationName: 'Nguyễn Minh Anh',
+    externalThreadId: 'th-1',
+    channel: 'zalo_oa',
+    accountName: 'OA ABM',
+    contactId: null,
+    fields: {
+      name: 'Nguyễn Minh Anh',
+      phone: '0901234567',
+      need: 'Học AI ứng dụng',
+      summary: '- Quan tâm lớp AI 199k\n- Đã gửi thông tin lịch học',
+    },
+    proposed: {},
+    status: 'pending',
+    leadId: null,
+    classifiedByUserId: null,
+    classifiedAt: null,
+    createdAt: '2026-10-15T04:00:00.000Z',
+    updatedAt: '2026-10-15T04:00:00.000Z',
+  };
+  const prefilled = prefillClassifyForm(fakeIntake, null);
+  expect(prefilled.summary).toBe('- Quan tâm lớp AI 199k\n- Đã gửi thông tin lịch học');
+  expect(prefillClassifyForm({ ...fakeIntake, fields: { summary: 'x'.repeat(2000) } }, 'Fallback').summary.length).toBe(SUMMARY_MAX);
+
+  expect(buildClassifyPayload('learner', { contactName: 'Minh Anh' }, '  - Ý 1\n- Ý 2  ')).toEqual({
+    pipeline: 'learner',
+    input: { contactName: 'Minh Anh' },
+    summary: '- Ý 1\n- Ý 2',
+  });
+  expect(buildClassifyPayload('b2b', { contactName: 'Minh Anh' }, '   \n  ')).toEqual({
+    pipeline: 'b2b',
+    input: { contactName: 'Minh Anh' },
+  });
+  expect(buildClassifyPayload('b2b', { contactName: 'Minh Anh' })).toEqual({
+    pipeline: 'b2b',
+    input: { contactName: 'Minh Anh' },
+  });
+});
+
+test('clampActivityText keeps short bullet summaries intact and clamps notes longer than 6 lines or 600 characters', () => {
+  const shortSummary = [
+    'Tóm tắt hội thoại Zalo OA:',
+    '- Khách hỏi khóa AI ứng dụng cho người mới',
+    '- Đã báo lịch khai giảng thứ 7 và học phí 199k',
+    '- Hẹn gọi lại chiều mai xác nhận giữ chỗ',
+  ].join('\n');
+  expect(clampActivityText(shortSummary)).toEqual({ clamped: false, preview: shortSummary });
+
+  const eightLines = Array.from({ length: 8 }, (_, i) => `- Dòng thứ ${i + 1}`).join('\n');
+  const clampedLines = clampActivityText(eightLines);
+  expect(clampedLines.clamped).toBe(true);
+  expect(clampedLines.preview.split('\n')).toHaveLength(6);
+  expect(clampedLines.preview.endsWith('…')).toBe(true);
+
+  const longParagraph = 'Khách trao đổi chi tiết về nhu cầu đào tạo nội bộ. '.repeat(15);
+  expect(longParagraph.length).toBeGreaterThan(600);
+  const clampedChars = clampActivityText(longParagraph);
+  expect(clampedChars.clamped).toBe(true);
+  expect(clampedChars.preview.length).toBeLessThanOrEqual(601);
+  expect(clampedChars.preview.endsWith('…')).toBe(true);
 });
 

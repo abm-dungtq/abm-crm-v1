@@ -1,20 +1,15 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from '@tanstack/react-router';
-import { ACTIVE_STAGES, COMMANDS, LEARNER_STAGES, activityLabel, learnerStageLabel, lostReasonLabel, sourceLabel, stageLabel, ACTIVITY_TYPES, type SetLeadProgramInput, type StageCode } from '@abm/contracts';
+import { ACTIVE_STAGES, COMMANDS, LEARNER_STAGES, learnerStageLabel, lostReasonLabel, sourceLabel, stageLabel, type SetLeadProgramInput, type StageCode } from '@abm/contracts';
 import { useActor } from '../actor-context';
 import { useApi, useCommand } from '../api';
-import { Icon, type IconName } from '../components/icons';
+import { Icon } from '../components/icons';
 import {
-  AssignDialog, ChangeStageDialog, CompleteTaskDialog, DecideButtons, LogActivityForm, ReleaseDialog, RequestOwnerDialog, approvalTitle,
+  ActivityTimeline, AssignDialog, ChangeStageDialog, CompleteTaskDialog, DecideButtons, LogActivityForm, ReleaseDialog, RequestOwnerDialog, approvalTitle,
 } from '../components/lead-actions';
 import { Avatar, Badge, Empty, ErrorState, FormError, HealthBadges, Loading, PipelineBadge, StageBadge, StatusBadge, useToast } from '../components/ui';
 import { fmtDateTime, fmtDue, fmtHours, fmtMoney } from '../format';
 import type { AuditItem, LeadDetail, LeadItem, LeadTask, ProductItem } from '../types';
-
-const ACTIVITY_ICON: Record<string, IconName> = {
-  call: 'phone', meeting: 'meeting', email: 'mail', message: 'message', customer_reply: 'message', file_sent: 'file',
-  proposal_sent: 'file', note: 'note', stage_changed: 'arrow', owner_changed: 'swap', task_completed: 'check',
-};
 
 export function LeadDetailPage() {
   const { leadId } = useParams({ from: '/leads/$leadId' });
@@ -135,21 +130,7 @@ function LeadView({ detail }: { detail: LeadDetail }) {
             )}
             <div className="card-body">
               {detail.activities.length === 0 ? <Empty title="Chưa có hoạt động" icon="note">Ghi cuộc gọi đầu tiên để tính liên hệ lần đầu.</Empty> : (
-                <ol className="timeline">
-                  {detail.activities.map((a) => {
-                    const contact = ACTIVITY_TYPES.find((t) => t.code === a.type)?.contact;
-                    const system = ['stage_changed', 'owner_changed', 'task_completed'].includes(a.type);
-                    return (
-                      <li key={a.id}>
-                        <span className="tl-icon" data-kind={system ? 'system' : contact ? 'contact' : undefined}><Icon name={ACTIVITY_ICON[a.type] ?? 'note'} /></span>
-                        <div style={{ minWidth: 0 }}>
-                          <div className="row-wrap"><strong style={{ fontWeight: 600 }}>{activityLabel(a.type)}</strong><span className="tl-meta">{a.actorName ?? 'Hệ thống'} · {fmtDateTime(a.occurredAt)}</span></div>
-                          <p className="text-2" style={{ overflowWrap: 'anywhere' }}>{a.summary}</p>
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ol>
+                <ActivityTimeline items={detail.activities} />
               )}
             </div>
           </section>

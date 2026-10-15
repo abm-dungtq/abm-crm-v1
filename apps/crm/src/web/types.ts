@@ -432,7 +432,7 @@ export interface RosterMember {
 export interface AssignResult { assigneeUserId: string; assigneeName: string }
 
 // ---------- lead intake (src/worker/inbox/intake.ts) ----------
-export const INTAKE_FIELDS = ['name', 'phone', 'email', 'program', 'need', 'interest', 'note'] as const;
+export const INTAKE_FIELDS = ['name', 'phone', 'email', 'program', 'need', 'interest', 'note', 'summary'] as const;
 export type IntakeField = (typeof INTAKE_FIELDS)[number];
 export type IntakeValues = Partial<Record<IntakeField, string>> & { productId?: string };
 export type IntakeStatus = 'pending' | 'classified' | 'discarded';

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Link, useParams } from '@tanstack/react-router';
 import {
-  LEARNER_JOURNEY, LEARNER_LOST_REASONS, PRIVACY_REQUEST_KINDS, activityLabel, enrollmentStatusLabel,
+  LEARNER_JOURNEY, LEARNER_LOST_REASONS, PRIVACY_REQUEST_KINDS, enrollmentStatusLabel,
   type BookTrialInput, type CancelPendingEnrollmentInput, type ChangeCustomerOwnerInput, type CloseLearnerLeadInput,
   type CreatePrivacyRequestInput, type LearnerLostReasonCode, type MarkJourneyStepInput, type PrivacyRequestKind,
   type RecordConsentInput, type ReserveSeatInput, type SkipTrialInput, type WinLearnerLeadInput,
@@ -9,7 +9,7 @@ import {
 import { useActor } from '../actor-context';
 import { useApi, useCommand } from '../api';
 import { Icon } from '../components/icons';
-import { LogActivityForm } from '../components/lead-actions';
+import { ActivityTimeline, LogActivityForm } from '../components/lead-actions';
 import { Alert, Badge, Empty, ErrorState, Field, FormError, Loading, Modal, fieldErrors, useToast } from '../components/ui';
 import { fmtDate, fmtDateTime, fmtDue, fmtMoney } from '../format';
 import type { LearnerContact, LearnerDetail, LearnerLead, LearnerPermissions, LearnerProduct, ProductItem } from '../types';
@@ -143,21 +143,7 @@ function FullView({ detail }: { detail: Detail }) {
             )}
             <div className="card-body">
               {detail.activities.length === 0 ? <Empty title="Chưa có hoạt động" icon="note" /> : (
-                <ol className="timeline">
-                  {detail.activities.map((a) => (
-                    <li key={a.id}>
-                      <span className="tl-icon"><Icon name="note" /></span>
-                      <div style={{ minWidth: 0 }}>
-                        <div className="row-wrap">
-                          <strong style={{ fontWeight: 600 }}>{activityLabel(a.type)}</strong>
-                          <span className="mono small muted">{leadCodes.get(a.lead_id)}</span>
-                          <span className="tl-meta">{a.actorName ?? 'Hệ thống'} · {fmtDateTime(a.occurredAt)}</span>
-                        </div>
-                        <p className="text-2" style={{ overflowWrap: 'anywhere' }}>{a.summary}</p>
-                      </div>
-                    </li>
-                  ))}
-                </ol>
+                <ActivityTimeline items={detail.activities.map((a) => ({ ...a, leadCode: leadCodes.get(a.lead_id) ?? null }))} />
               )}
             </div>
           </section>

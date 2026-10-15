@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { Link } from '@tanstack/react-router';
+import { useNavigate } from '@tanstack/react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { COMMANDS } from '@abm/contracts';
 import { useActor } from '../actor-context';
@@ -8,19 +8,19 @@ import { fmtMoney } from '../format';
 import { DuplicateMatches, duplicateMatches, type DuplicateMatch } from '../pages/lead-new';
 import { useOwnerOptions } from '../pages/learners';
 import {
-  INTAKE_FIELDS, type ClassifyIntakeResult, type InboxConversation, type IntakeField, type IntakePipeline, type LeadIntake, type LearnerList, type ProductItem,
+  type ClassifyIntakeResult, type InboxConversation, type IntakeField, type IntakePipeline, type LeadIntake, type LearnerList, type ProductItem,
 } from '../types';
 import { NextActionFields, emptyNextAction, nextActionPayload } from './lead-actions';
+import {
+  INTAKE_FIELD_LABEL, NEED_MAX, ROW_INTAKE_FIELDS, SUMMARY_MAX, SUMMARY_NEAR_LIMIT,
+  prefillClassifyForm, summaryBullets, type ClassifyForm,
+} from './note-format';
 import { Alert, Badge, ErrorState, Field, FormError, Loading, Modal, fieldErrors, useDebounced, useToast } from './ui';
+
+export { INTAKE_FIELD_LABEL, SUMMARY_MAX, prefillClassifyForm, summaryBullets, type ClassifyForm };
 
 /** Extraction results arrive from the bridge a little later, so the open conversation's intake is polled. */
 const INTAKE_POLL_MS = 10_000;
-/** Same limit as needSummary in createLeadInput / createLearnerLeadInput. */
-const NEED_MAX = 1000;
-
-export const INTAKE_FIELD_LABEL: Record<IntakeField, string> = {
-  name: 'Tên', phone: 'SĐT', email: 'Email', program: 'Chương trình', need: 'Nhu cầu', interest: 'Quan tâm', note: 'Ghi chú',
-};
 const PIPELINE_LABEL: Record<IntakePipeline, string> = { b2b: 'Tạo lead B2B', learner: 'Tạo lead học viên' };
 /** Roles that list customers in their scope (GET /learners), the same scope link-contact checks. */
 const LINK_ROLES: readonly string[] = ['sale', 'leader', 'director', 'admin'];
@@ -119,32 +119,47 @@ function IntakeDetails({
     onSuccess: (_data, field) => toast(`Đã dùng giá trị mới cho ${INTAKE_FIELD_LABEL[field]}`),
     onSettled: refresh,
   });
-  const shown = INTAKE_FIELDS.filter((f) => intake.fields[f] || intake.proposed[f]);
+  const shown = ROW_INTAKE_FIELDS.filter((f) => intake.fields[f] || intake.proposed[f]);
+  const bullets = summaryBullets(intake.fields.summary);
   const canCreate = (p: IntakePipeline) =>
     (COMMANDS[p === 'b2b' ? 'createLead' : 'createLearnerLead'].roles as readonly string[]).includes(actor.role);
 
   return (
     <div className="stack-sm">
-      {shown.length ? (
-        <dl className="intake-fields">
-          {shown.map((f) => (
-            <div key={f}>
-              <dt>{INTAKE_FIELD_LABEL[f]}</dt>
-              <dd>
-                {intake.fields[f] ?? <span className="muted">Chưa có</span>}
-                {intake.proposed[f] && (
-                  <div className="intake-proposed">
-                    <span className="small"><strong>Giá trị mới:</strong> {intake.proposed[f]}</span>
-                    <button className="btn btn-sm" disabled={confirm.isPending} onClick={() => confirm.mutate(f)}
-                      aria-label={`Dùng giá trị mới cho ${INTAKE_FIELD_LABEL[f]}`}>
-                      Dùng giá trị mới
-                    </button>
-                  </div>
-                )}
-              </dd>
+      {shown.length > 0 || bullets.length > 0 ? (
+        <>
+          {shown.length > 0 && (
+            <dl className="intake-fields">
+              {shown.map((f) => (
+                <div key={f}>
+                  <dt>{INTAKE_FIELD_LABEL[f]}</dt>
+                  <dd>
+                    {intake.fields[f] ?? <span className="muted">Chưa có</span>}
+                    {intake.proposed[f] && (
+                      <div className="intake-proposed">
+                        <span className="small"><strong>Giá trị mới:</strong> {intake.proposed[f]}</span>
+                        <button className="btn btn-sm" disabled={confirm.isPending} onClick={() => confirm.mutate(f)}
+                          aria-label={`Dùng giá trị mới cho ${INTAKE_FIELD_LABEL[f]}`}>
+                          Dùng giá trị mới
+                        </button>
+                      </div>
+                    )}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          )}
+          {bullets.length > 0 && (
+            <div className="intake-summary" aria-label={INTAKE_FIELD_LABEL.summary}>
+              <div className="intake-summary-title">{INTAKE_FIELD_LABEL.summary}</div>
+              <ul className="intake-summary-list">
+                {bullets.map((line, i) => (
+                  <li key={i}>{line}</li>
+                ))}
+              </ul>
             </div>
-          ))}
-        </dl>
+          )}
+        </>
       ) : <p className="small muted">Bot chưa trích được thông tin nào.</p>}
       <FormError error={confirm.error} />
       {hasOpenLead ? (
@@ -176,42 +191,6 @@ function IntakeDetails({
   );
 }
 
-interface ClassifyForm {
-  contactName: string;
-  phone: string;
-  email: string;
-  companyName: string;
-  taxCode: string;
-  needSummary: string;
-  sourceNote: string;
-  ownerUserId: string;
-  productId: string;
-  courseId: string;
-}
-
-/** Form values from the intake: name, phone, email and pre-matched productId; need, program, interest and note together as the need summary. */
-function prefill(intake: LeadIntake, fallbackName: string | null): ClassifyForm {
-  const f = intake.fields;
-  const need = [
-    f.need,
-    f.program && `Chương trình quan tâm: ${f.program}`,
-    f.interest && `Quan tâm: ${f.interest}`,
-    f.note && `Ghi chú: ${f.note}`,
-  ].filter(Boolean).join('\n');
-  return {
-    contactName: f.name ?? fallbackName?.trim() ?? '',
-    phone: f.phone ?? '',
-    email: f.email ?? '',
-    companyName: '',
-    taxCode: '',
-    needSummary: (need || f.program || '').slice(0, NEED_MAX),
-    sourceNote: '',
-    ownerUserId: '',
-    productId: f.productId ?? '',
-    courseId: '',
-  };
-}
-
 const opt = (v: string) => v.trim() || undefined;
 
 /**
@@ -233,6 +212,8 @@ function ClassifyDialog({
   onClose: () => void;
 }) {
   const actor = useActor();
+  const navigate = useNavigate();
+  const client = useQueryClient();
   const toast = useToast();
   const refresh = useInboxRefresh();
   const isSale = actor.role === 'sale';
@@ -241,7 +222,7 @@ function ClassifyDialog({
   const linkedContactId = intake.contactId ?? conversationContactId ?? null;
   const products = useApi<ProductItem[]>('/products');
   const activeProducts = (products.data ?? []).filter((p) => Boolean(p.active) || p.id === intake.fields.productId);
-  const [form, setForm] = useState(() => prefill(intake, fallbackName));
+  const [form, setForm] = useState(() => prefillClassifyForm(intake, fallbackName));
   const [next, setNext] = useState(() => emptyNextAction(b2b ? 'Gọi giới thiệu và xác nhận nhu cầu' : 'Gọi liên hệ và xác nhận nhu cầu học'));
   const [linking, setLinking] = useState(false);
   const set = (key: keyof ClassifyForm) => (e: { target: { value: string } }) => setForm((v) => ({ ...v, [key]: e.target.value }));
@@ -249,34 +230,35 @@ function ClassifyDialog({
   const availableCourses = (selectedProduct?.courses ?? []).filter((c) => c.status === 'active');
 
   const classify = useMutation<ClassifyIntakeResult, ApiFailure, boolean>({
-    mutationFn: (confirmNotDuplicate) => classifyIntake(intake.id, pipeline, b2b
-      ? {
-        contactName: form.contactName, phone: opt(form.phone), email: opt(form.email), companyName: opt(form.companyName),
-        taxCode: opt(form.taxCode), needSummary: form.needSummary, confirmNotDuplicate,
-        productId: opt(form.productId), courseId: opt(form.courseId),
-        nextAction: isSale ? nextActionPayload(next) : undefined,
-      }
-      : {
-        ...(linkedContactId ? { contactId: linkedContactId } : {}),
-        contactName: form.contactName, phone: opt(form.phone), email: opt(form.email), needSummary: form.needSummary,
-        sourceNote: opt(form.sourceNote),
-        productId: opt(form.productId), courseId: opt(form.courseId),
-        nextAction: nextActionPayload(next), ownerUserId: isAdmin ? opt(form.ownerUserId) : undefined,
-      }),
+    mutationFn: (confirmNotDuplicate) => classifyIntake(
+      intake.id,
+      pipeline,
+      b2b
+        ? {
+          contactName: form.contactName, phone: opt(form.phone), email: opt(form.email), companyName: opt(form.companyName),
+          taxCode: opt(form.taxCode), needSummary: form.needSummary, confirmNotDuplicate,
+          productId: opt(form.productId), courseId: opt(form.courseId),
+          nextAction: isSale ? nextActionPayload(next) : undefined,
+        }
+        : {
+          ...(linkedContactId ? { contactId: linkedContactId } : {}),
+          contactName: form.contactName, phone: opt(form.phone), email: opt(form.email), needSummary: form.needSummary,
+          sourceNote: opt(form.sourceNote),
+          productId: opt(form.productId), courseId: opt(form.courseId),
+          nextAction: nextActionPayload(next), ownerUserId: isAdmin ? opt(form.ownerUserId) : undefined,
+        },
+      form.summary,
+    ),
     onSuccess: (res) => {
-      toast(
-        <span>
-          {b2b ? 'Đã tạo lead B2B và gắn hội thoại vào khách.' : 'Đã tạo lead học viên và gắn hội thoại vào khách.'}{' '}
-          <Link
-            to={b2b ? '/leads/$leadId' : '/learners/$contactId'}
-            params={b2b ? { leadId: res.leadId } : { contactId: res.contactId }}
-            style={{ color: '#fff', textDecoration: 'underline', fontWeight: 600 }}
-          >
-            Mở lead {res.leadCode ?? 'mới'}
-          </Link>
-        </span>,
-      );
+      const code = res.leadCode ? ` ${res.leadCode}` : '';
+      toast(b2b ? `Đã tạo lead B2B${code}` : `Đã tạo lead học viên${code}`);
       onClose();
+      void client.invalidateQueries();
+      void navigate(
+        b2b
+          ? { to: '/leads/$leadId', params: { leadId: res.leadId } }
+          : { to: '/learners/$contactId', params: { contactId: res.contactId } },
+      );
     },
     onSettled: refresh,
   });
@@ -374,6 +356,31 @@ function ClassifyDialog({
         <Field label="Nhu cầu" required error={errors.needSummary} htmlFor={`${formId}-need`}>
           <textarea id={`${formId}-need`} maxLength={NEED_MAX} value={form.needSummary} onChange={set('needSummary')} required
             aria-invalid={Boolean(errors.needSummary)} />
+        </Field>
+        <Field
+          label="Tóm tắt hội thoại (lưu vào ghi chú lead)"
+          error={errors.summary}
+          hint="AI tóm tắt sẵn, bạn sửa lại nếu cần. Để trống nếu không cần."
+          counter={
+            <span
+              className="field-counter num"
+              data-near={form.summary.length >= SUMMARY_NEAR_LIMIT || undefined}
+              data-limit={form.summary.length >= SUMMARY_MAX || undefined}
+              aria-live="polite"
+            >
+              {form.summary.length}/{SUMMARY_MAX}
+            </span>
+          }
+          htmlFor={`${formId}-summary`}
+        >
+          <textarea
+            id={`${formId}-summary`}
+            rows={4}
+            maxLength={SUMMARY_MAX}
+            value={form.summary}
+            onChange={set('summary')}
+            aria-invalid={Boolean(errors.summary)}
+          />
         </Field>
         {(!b2b || isSale) && <NextActionFields value={next} onChange={setNext} errors={errors} legend="Next Action đầu tiên" />}
 

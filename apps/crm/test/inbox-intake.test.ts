@@ -155,6 +155,40 @@ test('merging keeps the first value and drops a proposal the newest answer no lo
   expect(mergeIntakeFields({}, { need: 'IELTS' })).toEqual({ need: 'IELTS' });
 });
 
+test('extraction parses a summary and a newer extraction replaces it', () => {
+  const first = '- Khách hỏi học giao tiếp\n- Chưa báo học phí';
+  const second = '- Khách cần học giao tiếp\n- Đã báo lịch tối thứ 3\n- Hẹn gửi học phí';
+  expect(parseExtraction(JSON.stringify({ summary: `  ${first}  `, phone: null, name: '' }))).toEqual({ summary: first });
+  expect(parseExtraction('{"summary": null}')).toEqual({});
+  expect(parseExtraction('{"summary": "   "}')).toEqual({});
+  expect(parseExtraction(JSON.stringify({ summary: 'à'.repeat(1500) }))).toEqual({ summary: 'à'.repeat(1500) });
+  expect(parseExtraction(JSON.stringify({ summary: 'à'.repeat(1501), phone: '0912345678' }))).toBeNull();
+  expect(mergeIntakeFields(
+    { summary: first, phone: '0912345678', proposed: { summary: '- Bản đề xuất cũ', phone: '0999999999' } },
+    { summary: second, phone: '0987654321' },
+  )).toEqual({ summary: second, phone: '0912345678', proposed: { phone: '0987654321' } });
+  expect(mergeIntakeFields({ summary: first, phone: '0912345678' }, { phone: '0987654321' }))
+    .toEqual({ summary: first, phone: '0912345678', proposed: { phone: '0987654321' } });
+});
+
+test('a second extraction replaces the summary stored on the pending intake', async () => {
+  const first = '- Khách hỏi học giao tiếp\n- Chưa báo học phí';
+  const second = '- Khách cần học giao tiếp\n- Đã báo lịch tối thứ 3\n- Hẹn gửi học phí';
+  const { conv } = await intakeFrom({ name: 'Nguyễn Thị Hoa', phone: '0912345678', summary: first });
+  expect((await intakes())[0].fields).toEqual({ name: 'Nguyễn Thị Hoa', phone: '0912345678', summary: first });
+  const [command] = await extractCommands();
+  expect(command.payload.text).toContain('Khoá summary');
+  expect(command.payload.text).toContain('Không chép nguyên tin nhắn');
+  expect(command.payload.text).toContain('không thêm chữ ngoài JSON');
+
+  await customerSays('Chốt giúp em lịch tối thứ 3');
+  const next = await enqueueExtraction(db, conv.id);
+  await answer(next!, JSON.stringify({ name: 'Nguyễn Thị Hoa', phone: '0912345678', summary: second }));
+  const [after] = await intakes();
+  expect(after.fields).toEqual({ name: 'Nguyễn Thị Hoa', phone: '0912345678', summary: second });
+  expect(after.fields.proposed).toBeUndefined();
+});
+
 test('classifying as b2b creates the lead with createLead and links the Zalo customer', async () => {
   const { conv, intake } = await intakeFrom({ name: 'Nguyễn Thị Hoa', phone: '0912345678' });
   const res = await web('u-lan', 'POST', `/inbox/intakes/${intake.id}/classify`, {
@@ -171,12 +205,30 @@ test('classifying as b2b creates the lead with createLead and links the Zalo cus
   const [after] = await intakes();
   expect(after).toMatchObject({ status: 'classified', lead_id: leadId, contact_id: contactId, classified_by_user_id: 'u-lan' });
   const note = await db.prepare("SELECT summary FROM activity WHERE lead_id = ? AND type = 'note'").bind(leadId).first<{ summary: string }>();
-  expect(note!.summary).toContain('Khách: Em tên Hoa, muốn học tiếng Anh giao tiếp');
+  expect(note!.summary).toBe('Tạo từ hội thoại Zalo.');
+  expect(note!.summary).not.toContain('Em tên Hoa, muốn học tiếng Anh giao tiếp');
   expect(conv.id).toBe(after.conversation_id);
 
   const again = await web('u-lan', 'POST', `/inbox/intakes/${intake.id}/classify`, { pipeline: 'b2b', input: {} });
   expect(again.status).toBe(409);
   expect(await db.prepare('SELECT COUNT(*) AS n FROM lead WHERE contact_id = ?').bind(contactId).first()).toEqual({ n: 1 });
+});
+
+test('classifying with a summary stores that summary as the lead note and rejects one over 1500 characters', async () => {
+  const summary = '- Khách cần học giao tiếp\n- Đã báo lịch tối thứ 3\n- Hẹn gửi học phí';
+  const { intake } = await intakeFrom({ name: 'Nguyễn Thị Hoa', phone: '0912345678' });
+  const input = { contactName: 'Nguyễn Thị Hoa', phone: '0912345678', needSummary: 'Đào tạo tiếng Anh cho nhân viên', nextAction: nextAction() };
+  const tooLong = await web('u-lan', 'POST', `/inbox/intakes/${intake.id}/classify`, {
+    pipeline: 'b2b', summary: 'à'.repeat(1501), input,
+  });
+  expect(tooLong.status).toBe(422);
+  expect((await intakes())[0].status).toBe('pending');
+
+  const res = await web('u-lan', 'POST', `/inbox/intakes/${intake.id}/classify`, { pipeline: 'b2b', summary, input });
+  expect(res.status).toBe(200);
+  const note = await db.prepare("SELECT summary FROM activity WHERE lead_id = ? AND type = 'note'").bind(res.json.data.leadId).first<{ summary: string }>();
+  expect(note!.summary).toBe(`Tóm tắt hội thoại Zalo:\n${summary}`);
+  expect(note!.summary).not.toContain('Em tên Hoa, muốn học tiếng Anh giao tiếp');
 });
 
 test('a suspected duplicate is returned to staff; only their explicit confirmation creates the lead', async () => {
@@ -308,7 +360,8 @@ test('extraction for a customer with an open lead logs only changed/new fields a
   await db.prepare("UPDATE conversation SET contact_id = 'ct-1' WHERE id = ?").bind(conv.id).run();
 
   const commandId1 = await enqueueExtraction(db, conv.id);
-  await answer(commandId1!, JSON.stringify({ need: 'Học khóa AI cơ bản', program: '199k' }));
+  const openSummary = '- Khách hỏi khóa AI cơ bản\n- Bên mình đã gửi học phí\n- Chưa chốt lịch học';
+  await answer(commandId1!, JSON.stringify({ need: 'Học khóa AI cơ bản', program: '199k', summary: openSummary }));
 
   expect(await intakes()).toHaveLength(0);
   const sysNotes = () => db.prepare("SELECT summary FROM activity WHERE lead_id = 'lead-01' AND actor_kind = 'system' AND type = 'note' ORDER BY created_at ASC, rowid ASC")
@@ -318,6 +371,8 @@ test('extraction for a customer with an open lead logs only changed/new fields a
   expect(notes1).toHaveLength(1);
   expect(notes1[0]).toContain('Nhu cầu: Học khóa AI cơ bản');
   expect(notes1[0]).toContain('Chương trình: 199k');
+  expect(notes1[0]).not.toContain(openSummary);
+  expect(notes1[0]).not.toContain('Tóm tắt:');
 
   // Second extraction with identical values writes nothing.
   await customerSays('Dạ vâng ạ');
@@ -337,6 +392,15 @@ test('extraction for a customer with an open lead logs only changed/new fields a
   await customerSays('Cảm ơn shop');
   const commandId4 = await enqueueExtraction(db, conv.id);
   await answer(commandId4!, JSON.stringify({ need: 'Học khóa AI cơ bản', program: '199k', phone: '+84 912 345 678' }));
+  expect(await sysNotes()).toHaveLength(2);
+
+  // A changed summary alone is not copied onto the open lead.
+  await customerSays('Nhắc lại giúp em lịch học');
+  const commandId5 = await enqueueExtraction(db, conv.id);
+  await answer(commandId5!, JSON.stringify({
+    need: 'Học khóa AI cơ bản', program: '199k', phone: '+84 912 345 678',
+    summary: '- Khách nhắc lịch học\n- Đã chốt gói 199k\n- Sẽ gọi lại',
+  }));
   expect(await sysNotes()).toHaveLength(2);
 });
 

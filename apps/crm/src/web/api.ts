@@ -6,6 +6,7 @@ import type {
   GroupScheduleInput, InboxContactCrm, InboxConversation, InboxMessage, InboxSettings, InboxSettingsUpdate, IntakeField, IntakePipeline, IntakeStatus,
   IntakeValues, LeadIntake, RegistrationPolicyUpdate, RosterMember, SendMessageResult, SetModeResult, UploadedInboxMedia, ZaloGroup, ZaloGroupMember, ZaloGroupUpdate,
 } from './types';
+import { buildClassifyPayload } from './components/note-format';
 import { conversationsPath } from './inbox-format';
 
 const USER_KEY = 'abm-crm-demo-user';
@@ -153,8 +154,8 @@ export const listIntakes = (filter: { status?: IntakeStatus; conversationId?: st
   return api.get<LeadIntake[]>(`/inbox/intakes${query ? `?${query}` : ''}`);
 };
 /** `input` is the createLead / createLearnerLead form; the server sets `source` from the channel. */
-export const classifyIntake = (id: string, pipeline: IntakePipeline, input: Record<string, unknown>) =>
-  api.post<ClassifyIntakeResult>(`/inbox/intakes/${enc(id)}/classify`, { pipeline, input });
+export const classifyIntake = (id: string, pipeline: IntakePipeline, input: Record<string, unknown>, summary?: string) =>
+  api.post<ClassifyIntakeResult>(`/inbox/intakes/${enc(id)}/classify`, buildClassifyPayload(pipeline, input, summary));
 export const discardIntake = (id: string) => api.post<{ intakeId: string }>(`/inbox/intakes/${enc(id)}/discard`);
 export const confirmIntakeField = (id: string, field: IntakeField) =>
   api.post<{ intakeId: string; fields: IntakeValues }>(`/inbox/intakes/${enc(id)}/confirm-field`, { field });

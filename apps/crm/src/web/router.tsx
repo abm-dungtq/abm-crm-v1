@@ -2,7 +2,7 @@ import { Outlet, createRootRoute, createRoute, createRouter, type ErrorComponent
 import { ActorContext } from './actor-context';
 import { ApiFailure, currentDemoUser, useApi, useAuthMode } from './api';
 import { RolePicker, Shell } from './components/layout';
-import { Alert, ErrorState, Loading } from './components/ui';
+import { Alert, ErrorState, Loading, ToastProvider } from './components/ui';
 import type { Actor, Me } from './types';
 import { AdminPage } from './pages/admin';
 import { AdminUsersPage } from './pages/admin-users';
@@ -42,10 +42,21 @@ import { ZaloGroupPage, ZaloGroupsPage } from './pages/zalo-groups';
 
 function Root() {
   const mode = useAuthMode();
-  if (mode.isLoading) return <div className="content"><Loading /></div>;
-  if (mode.error || !mode.data) return <div className="content"><ErrorState error={mode.error} onRetry={() => mode.refetch()} /></div>;
-  if (mode.data === 'unconfigured') return <div className="content"><Alert tone="danger">Máy chủ chưa cấu hình cách đăng nhập (AUTH_MODE). Liên hệ Admin.</Alert></div>;
-  return mode.data === 'password' ? <PasswordRoot /> : <DemoRoot />;
+  return (
+    <ToastProvider>
+      {mode.isLoading ? (
+        <div className="content"><Loading /></div>
+      ) : mode.error || !mode.data ? (
+        <div className="content"><ErrorState error={mode.error} onRetry={() => mode.refetch()} /></div>
+      ) : mode.data === 'unconfigured' ? (
+        <div className="content"><Alert tone="danger">Máy chủ chưa cấu hình cách đăng nhập (AUTH_MODE). Liên hệ Admin.</Alert></div>
+      ) : mode.data === 'password' ? (
+        <PasswordRoot />
+      ) : (
+        <DemoRoot />
+      )}
+    </ToastProvider>
+  );
 }
 
 function PasswordRoot() {

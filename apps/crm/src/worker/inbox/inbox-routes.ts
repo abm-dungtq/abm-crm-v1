@@ -520,6 +520,11 @@ const classifyInput = z.object({
   pipeline: z.enum(['b2b', 'learner']),
   /** The staff form, passed to createLead / createLearnerLead as sent; `source` is set from the channel. */
   input: z.record(z.string(), z.unknown()),
+  /** Staff-edited conversation summary. Blank or null counts as absent. At most 1500 characters after trim. */
+  summary: z.preprocess(
+    (v) => (v === null || (typeof v === 'string' && v.trim() === '') ? undefined : v),
+    z.string().trim().max(1500).optional(),
+  ),
 });
 const confirmFieldInput = z.object({ field: z.enum(INTAKE_FIELDS) });
 const linkContactInput = z.object({ contactId: intakeIdInput });

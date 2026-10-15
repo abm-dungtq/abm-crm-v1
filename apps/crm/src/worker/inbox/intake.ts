@@ -16,8 +16,6 @@ import { completeCommand, enqueueCommand, failCommand } from './dispatcher';
 export const EXTRACT_AGENT_KEY = 'crm-extractor';
 /** Messages sent to the extractor, newest last. */
 export const EXTRACT_MESSAGE_COUNT = 60;
-/** Messages copied into the lead activity when an intake is classified. */
-export const ACTIVITY_MESSAGE_COUNT = 20;
 /** A direct conversation idle this long is extracted by the cron. */
 export const EXTRACT_IDLE_MS = 15 * 60_000;
 const EXTRACT_SCAN_BATCH = 50;
@@ -25,16 +23,20 @@ const EXTRACT_SCAN_BATCH = 50;
 const LINE_MAX_CHARS = 1000;
 const MERGE_TRIES = 3;
 
-export const INTAKE_FIELDS = ['name', 'phone', 'email', 'program', 'need', 'interest', 'note'] as const;
+export const INTAKE_FIELDS = ['name', 'phone', 'email', 'program', 'need', 'interest', 'note', 'summary'] as const;
 export type IntakeField = (typeof INTAKE_FIELDS)[number];
 export type IntakeValues = Partial<Record<IntakeField, string>>;
 /** Shape of `lead_intake.fields_json`: current values, suggested productId, plus differing values awaiting staff confirmation. */
 export type IntakeFields = IntakeValues & { productId?: string; proposed?: IntakeValues };
 
 const EXTRACT_INSTRUCTION = 'Trích thông tin khách hàng từ hội thoại dưới đây. Chỉ trả về một JSON object với các khoá '
-  + 'name, phone, email, program, need, interest, note; bỏ khoá không có thông tin; không thêm chữ ngoài JSON; chỉ lấy thông tin do khách nói. '
+  + 'name, phone, email, program, need, interest, note, summary; bỏ khoá không có thông tin; không thêm chữ ngoài JSON. '
+  + 'Các khoá name, phone, email, program, need, interest, note chỉ lấy thông tin do khách nói. '
   + 'Chỉ lấy họ tên thật khách tự giới thiệu; không lấy đại từ xưng hô (anh, chị, em, cô, chú, bác, sếp, bạn…) hay biệt danh; '
-  + 'khoá program ghi tên chương trình/khóa học hoặc mức phí khách nói đã đóng (ví dụ "199k").';
+  + 'khoá program ghi tên chương trình/khóa học hoặc mức phí khách nói đã đóng (ví dụ "199k"). '
+  + 'Khoá summary là tóm tắt tiếng Việt từ 3 đến 6 dòng ngắn, mỗi dòng bắt đầu bằng "- ". '
+  + 'Nêu khách hỏi hoặc cần gì; bên mình đã báo hoặc đã gửi gì (giá, lịch, tài liệu); phần đã thống nhất hoặc đã hứa và bước tiếp theo. '
+  + 'Không chép nguyên tin nhắn, không bịa thêm thông tin, không ghi số điện thoại, email hay số tài khoản ngân hàng.';
 
 const HONORIFIC_PREFIXES = new Set(['anh', 'chị', 'em', 'cô', 'chú', 'bác', 'sếp', 'bạn', 'thầy']);
 const SINGLE_PRONOUNS = new Set(['mình', 'tôi', 'tớ', 'dạ', 'vâng', 'ad', 'admin', 'shop', 'khách']);
@@ -63,6 +65,7 @@ const extractedSchema = z.object({
   need: optionalText(z.string().trim().max(1000)),
   interest: optionalText(z.string().trim().max(1000)),
   note: optionalText(z.string().trim().max(1000)),
+  summary: optionalText(z.string().trim().max(1500)),
 });
 
 /** Parses the extractor's answer, with or without a ``` fence. Null when it is not a valid object. */
@@ -141,13 +144,19 @@ const sameValue = (field: IntakeField, a: string, b: string) => {
 
 /**
  * Rule for a new extraction: an empty field is filled, a different value is kept as a proposal for staff,
- * and the same value drops a stale proposal for that field.
+ * and the same value drops a stale proposal for that field. A newer `summary` replaces the stored one
+ * instead of waiting for confirmation.
  */
 export function mergeIntakeFields(current: IntakeFields, extracted: IntakeValues & { productId?: string }): IntakeFields {
   const next: IntakeFields = { ...current, proposed: { ...current.proposed } };
   for (const field of INTAKE_FIELDS) {
     const value = extracted[field];
     if (!value) continue;
+    if (field === 'summary') {
+      next.summary = value;
+      delete next.proposed!.summary;
+      continue;
+    }
     const existing = current[field];
     if (!existing) next[field] = value;
     else if (sameValue(field, existing, value)) delete next.proposed![field];
@@ -250,6 +259,7 @@ const FIELD_LABELS: Record<IntakeField, string> = {
   need: 'Nhu cầu',
   interest: 'Quan tâm',
   note: 'Ghi chú',
+  summary: 'Tóm tắt',
 };
 
 const AUTO_EXTRACT_NOTE_PREFIX = 'Trích xuất tự động từ hội thoại: ';
@@ -332,6 +342,8 @@ export async function applyExtractionResult(db: D1Database, command: ExtractionC
         Object.assign(previous, parseExtractionNote(row.summary));
       }
       const parts = INTAKE_FIELDS.flatMap((f) => {
+        // The summary stays on the pending intake for staff to edit. This note only lists short fields.
+        if (f === 'summary') return [];
         const val = extracted[f];
         if (!val) return [];
         if (previous[f] && sameValue(f, previous[f]!, val)) return [];
@@ -432,7 +444,12 @@ function linkStatements(db: D1Database, intake: IntakeRow, contactId: string, no
 }
 
 export type IntakePipeline = 'b2b' | 'learner';
-export interface ClassifyRequest { pipeline: IntakePipeline; input: Record<string, unknown> }
+export interface ClassifyRequest {
+  pipeline: IntakePipeline;
+  input: Record<string, unknown>;
+  /** Staff-edited conversation summary. Blank or absent keeps the one-line note. */
+  summary?: string;
+}
 
 /**
  * A staff member turns an intake into a real lead with the existing command: `createLead` for `b2b`,
@@ -441,8 +458,9 @@ export interface ClassifyRequest { pipeline: IntakePipeline; input: Record<strin
  * comes from the staff form as sent, so `confirmNotDuplicate` is only ever the staff member's own choice,
  * and a command error (DUPLICATE_SUSPECTED, VALIDATION_FAILED, ...) is returned unchanged with the intake
  * still pending. On success the intake is classified, the conversation is linked to the lead's contact, the
- * channel contact point is added, the last 20 messages are kept as a note on the lead, and the conversation
- * is assigned to the lead's owner with a Lark notice.
+ * channel contact point is added, and the lead gets one short note: "Tóm tắt hội thoại <kênh>:" plus
+ * `summary` when that summary is non-empty, otherwise "Tạo từ hội thoại <kênh>." The conversation is then
+ * assigned to the lead's owner with a Lark notice.
  */
 export async function classifyIntake(db: D1Database, actor: Actor, intakeId: string, request: ClassifyRequest, appBase = ''):
   Promise<ApiResult<{ intakeId: string; leadId: string; contactId: string }>> {
@@ -473,9 +491,11 @@ export async function classifyIntake(db: D1Database, actor: Actor, intakeId: str
   if (!lead) throw new Error(`${name} lead not found after commit`);
 
   const now = new Date().toISOString();
-  const lines = await transcript(db, intake.conversation_id, ACTIVITY_MESSAGE_COUNT);
   const channelLabel = intake.channel === 'facebook' ? 'Facebook' : intake.channel === 'zalo_oa' ? 'Zalo OA' : 'Zalo';
-  const note = `Hội thoại ${channelLabel} (${lines.length} tin gần nhất):\n${lines.join('\n')}`;
+  const summary = request.summary?.trim() ?? '';
+  const note = summary
+    ? `Tóm tắt hội thoại ${channelLabel}:\n${summary}`
+    : `Tạo từ hội thoại ${channelLabel}.`;
   const move = moveIntake(db, actor, intake.id, 'classified', now, { leadId, contactId: lead.contact_id });
   const [moved] = await db.batch([
     move.statement,

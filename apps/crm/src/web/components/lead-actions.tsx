@@ -1,12 +1,16 @@
 import { useEffect, useId, useState } from 'react';
 import {
-  ACTIVITY_TYPES, LOST_REASONS, allowedTransitions, stageLabel,
+  ACTIVITY_TYPES, LOST_REASONS, activityLabel, allowedTransitions, stageLabel,
   type ChangeStageInput, type CompleteTaskInput, type DecideApprovalInput, type LogActivityInput, type LostReasonCode, type StageCode,
 } from '@abm/contracts';
 import { useCommand } from '../api';
-import { fmtMoney, fromLocalInput, parseWonAmount, toLocalInput } from '../format';
+import { fmtDateTime, fmtMoney, fromLocalInput, parseWonAmount, toLocalInput } from '../format';
 import type { ApprovalItem, Member } from '../types';
+import { Icon, type IconName } from './icons';
+import { ACTIVITY_MAX_CHARS, ACTIVITY_MAX_LINES, clampActivityText } from './note-format';
 import { Alert, Field, FormError, Modal, fieldErrors, useToast } from './ui';
+
+export { ACTIVITY_MAX_CHARS, ACTIVITY_MAX_LINES, clampActivityText };
 
 // ---------- Next Action fields (QĐ13) ----------
 
@@ -52,7 +56,66 @@ export function NextActionFields({ value, onChange, errors, legend = 'Next Actio
   );
 }
 
-// ---------- Log activity ----------
+// ---------- Activity timeline & log activity ----------
+
+const ACTIVITY_ICON: Record<string, IconName> = {
+  call: 'phone', meeting: 'meeting', email: 'mail', message: 'message', customer_reply: 'message', file_sent: 'file',
+  proposal_sent: 'file', note: 'note', stage_changed: 'arrow', owner_changed: 'swap', task_completed: 'check',
+};
+
+export interface TimelineActivityItem {
+  id: string;
+  type: string;
+  summary: string;
+  occurredAt: string;
+  actorName: string | null;
+  leadCode?: string | null;
+}
+
+export function ActivityTimeline({ items }: { items: TimelineActivityItem[] }) {
+  return (
+    <ol className="timeline">
+      {items.map((item) => (
+        <ActivityTimelineRow key={item.id} item={item} />
+      ))}
+    </ol>
+  );
+}
+
+function ActivityTimelineRow({ item }: { item: TimelineActivityItem }) {
+  const [expanded, setExpanded] = useState(false);
+  const contact = ACTIVITY_TYPES.find((t) => t.code === item.type)?.contact;
+  const system = ['stage_changed', 'owner_changed', 'task_completed'].includes(item.type);
+  const { clamped, preview } = clampActivityText(item.summary);
+  const isCollapsed = clamped && !expanded;
+  return (
+    <li>
+      <span className="tl-icon" data-kind={system ? 'system' : contact ? 'contact' : undefined}>
+        <Icon name={ACTIVITY_ICON[item.type] ?? 'note'} />
+      </span>
+      <div className="tl-content">
+        <div className="row-wrap">
+          <strong style={{ fontWeight: 600 }}>{activityLabel(item.type)}</strong>
+          {item.leadCode && <span className="mono small muted">{item.leadCode}</span>}
+          <span className="tl-meta">{item.actorName ?? 'Hệ thống'} · {fmtDateTime(item.occurredAt)}</span>
+        </div>
+        <p className="text-2 tl-body" data-clamped={isCollapsed ? 'true' : undefined}>
+          {isCollapsed ? preview : item.summary}
+        </p>
+        {clamped && (
+          <button
+            type="button"
+            className="tl-toggle"
+            aria-expanded={expanded}
+            onClick={() => setExpanded((v) => !v)}
+          >
+            {expanded ? 'Thu gọn' : 'Xem thêm'}
+          </button>
+        )}
+      </div>
+    </li>
+  );
+}
 
 const MANUAL = ACTIVITY_TYPES.filter((a) => a.manual);
 
