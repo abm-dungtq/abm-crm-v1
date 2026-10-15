@@ -24,6 +24,9 @@
       "migrations_dir": "migrations"
     }
   ],
+  "r2_buckets": [
+    { "binding": "MEDIA", "bucket_name": "abm-crm-media" }
+  ],
   // Every minute: worker commands, inbox SLA reminders and stuck outgoing messages.
   // 0 14 * * * = 14:00 UTC = 21:00 Vietnam time, for the daily group summaries.
   "triggers": { "crons": ["* * * * *", "0 14 * * *"] },

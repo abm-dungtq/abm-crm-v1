@@ -4,7 +4,7 @@ import { claimCommands, completeCommand, failCommand, type ClaimedCommand } from
 import { sendMessengerCommand } from './facebook-send';
 import { sendZaloOaCommand } from './zalo-oa-send';
 
-type WorkerCommandEnv = Pick<Env, 'DB' | 'LARK_APP_ID' | 'LARK_APP_SECRET' | 'LARK_INBOX_CHAT_ID' | 'FB_PAGE_TOKENS' | 'ZALO_OA_APP_ID' | 'ZALO_OA_APP_SECRET' | 'ZALO_OA_TOKEN_KEY'>;
+type WorkerCommandEnv = Pick<Env, 'DB' | 'MEDIA' | 'LARK_APP_ID' | 'LARK_APP_SECRET' | 'LARK_INBOX_CHAT_ID' | 'FB_PAGE_TOKENS' | 'ZALO_OA_APP_ID' | 'ZALO_OA_APP_SECRET' | 'ZALO_OA_TOKEN_KEY'>;
 
 const CLAIM_LIMIT = 20;
 

@@ -689,6 +689,271 @@ test('HTTP 401 refreshes once and an unknown Zalo code stays retryable', async (
   expect((await commands('send_zalo_oa')).at(-1)).toMatchObject({ status: 'pending', attempts: 1, result: { error: 'ZALO_-201' } });
 });
 
+const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0x00, 0xff, 0xd9]);
+
+async function uploadStaffImage() {
+  const form = new FormData();
+  form.set('file', new File([JPEG], 'a.jpg', { type: 'image/jpeg' }));
+  const res = await app.fetch(new Request(`${ORIGIN}/api/inbox/media`, {
+    method: 'POST', body: form, headers: { 'X-Demo-User': 'u-lan' },
+  }), testEnv);
+  const body = await res.json() as { data: { key: string; url: string } };
+  expect(res.status).toBe(200);
+  return body.data;
+}
+
+function oaImage(msgId: string, url = 'https://photo.zdn.vn/echo.jpg') {
+  return {
+    app_id: APP_ID, timestamp: '1710000000123', oa_id: OA_ID, event_name: 'oa_send_image',
+    sender: { id: OA_ID }, recipient: { id: USER_ID },
+    message: { msg_id: msgId, text: '', attachments: [{ type: 'image', payload: { url } }] },
+  };
+}
+
+test('a staff image is uploaded, then sent with no repeated caption, and its echoes do not add a row', async () => {
+  const conv = await customerTurn();
+  await saveTokens('send-access');
+  const media = await uploadStaffImage();
+  const order: string[] = [];
+  onFetch = async (url, init) => {
+    if (url.includes('/oa/upload/image')) {
+      order.push('upload');
+      expect(headerValue(init, 'access_token')).toBe('send-access');
+      expect(init?.body).toBeInstanceOf(FormData);
+      return json({ error: 0, data: { attachment_id: 'att-1' } });
+    }
+    if (url.includes('/message/cs')) {
+      order.push('cs');
+      return json({ error: 0, data: { message_id: `mid-${order.length}` } });
+    }
+    return json({ error: 0 });
+  };
+  calls.length = 0;
+  const sent = await web('u-lan', 'POST', `/inbox/conversations/${conv.id}/messages`, {
+    text: 'Xem ảnh này', attachments: [{ key: media.key }],
+  });
+  expect(sent.status).toBe(200);
+  expect(order).toEqual(['cs', 'upload', 'cs']);
+  const bodies = csCalls().map((call) => JSON.parse(String(call.init?.body)));
+  expect(bodies[0].message).toEqual({ text: 'Xem ảnh này' });
+  expect(bodies[1].message).toEqual({
+    attachment: { type: 'template', payload: { template_type: 'media', elements: [{ media_type: 'image', attachment_id: 'att-1' }] } },
+  });
+  const staff = (await messages(conv.id)).find((message) => message.id === sent.json.data.messageId);
+  expect(staff).toMatchObject({ status: 'sent', body: 'Xem ảnh này' });
+  expect(JSON.parse(staff.attachments_json)[0].url).toBe(media.url);
+
+  const command = (await commands('send_zalo_oa')).at(-1);
+  expect(command.payload.sentMids).toEqual(['mid-1', 'mid-3']);
+  expect(command.result.sentMids).toEqual(['mid-1', 'mid-3']);
+  const before = (await messages(conv.id)).length;
+  expect((await webhook(oaImage('mid-1'))).status).toBe(200);
+  expect((await webhook(oaImage('mid-3', 'https://photo.zdn.vn/echo-2.jpg'))).status).toBe(200);
+  const after = await messages(conv.id);
+  expect(after).toHaveLength(before);
+  expect(after.find((message) => message.id === staff.id)).toMatchObject({ external_msg_id: 'mid-1' });
+  expect(JSON.parse(after.find((message) => message.id === staff.id).attachments_json)[0].url).toBe(media.url);
+  expect(after.filter((message) => message.sender_kind === 'staff_phone')).toHaveLength(0);
+});
+
+test('an image-only staff send does not post the placeholder, and an image echo does not swallow a text send', async () => {
+  const conv = await customerTurn();
+  await saveTokens('send-access');
+  const media = await uploadStaffImage();
+  onFetch = async (url) => {
+    if (url.includes('/oa/upload/image')) return json({ error: 0, data: { attachment_id: 'att-2' } });
+    if (url.includes('/message/cs')) return json({ error: 0, data: { message_id: 'mid-img' } });
+    return json({ error: 0 });
+  };
+  calls.length = 0;
+  const sent = await web('u-lan', 'POST', `/inbox/conversations/${conv.id}/messages`, { attachments: [{ key: media.key }] });
+  expect(sent.status).toBe(200);
+  expect((await db.prepare('SELECT body FROM message WHERE id = ?').bind(sent.json.data.messageId).first<{ body: string }>()))
+    .toEqual({ body: '[Tệp đính kèm]' });
+  expect(csCalls()).toHaveLength(1);
+  expect(JSON.parse(String(csCalls()[0]!.init?.body)).message.text).toBeUndefined();
+  expect((await messages(conv.id)).find((message) => message.sender_kind === 'staff_web').external_msg_id).toBe('mid-img');
+});
+
+test('an image typed in the OA app after a text reply is stored', async () => {
+  const conv = await customerTurn();
+  await saveTokens('send-access');
+  onFetch = async (url) => (url.includes('/message/cs') ? json({ error: 0, data: { message_id: 'mid-text' } }) : json({ error: 0 }));
+  const text = await web('u-lan', 'POST', `/inbox/conversations/${conv.id}/messages`, { text: 'Em nhắn tiếp' });
+  await processWorkerCommands(testEnv);
+  expect(text.status).toBe(200);
+  const before = (await messages(conv.id)).length;
+  expect((await webhook(oaImage('from-app'))).status).toBe(200);
+  const rows = await messages(conv.id);
+  expect(rows).toHaveLength(before + 1);
+  expect(rows.find((message) => message.external_msg_id === 'from-app')).toMatchObject({ sender_kind: 'staff_phone' });
+  expect(rows.find((message) => message.id === text.json.data.messageId).external_msg_id).toBe('mid-text');
+});
+
+test('an image from the OA app 30 seconds after a CRM image is stored', async () => {
+  const conv = await customerTurn();
+  await saveTokens('send-access');
+  const media = await uploadStaffImage();
+  onFetch = async (url) => {
+    if (url.includes('/oa/upload/image')) return json({ error: 0, data: { attachment_id: 'att-app' } });
+    if (url.includes('/message/cs')) return json({ error: 0, data: { message_id: 'mid-crm' } });
+    return json({ error: 0 });
+  };
+  calls.length = 0;
+  const sent = await web('u-lan', 'POST', `/inbox/conversations/${conv.id}/messages`, { attachments: [{ key: media.key }] });
+  expect(sent.status).toBe(200);
+  const ago = new Date(Date.now() - 30_000).toISOString();
+  await db.prepare('UPDATE message SET created_at = ? WHERE id = ?').bind(ago, sent.json.data.messageId).run();
+  await db.prepare(`UPDATE channel_command SET created_at = ?, updated_at = ? WHERE kind = 'send_zalo_oa'`).bind(ago, ago).run();
+  const before = (await messages(conv.id)).length;
+  expect((await webhook(oaImage('from-app-30'))).status).toBe(200);
+  const rows = await messages(conv.id);
+  expect(rows).toHaveLength(before + 1);
+  expect(rows.find((message) => message.external_msg_id === 'from-app-30')).toMatchObject({ sender_kind: 'staff_phone' });
+  expect(rows.find((message) => message.id === sent.json.data.messageId).external_msg_id).toBe('mid-crm');
+});
+
+test('an echo of CRM image A does not fill CRM image B', async () => {
+  const conv = await customerTurn();
+  await saveTokens('send-access');
+  const imageA = await uploadStaffImage();
+  const imageB = await uploadStaffImage();
+  let n = 0;
+  onFetch = async (url) => {
+    if (url.includes('/oa/upload/image')) return json({ error: 0, data: { attachment_id: `att-${n}` } });
+    if (url.includes('/message/cs')) {
+      n += 1;
+      return json({ error: 0, data: { message_id: `mid-${n}` } });
+    }
+    return json({ error: 0 });
+  };
+  calls.length = 0;
+  const sentA = await web('u-lan', 'POST', `/inbox/conversations/${conv.id}/messages`, {
+    text: 'Ảnh A', attachments: [{ key: imageA.key }],
+  });
+  const sentB = await web('u-lan', 'POST', `/inbox/conversations/${conv.id}/messages`, {
+    text: 'Ảnh B', attachments: [{ key: imageB.key }],
+  });
+  expect(sentA.status).toBe(200);
+  expect(sentB.status).toBe(200);
+  await db.prepare('UPDATE message SET external_msg_id = NULL WHERE id = ?').bind(sentB.json.data.messageId).run();
+  const before = (await messages(conv.id)).length;
+  expect((await webhook(oaImage('mid-2'))).status).toBe(200);
+  const rows = await messages(conv.id);
+  expect(rows).toHaveLength(before);
+  expect(rows.find((message) => message.id === sentA.json.data.messageId).external_msg_id).toBe('mid-1');
+  expect(rows.find((message) => message.id === sentB.json.data.messageId).external_msg_id).toBeNull();
+});
+
+test('an echo whose id is in sentMids creates no row', async () => {
+  const conv = await customerTurn();
+  await saveTokens('send-access');
+  const media = await uploadStaffImage();
+  onFetch = async (url) => {
+    if (url.includes('/oa/upload/image')) return json({ error: 0, data: { attachment_id: 'att-mid' } });
+    if (url.includes('/message/cs')) return json({ error: 0, data: { message_id: 'mid-recorded' } });
+    return json({ error: 0 });
+  };
+  calls.length = 0;
+  const sent = await web('u-lan', 'POST', `/inbox/conversations/${conv.id}/messages`, {
+    text: 'Một ảnh', attachments: [{ key: media.key }],
+  });
+  const recorded = (await commands('send_zalo_oa')).at(-1).payload.sentMids as string[];
+  expect(recorded).toContain('mid-recorded');
+  await db.prepare('UPDATE message SET external_msg_id = NULL WHERE id = ?').bind(sent.json.data.messageId).run();
+  const before = (await messages(conv.id)).length;
+  expect((await webhook(oaImage('mid-recorded'))).status).toBe(200);
+  const rows = await messages(conv.id);
+  expect(rows).toHaveLength(before);
+  expect(rows.find((message) => message.id === sent.json.data.messageId).external_msg_id).toBe('mid-recorded');
+  expect(rows.filter((message) => message.sender_kind === 'staff_phone')).toHaveLength(0);
+});
+
+test('a sticker echo inside the image window is stored', async () => {
+  const conv = await customerTurn();
+  await saveTokens('send-access');
+  const media = await uploadStaffImage();
+  onFetch = async (url) => {
+    if (url.includes('/oa/upload/image')) return json({ error: 0, data: { attachment_id: 'att-stk' } });
+    if (url.includes('/message/cs')) return json({ error: 0, data: { message_id: 'mid-stk' } });
+    return json({ error: 0 });
+  };
+  calls.length = 0;
+  const sent = await web('u-lan', 'POST', `/inbox/conversations/${conv.id}/messages`, { attachments: [{ key: media.key }] });
+  expect(sent.status).toBe(200);
+  const before = (await messages(conv.id)).length;
+  const sticker = {
+    app_id: APP_ID, timestamp: '1710000000123', oa_id: OA_ID, event_name: 'oa_send_sticker',
+    sender: { id: OA_ID }, recipient: { id: USER_ID },
+    message: { msg_id: 'stk-1', text: '', attachments: [{ type: 'sticker', payload: { url: 'https://photo.zdn.vn/sticker.png' } }] },
+  };
+  expect((await webhook(sticker)).status).toBe(200);
+  const rows = await messages(conv.id);
+  expect(rows).toHaveLength(before + 1);
+  expect(rows.find((message) => message.external_msg_id === 'stk-1')).toMatchObject({ sender_kind: 'staff_phone' });
+  expect(rows.find((message) => message.id === sent.json.data.messageId).external_msg_id).toBe('mid-stk');
+});
+
+test('a retry after the image call fails sends only the image', async () => {
+  const conv = await customerTurn();
+  await saveTokens('send-access');
+  const media = await uploadStaffImage();
+  let imageAttempts = 0;
+  onFetch = async (url, init) => {
+    if (url.includes('/oa/upload/image')) return json({ error: 0, data: { attachment_id: 'att-part' } });
+    if (url.includes('/message/cs')) {
+      const body = JSON.parse(String(init?.body)) as { message?: { text?: string } };
+      if (body.message?.text) return json({ error: 0, data: { message_id: 'mid-text' } });
+      imageAttempts += 1;
+      if (imageAttempts === 1) return json({ error: -201 });
+      return json({ error: 0, data: { message_id: 'mid-img' } });
+    }
+    return json({ error: 0 });
+  };
+  calls.length = 0;
+  const sent = await web('u-lan', 'POST', `/inbox/conversations/${conv.id}/messages`, {
+    text: 'Xem ảnh', attachments: [{ key: media.key }],
+  });
+  expect(sent.status).toBe(200);
+  expect(csCalls().map((call) => JSON.parse(String(call.init?.body)).message.text)).toEqual(['Xem ảnh', undefined]);
+  const failed = (await commands('send_zalo_oa')).at(-1);
+  expect(failed).toMatchObject({ status: 'pending', attempts: 1, result: { error: 'ZALO_-201' } });
+  expect(failed.payload.sentMids).toEqual(['mid-text']);
+  expect((await messages(conv.id)).find((message) => message.id === sent.json.data.messageId)).toMatchObject({ status: 'pending' });
+
+  const past = new Date(Date.now() - 60_000).toISOString();
+  await db.prepare(`UPDATE channel_command SET next_run_at = ? WHERE kind = 'send_zalo_oa'`).bind(past).run();
+  calls.length = 0;
+  await processWorkerCommands(testEnv);
+  expect(csCalls()).toHaveLength(1);
+  expect(JSON.parse(String(csCalls()[0]!.init?.body)).message.text).toBeUndefined();
+  expect(JSON.parse(String(csCalls()[0]!.init?.body)).message.attachment.payload.elements[0].attachment_id).toBe('att-part');
+  const done = (await commands('send_zalo_oa')).at(-1);
+  expect(done.result).toMatchObject({ sent: true, parts: 2, externalMsgId: 'mid-text', sentMids: ['mid-text', 'mid-img'] });
+  expect((await messages(conv.id)).find((message) => message.id === sent.json.data.messageId)).toMatchObject({
+    status: 'sent', external_msg_id: 'mid-text',
+  });
+});
+
+test('an outside-window error on the image call is final', async () => {
+  const conv = await customerTurn();
+  await saveTokens('send-access');
+  const media = await uploadStaffImage();
+  onFetch = async (url) => {
+    if (url.includes('/oa/upload/image')) return json({ error: 0, data: { attachment_id: 'att-3' } });
+    if (url.includes('/message/cs')) return json({ error: -213 });
+    return json({ error: 0 });
+  };
+  calls.length = 0;
+  const sent = await web('u-lan', 'POST', `/inbox/conversations/${conv.id}/messages`, { attachments: [{ key: media.key }] });
+  expect(csCalls()).toHaveLength(1);
+  expect((await commands('send_zalo_oa')).at(-1)).toMatchObject({ status: 'failed', result: { error: 'ZALO_OA_OUTSIDE_WINDOW:-213' } });
+  expect((await messages(conv.id)).find((message) => message.id === sent.json.data.messageId)).toMatchObject({ status: 'failed' });
+  expect((await messages(conv.id)).find((message) => message.sender_kind === 'system')).toMatchObject({
+    body: 'Quá thời hạn trả lời của Zalo OA (ZALO_OA_OUTSIDE_WINDOW:-213)',
+  });
+});
+
 test('a registration confirmation with the wrong group link is not sent and hands off', async () => {
   const conv = await customerTurn();
   await db.prepare('UPDATE channel_account SET registration_policy = 1, registration_group_url = ? WHERE id = ?')

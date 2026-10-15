@@ -14,9 +14,10 @@
  *   api.listener.on('closed', (code, reason))         after zca-js gave up retrying; CloseReason 3000 = duplicate
  *                                                     web session, 3003 = kicked
  *   api.listener.start({ retryOnClose: true }) / stop()
- *   api.sendMessage({ msg, mentions?, quote? }, id, ThreadType)
+ *   api.sendMessage({ msg, mentions?, quote?, attachments? }, id, ThreadType)
  *                                                     quote copies content, msgType, propertyExt, uidFrom, msgId, cliMsgId, ts, ttl
- *                                                     -> { message: { msgId: number } | null, attachment: [...] }
+ *                                                     attachments: { data: Buffer, filename, metadata: { totalSize, width?, height? } }
+ *                                                     -> { message: { msgId: number } | null, attachment: [{ msgId }] }
  *   api.getAllGroups()                                -> { gridVerMap: { [groupId]: version } }
  *   api.getGroupInfo(ids)                             -> { gridInfoMap: { [groupId]: { name, memVerList, currentMems, ... } } }
  *   api.getGroupMembersInfo(ids)                      -> { profiles: { [id]: { displayName, zaloName, avatar, ... } } }
@@ -62,6 +63,53 @@ export interface ZaloSendReply {
   senderName: string;
 }
 
+/** One image handed to zca-js. `filename` must contain a dot; width and height are optional. */
+export interface ZaloOutgoingFile {
+  data: Uint8Array;
+  filename: `${string}.${string}`;
+  mimeType: 'image/jpeg' | 'image/png';
+  width?: number;
+  height?: number;
+}
+
+/** PNG IHDR at offset 16, or a JPEG SOF marker. Omitted when the bytes are not that image. */
+export function imageDimensions(bytes: Uint8Array, mimeType: 'image/jpeg' | 'image/png'): { width?: number; height?: number } {
+  if (mimeType === 'image/png') {
+    if (bytes.byteLength < 24) return {};
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const width = view.getUint32(16);
+    const height = view.getUint32(20);
+    if (width > 0 && height > 0 && width < 100_000 && height < 100_000) return { width, height };
+    return {};
+  }
+  if (bytes.byteLength < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return {};
+  let offset = 2;
+  while (offset < bytes.byteLength) {
+    if (bytes[offset] !== 0xff) return {};
+    while (offset < bytes.byteLength && bytes[offset] === 0xff) offset += 1;
+    if (offset >= bytes.byteLength) return {};
+    const marker = bytes[offset]!;
+    offset += 1;
+    // Standalone markers: TEM, SOI, and RST0–RST7 carry no length.
+    if (marker === 0x01 || marker === 0xd8 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+    if (marker === 0xd9 || marker === 0xda) return {};
+    if (offset + 1 >= bytes.byteLength) return {};
+    const length = (bytes[offset]! << 8) | bytes[offset + 1]!;
+    if (length < 2 || offset + length > bytes.byteLength) return {};
+    // SOF0–SOF15 except DHT (C4), JPG (C8), and DAC (CC).
+    const sof = marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
+    if (sof) {
+      if (length < 7 || offset + 6 >= bytes.byteLength) return {};
+      const height = (bytes[offset + 3]! << 8) | bytes[offset + 4]!;
+      const width = (bytes[offset + 5]! << 8) | bytes[offset + 6]!;
+      if (width > 0 && height > 0) return { width, height };
+      return {};
+    }
+    offset += length;
+  }
+  return {};
+}
+
 export interface ZaloGroup { threadId: string; name: string }
 
 export type ZaloGender = 'male' | 'female' | null;
@@ -85,7 +133,9 @@ export interface QrCode {
 export interface ZaloSession {
   /** Zalo uid of the logged-in number. */
   readonly ownId: string;
-  send(threadId: string, threadKind: ThreadKind, text: string, reply?: ZaloSendReply): Promise<{ msgId: string }>;
+  send(
+    threadId: string, threadKind: ThreadKind, text: string, reply?: ZaloSendReply, files?: ZaloOutgoingFile[],
+  ): Promise<{ msgId: string; msgIds?: string[] }>;
   /** Profile of one Zalo user. Null when `changed_profiles` has no entry for that id. */
   getUserProfile(userId: string): Promise<ZaloUserProfile | null>;
   listGroups(): Promise<ZaloGroup[]>;
@@ -287,15 +337,31 @@ class ZcaSession implements ZaloSession {
     listener.start({ retryOnClose: true });
   }
 
-  async send(threadId: string, threadKind: ThreadKind, text: string, reply?: ZaloSendReply) {
+  async send(threadId: string, threadKind: ThreadKind, text: string, reply?: ZaloSendReply, files?: ZaloOutgoingFile[]) {
+    const content = this.outgoing(threadKind, text, reply);
+    if (files?.length) {
+      content.attachments = files.map((file) => ({
+        data: Buffer.from(file.data),
+        filename: file.filename,
+        metadata: {
+          totalSize: file.data.byteLength,
+          ...(typeof file.width === 'number' ? { width: file.width } : {}),
+          ...(typeof file.height === 'number' ? { height: file.height } : {}),
+        },
+      }));
+    }
     const result = await this.api.sendMessage(
-      this.outgoing(threadKind, text, reply),
+      content,
       threadId,
       threadKind === 'group' ? ThreadType.Group : ThreadType.User,
     );
-    const msgId = result.message?.msgId;
-    if (msgId === undefined || msgId === null) throw new CodedError('ZALO_SEND_NO_MSG_ID');
-    return { msgId: String(msgId) };
+    const ids: string[] = [];
+    if (result.message?.msgId != null) ids.push(String(result.message.msgId));
+    for (const item of result.attachment ?? []) {
+      if (item?.msgId != null) ids.push(String(item.msgId));
+    }
+    if (!ids.length) throw new CodedError('ZALO_SEND_NO_MSG_ID');
+    return { msgId: ids[0]!, msgIds: ids };
   }
 
   /** A direct thread, or a send with no reply, goes out as plain text. A missing cached message is not an error. */

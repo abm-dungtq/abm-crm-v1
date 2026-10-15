@@ -349,6 +349,12 @@ export interface InboxMessage {
   createdAt: string;
 }
 
+export interface UploadedInboxMedia {
+  key: string;
+  url: string;
+  mimeType: string;
+  size: number;
+}
 export interface SendMessageResult { messageId: string; mode: ConversationMode; assigneeUserId: string | null }
 export interface SetModeResult { mode: ConversationMode; assigneeUserId: string | null }
 

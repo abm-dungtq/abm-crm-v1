@@ -14,6 +14,7 @@ function setup(overrides: {
   complete?: (r: { text: string }) => Promise<string>;
   send?: RunnerAccounts['send'];
   downloadImage?: (url: string, dir: string) => Promise<string | null>;
+  downloadMedia?: (accountId: string, key: string) => Promise<{ bytes: Uint8Array; contentType: string }>;
 } = {}) {
   const results: { id: string; result: BridgeCommandResult }[] = [];
   const crm = {
@@ -22,6 +23,7 @@ function setup(overrides: {
       results.push({ id, result });
       return 'accepted';
     }),
+    downloadMedia: vi.fn(overrides.downloadMedia ?? (async () => { throw new Error('unexpected download'); })),
   };
   const goclaw = {
     complete: vi.fn(overrides.complete ?? (async () => 'reply')),
@@ -128,6 +130,123 @@ describe('CommandRunner', () => {
     expect(accounts.send.mock.calls[0]?.slice(0, 6)).toEqual(['acc-1', 'g1', 'group', 'a', 's1', replyTo]);
     expect(accounts.send.mock.calls[1]?.[5]).toBeUndefined();
     expect(accounts.send.mock.calls[1]?.[3]).toBe('b'.repeat(2000));
+    expect(accounts.send.mock.calls.every((call) => call.length === 6)).toBe(true);
+  });
+
+  function samplePng() {
+    const png = new Uint8Array(24);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52], 0);
+    new DataView(png.buffer).setUint32(16, 4);
+    new DataView(png.buffer).setUint32(20, 5);
+    return png;
+  }
+  const imageFile = (name: string) => ({
+    key: `org/org-abm/2026/10/${name}.png`, mimeType: 'image/png' as const, filename: `${name}.png`,
+  });
+
+  it('downloads one image and sends it with an empty caption', async () => {
+    const png = samplePng();
+    const file = imageFile('11111111-1111-4111-8111-111111111111');
+    const downloadMedia = vi.fn(async () => ({ bytes: png, contentType: 'image/png' }));
+    const { runner, accounts, crm, results } = setup({ downloadMedia });
+    runner.dispatch(command('img', 'send_zalo', {
+      threadId: 'cust-1', threadKind: 'direct', text: '', attachments: [file],
+    }));
+    await runner.idle();
+    expect(crm.downloadMedia).toHaveBeenCalledWith('acc-1', file.key);
+    expect(accounts.send).toHaveBeenCalledTimes(1);
+    const call = accounts.send.mock.calls[0]!;
+    expect(call.slice(0, 5)).toEqual(['acc-1', 'cust-1', 'direct', '', 'img']);
+    expect(call[5]).toBeUndefined();
+    expect(call[6]).toEqual([{ data: png, filename: file.filename, mimeType: 'image/png', width: 4, height: 5 }]);
+    expect(results).toEqual([{ id: 'img', result: { attempts: 1, ok: true, externalMsgId: '100' } }]);
+
+    accounts.send.mockClear();
+    runner.dispatch(command('cap', 'send_zalo', {
+      threadId: 'cust-1', threadKind: 'direct', text: `${'a'.repeat(2000)}\n${'b'.repeat(20)}`,
+      attachments: [file],
+    }));
+    await runner.idle();
+    expect(accounts.send).toHaveBeenCalledTimes(3);
+    expect(accounts.send.mock.calls[0]).toHaveLength(6);
+    expect(accounts.send.mock.calls[0]?.[3]).toBe('a'.repeat(2000));
+    expect(accounts.send.mock.calls[1]?.[3]).toBe('b'.repeat(20));
+    expect(accounts.send.mock.calls[1]).toHaveLength(6);
+    expect(accounts.send.mock.calls[2]?.[3]).toBe('');
+    expect(accounts.send.mock.calls[2]?.[6]).toEqual([expect.objectContaining({ filename: file.filename, width: 4, height: 5 })]);
+  });
+
+  it('sends text and then one message per image, with replyTo only on the first', async () => {
+    const png = samplePng();
+    const downloadMedia = vi.fn(async (_accountId: string, _key: string) => ({ bytes: png, contentType: 'image/png' }));
+    const { runner, accounts } = setup({ downloadMedia });
+    const replyTo = { msgId: 'm-ask', senderId: 'u1', senderName: 'Hùng' };
+    const first = imageFile('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+    const second = imageFile('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+    runner.dispatch(command('mix', 'send_zalo', {
+      threadId: 'g1', threadKind: 'group', text: 'xin chào', replyTo, attachments: [first, second],
+    }));
+    await runner.idle();
+    expect(accounts.send).toHaveBeenCalledTimes(3);
+    expect(accounts.send.mock.calls[0]?.slice(0, 6)).toEqual(['acc-1', 'g1', 'group', 'xin chào', 'mix', replyTo]);
+    expect(accounts.send.mock.calls[0]).toHaveLength(6);
+    expect(accounts.send.mock.calls[1]?.[3]).toBe('');
+    expect(accounts.send.mock.calls[1]?.[5]).toBeUndefined();
+    expect(accounts.send.mock.calls[1]?.[6]).toEqual([expect.objectContaining({ filename: first.filename })]);
+    expect(accounts.send.mock.calls[2]?.[3]).toBe('');
+    expect(accounts.send.mock.calls[2]?.[5]).toBeUndefined();
+    expect(accounts.send.mock.calls[2]?.[6]).toEqual([expect.objectContaining({ filename: second.filename })]);
+    expect(downloadMedia.mock.calls.map((call) => call[1])).toEqual([first.key, second.key]);
+  });
+
+  it('retries only the image that failed', async () => {
+    const png = samplePng();
+    const downloadMedia = vi.fn(async (_accountId: string, _key: string) => ({ bytes: png, contentType: 'image/png' }));
+    let calls = 0;
+    const { runner, accounts, results } = setup({
+      downloadMedia,
+      send: async () => {
+        calls += 1;
+        if (calls === 3) throw Object.assign(new Error('ZALO_SEND_FAILED'), { code: 'ZALO_SEND_FAILED' });
+        return { msgId: `z${calls}` };
+      },
+    });
+    const first = imageFile('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+    const second = imageFile('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+    const payload = {
+      threadId: 'cust-1', threadKind: 'direct' as const, text: 'xem', attachments: [first, second],
+    };
+    runner.dispatch(command('img2', 'send_zalo', payload));
+    await runner.idle();
+    expect(results).toEqual([{ id: 'img2', result: { attempts: 1, ok: false, error: 'ZALO_SEND_FAILED:PARTIAL_2_OF_3' } }]);
+    expect(accounts.send.mock.calls.map((call) => call[3])).toEqual(['xem', '', '']);
+    expect(downloadMedia.mock.calls.map((call) => call[1])).toEqual([first.key, second.key]);
+
+    runner.dispatch(command('img2', 'send_zalo', payload, 'conv-1', 2));
+    await runner.idle();
+    expect(accounts.send.mock.calls.map((call) => call[3])).toEqual(['xem', '', '', '']);
+    expect(accounts.send.mock.calls[3]?.[6]).toEqual([expect.objectContaining({ filename: second.filename })]);
+    expect(downloadMedia.mock.calls.map((call) => call[1])).toEqual([first.key, second.key, second.key]);
+    expect(results.at(-1)).toEqual({ id: 'img2', result: { attempts: 2, ok: true, externalMsgId: 'z1' } });
+  });
+
+  it('sends one message per image when there is no caption', async () => {
+    const png = samplePng();
+    const downloadMedia = vi.fn(async () => ({ bytes: png, contentType: 'image/png' }));
+    const { runner, accounts } = setup({ downloadMedia });
+    const first = imageFile('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+    const second = imageFile('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+    runner.dispatch(command('only', 'send_zalo', {
+      threadId: 'cust-1', threadKind: 'direct', text: '', attachments: [first, second],
+    }));
+    await runner.idle();
+    expect(accounts.send).toHaveBeenCalledTimes(2);
+    expect(accounts.send.mock.calls[0]?.[3]).toBe('');
+    expect(accounts.send.mock.calls[0]?.[6]).toEqual([expect.objectContaining({ filename: first.filename })]);
+    expect(accounts.send.mock.calls[1]?.[3]).toBe('');
+    expect(accounts.send.mock.calls[1]?.[5]).toBeUndefined();
+    expect(accounts.send.mock.calls[1]?.[6]).toEqual([expect.objectContaining({ filename: second.filename })]);
+    expect(accounts.send.mock.calls[1]?.[6]).toHaveLength(1);
   });
 
   it('continues a partly sent message from the next chunk when the command is claimed again', async () => {

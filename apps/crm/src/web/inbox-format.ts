@@ -14,6 +14,11 @@ export function channelKindLabel(channel: ChannelKind): string {
   return CHANNEL_KIND_LABEL[channel];
 }
 
+/** Only Zalo personal and Zalo OA support sending images from the CRM composer. */
+export function canChannelSendImages(channel: ChannelKind): boolean {
+  return channel === 'zalo' || channel === 'zalo_oa';
+}
+
 /**
  * Badge of one conversation. A Zalo OA reads "Zalo OA". A personal number keeps its account name,
  * because several company numbers share the channel.

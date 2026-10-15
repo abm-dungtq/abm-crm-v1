@@ -240,6 +240,22 @@ describe('CrmClient', () => {
     expect(stamps[1]).not.toBe(stamps[0]);
   });
 
+  it('downloads media with a signed GET over an empty body', async () => {
+    const bytes = new Uint8Array([0xff, 0xd8, 0xff]);
+    const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => new Response(bytes, { status: 200, headers: { 'Content-Type': 'image/jpeg' } }));
+    const { crm } = client(fetchMock as unknown as typeof fetch);
+    const key = 'org/org-abm/2026/10/11111111-1111-4111-8111-111111111111.jpg';
+    const media = await crm.downloadMedia('acc-1', key);
+    expect(Array.from(media.bytes)).toEqual(Array.from(bytes));
+    expect(media.contentType).toBe('image/jpeg');
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(String(url)).toBe(`https://crm.test/api/bridge/media?${new URLSearchParams({ accountId: 'acc-1', key }).toString()}`);
+    expect(init!.method).toBe('GET');
+    expect(init!.body).toBeUndefined();
+    const headers = init!.headers as Record<string, string>;
+    expect(headers['X-Bridge-Signature']).toBe(createHmac('sha256', SECRET).update(`${headers['X-Bridge-Timestamp']}.`).digest('hex'));
+  });
+
   it('posts a result once and does not retry a 404', async () => {
     const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => new Response('{}', { status: 404 }));
     const { crm, sleep } = client(fetchMock as unknown as typeof fetch);

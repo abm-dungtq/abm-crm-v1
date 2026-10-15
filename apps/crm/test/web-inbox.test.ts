@@ -1,5 +1,6 @@
 import { expect, test } from 'vitest';
-import { conversationsPath, mergeMessages, senderLabel, weekdaysLabel } from '../src/web/inbox-format';
+import { compressImage, fitImageDimensions, IMAGE_DECODE_ERROR, IMAGE_MAX_BYTES, toJpgFilename } from '../src/web/image-compress';
+import { canChannelSendImages, conversationsPath, mergeMessages, senderLabel, weekdaysLabel } from '../src/web/inbox-format';
 import type { InboxMessage } from '../src/web/types';
 
 const msg = (id: string, createdAt: string, overrides: Partial<InboxMessage> = {}): InboxMessage => ({
@@ -56,3 +57,59 @@ test('a reply typed outside the CRM is labelled by its channel: the phone on Zal
   expect(senderLabel(msg('b', '2026-10-08T03:00:00.000Z', { senderKind: 'bot' }), 'facebook')).toBe('Bot');
   expect(senderLabel(msg('c', '2026-10-08T03:00:00.000Z'), 'facebook')).toBeNull();
 });
+
+test('image attachments in composer are enabled for zalo and zalo_oa and hidden for facebook', () => {
+  expect(canChannelSendImages('zalo')).toBe(true);
+  expect(canChannelSendImages('zalo_oa')).toBe(true);
+  expect(canChannelSendImages('facebook')).toBe(false);
+});
+
+test('fitImageDimensions scales the longest side down to at most 2048 px without upscaling smaller images', () => {
+  expect(fitImageDimensions(800, 600)).toEqual({ width: 800, height: 600 });
+  expect(fitImageDimensions(4096, 3072)).toEqual({ width: 2048, height: 1536 });
+  expect(fitImageDimensions(1800, 3600)).toEqual({ width: 1024, height: 2048 });
+  expect(toJpgFilename('bien-lai.png')).toBe('bien-lai.jpg');
+  expect(toJpgFilename('')).toBe('image.jpg');
+});
+
+test('compressImage steps quality down and scales further until the JPEG is at most 1,000,000 bytes, or reports unreadable images', async () => {
+  const attempts: { width: number; height: number; quality: number }[] = [];
+  let closed = false;
+  const input = new File([new Uint8Array([1, 2, 3])], 'chup-man-hinh.png', { type: 'image/png' });
+
+  const result = await compressImage(input, async () => ({
+    width: 4000,
+    height: 2000,
+    encodeJpeg: async (width, height, quality) => {
+      attempts.push({ width, height, quality });
+      // At 2048px all qualities exceed 1,000,000 bytes; once scaled down to 1536px, quality 0.75 fits.
+      const size = width > 1600 || quality > 0.75 ? IMAGE_MAX_BYTES + 50_000 : 820_000;
+      return new Blob([new Uint8Array(size)], { type: 'image/jpeg' });
+    },
+    close: () => {
+      closed = true;
+    },
+  }));
+
+  expect(closed).toBe(true);
+  expect(result.filename).toBe('chup-man-hinh.jpg');
+  expect(result.blob.size).toBe(820_000);
+  expect(result.width).toBe(1536);
+  expect(result.height).toBe(768);
+  expect(result.quality).toBe(0.75);
+  expect(attempts.slice(0, 4)).toEqual([
+    { width: 2048, height: 1024, quality: 0.85 },
+    { width: 2048, height: 1024, quality: 0.75 },
+    { width: 2048, height: 1024, quality: 0.65 },
+    { width: 2048, height: 1024, quality: 0.55 },
+  ]);
+  expect(attempts[4]).toEqual({ width: 1536, height: 768, quality: 0.85 });
+  expect(attempts[5]).toEqual({ width: 1536, height: 768, quality: 0.75 });
+
+  await expect(
+    compressImage(input, async () => {
+      throw new Error('decode failed');
+    }),
+  ).rejects.toThrow(IMAGE_DECODE_ERROR);
+});
+

@@ -12,6 +12,7 @@ import { MAX_COMMAND_ATTEMPTS, claimCommands, completeCommand, dropBotSend, fail
 import { applyGroupSummaryResult } from './group-summaries';
 import { ingestEvents } from './ingest';
 import { applyExtractionResult } from './intake';
+import { ownsMediaKey } from './media';
 import { processWorkerCommands } from './worker-commands';
 
 /**
@@ -126,6 +127,24 @@ bridgeRoutes.post('/events', async (c) => {
   const input = parseBody(c.get('bridgeBody'), bridgeEventsBodySchema);
   if ('fields' in input) return c.json(invalid(input.fields), 422);
   return c.json(ok(await ingestEvents(c.env.DB, input.data.events)));
+});
+
+bridgeRoutes.get('/media', async (c) => {
+  const key = c.req.query('key') ?? '';
+  const accountId = c.req.query('accountId') ?? '';
+  if (!key || !accountId) return c.json(notFound, 404);
+  const account = await c.env.DB.prepare('SELECT organization_id FROM channel_account WHERE id = ?')
+    .bind(accountId).first<{ organization_id: string }>();
+  if (!account || !ownsMediaKey(account.organization_id, key)) return c.json(notFound, 404);
+  const object = await c.env.MEDIA.get(key);
+  if (!object) return c.json(notFound, 404);
+  return new Response(object.body, {
+    headers: {
+      'Content-Type': object.httpMetadata?.contentType || 'application/octet-stream',
+      'Cache-Control': 'private, max-age=31536000, immutable',
+      'X-Content-Type-Options': 'nosniff',
+    },
+  });
 });
 
 bridgeRoutes.get('/commands', async (c) => {

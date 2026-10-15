@@ -3,6 +3,8 @@ import type { Actor, Env } from '../env';
 import { autoAssignOnHandoff, linkBase, slaDueSql } from './assignment';
 import { commandInsertStatement, enqueueCommand, type CommandTarget } from './dispatcher';
 import { enqueueExtraction } from './intake';
+import type { StaffMedia } from './media';
+import { filenameForKey } from './media';
 import { UnsafeRecoveryReplyError, assertRegistrationPolicyOutput } from './zalo-oa-registration-guard';
 
 /**
@@ -285,7 +287,16 @@ export async function scheduleGroupReply(db: D1Database, conversationId: string,
   return true;
 }
 
-interface OutgoingMessage { id: string; senderKind: 'bot' | 'staff_web'; userId: string | null; text: string; replyTo?: GroupReplyTarget }
+interface OutgoingMessage {
+  id: string;
+  senderKind: 'bot' | 'staff_web';
+  userId: string | null;
+  text: string;
+  /** Text the channel receives. Defaults to `text`. Empty when the stored body is only the attachment placeholder. */
+  channelText?: string;
+  attachments?: StaffMedia[];
+  replyTo?: GroupReplyTarget;
+}
 
 /**
  * Inserts an outgoing message and the command that sends it in one batch. The command's dedupe key defaults to
@@ -300,19 +311,27 @@ async function queueOutgoing(db: D1Database, conv: ConversationRow, message: Out
   // The bridge sends a group reply as `@name text`. Store that exact body so its echo matches this message
   // instead of looking like someone typed on the phone.
   const body = replyTo && replyTo.senderName.trim() ? `@${replyTo.senderName} ${message.text}` : message.text;
+  const outboundText = message.channelText ?? message.text;
+  const storedAttachments = (message.attachments ?? []).map((item) => ({
+    url: item.url, mimeType: item.mimeType, ...(item.name ? { name: item.name } : {}),
+  }));
+  const bridgeAttachments = kind === 'send_zalo' && message.attachments?.length
+    ? message.attachments.map((item) => ({ key: item.key, mimeType: item.mimeType, filename: item.name ?? filenameForKey(item.key, item.mimeType) }))
+    : undefined;
   const command = commandInsertStatement(db, {
     kind, target, channelAccountId: conv.channel_account_id,
     conversationId: conv.id, dedupeKey,
     payload: {
-      messageId: message.id, threadId: conv.external_thread_id, threadKind: conv.kind, text: message.text,
+      messageId: message.id, threadId: conv.external_thread_id, threadKind: conv.kind, text: outboundText,
       ...(replyTo ? { replyTo } : {}),
+      ...(bridgeAttachments ? { attachments: bridgeAttachments } : {}),
     },
   });
   // The message is written only together with its command, so a replayed key never leaves an orphan message.
   const [inserted] = await db.batch([
-    db.prepare(`INSERT INTO message (id, conversation_id, direction, sender_kind, sent_by_user_id, body, status, created_at)
-      SELECT ?, ?, 'out', ?, ?, ?, 'pending', ? WHERE NOT EXISTS (SELECT 1 FROM channel_command WHERE dedupe_key = ?)`)
-      .bind(message.id, conv.id, message.senderKind, message.userId, body, now, dedupeKey),
+    db.prepare(`INSERT INTO message (id, conversation_id, direction, sender_kind, sent_by_user_id, body, attachments_json, status, created_at)
+      SELECT ?, ?, 'out', ?, ?, ?, ?, 'pending', ? WHERE NOT EXISTS (SELECT 1 FROM channel_command WHERE dedupe_key = ?)`)
+      .bind(message.id, conv.id, message.senderKind, message.userId, body, storedAttachments.length ? JSON.stringify(storedAttachments) : null, now, dedupeKey),
     command.statement,
   ]);
   if (inserted!.meta.changes === 1) return { target, messageId: message.id, replayed: false };
@@ -559,7 +578,17 @@ async function loadForActor(db: D1Database, actor: Actor, conversationId: string
 /** Result of a staff send; `conflict` means the client message id was already used for a different message. */
 export type StaffSendOutcome =
   | { conflict: false; messageId: string; mode: ConversationMode; assigneeUserId: string | null; workerCommandQueued: boolean }
-  | { conflict: true };
+  | { conflict: true }
+  | { unsupported: true };
+
+function sameStoredAttachments(raw: string | null, files: StaffMedia[] | undefined): boolean {
+  let stored: unknown = [];
+  if (raw) {
+    try { stored = JSON.parse(raw); } catch { return false; }
+  }
+  const expected = (files ?? []).map((item) => ({ url: item.url, mimeType: item.mimeType, ...(item.name ? { name: item.name } : {}) }));
+  return JSON.stringify(stored) === JSON.stringify(expected);
+}
 
 /**
  * A staff member writes from the web: the message is queued for sending, recorded in the pending staff
@@ -568,19 +597,30 @@ export type StaffSendOutcome =
  * message already queued and changes nothing; reusing it for other text or by another person is a conflict.
  * Null when the conversation is not in the actor's organization.
  */
-export async function staffSend(db: D1Database, actor: Actor, conversationId: string, text: string, clientMessageId?: string):
-  Promise<StaffSendOutcome | null> {
+export async function staffSend(
+  db: D1Database, actor: Actor, conversationId: string, text: string, clientMessageId?: string, attachments?: StaffMedia[],
+): Promise<StaffSendOutcome | null> {
   const conv = await loadForActor(db, actor, conversationId);
   if (!conv) return null;
+  const files = attachments?.length ? attachments : undefined;
+  if (files && conv.channel !== 'zalo' && conv.channel !== 'zalo_oa') return { unsupported: true };
+  const trimmed = text.trim();
+  const storedBody = trimmed || ATTACHMENT_ONLY_TEXT;
+  // Image-only: the CRM row keeps the placeholder, and the channel is given an empty caption.
+  const channelText = files ? trimmed : undefined;
   const now = new Date().toISOString();
   const dedupeKey = clientMessageId ? `send:${conv.id}:${clientMessageId}` : undefined;
-  const queued = await queueOutgoing(db, conv, { id: crypto.randomUUID(), senderKind: 'staff_web', userId: actor.id, text }, now, dedupeKey);
+  const queued = await queueOutgoing(db, conv, {
+    id: crypto.randomUUID(), senderKind: 'staff_web', userId: actor.id, text: storedBody, channelText, attachments: files,
+  }, now, dedupeKey);
   const workerCommandQueued = queued.target === 'worker';
   if (queued.replayed) {
-    const previous = await db.prepare(`SELECT body, sent_by_user_id FROM message
+    const previous = await db.prepare(`SELECT body, sent_by_user_id, attachments_json FROM message
       WHERE id = ? AND conversation_id = ? AND direction = 'out' AND sender_kind = 'staff_web'`)
-      .bind(queued.messageId, conv.id).first<{ body: string; sent_by_user_id: string | null }>();
-    if (!previous || previous.body !== text || previous.sent_by_user_id !== actor.id) return { conflict: true };
+      .bind(queued.messageId, conv.id).first<{ body: string; sent_by_user_id: string | null; attachments_json: string | null }>();
+    if (!previous || previous.body !== storedBody || previous.sent_by_user_id !== actor.id || !sameStoredAttachments(previous.attachments_json, files)) {
+      return { conflict: true };
+    }
     return { conflict: false, messageId: queued.messageId, mode: conv.mode, assigneeUserId: conv.assignee_user_id, workerCommandQueued };
   }
   // A web reply in a group pauses the bot and drops pending replies. The group stays in its current mode.
@@ -605,7 +645,7 @@ export async function staffSend(db: D1Database, actor: Actor, conversationId: st
         assigned_at = CASE WHEN assignee_user_id IS NULL AND ? IS NOT NULL THEN ? ELSE assigned_at END,
         assignee_user_id = COALESCE(assignee_user_id, ?)
       WHERE id = ?`).bind(mode, now, now, now, assignee, now, assignee, conv.id),
-    appendStaffContext(db, conv.id, `Nhân viên: ${text}`, now),
+    appendStaffContext(db, conv.id, `Nhân viên: ${storedBody}`, now),
     auditStatement(db, actor, 'inbox.staffSend', conv.id, { mode: conv.mode, assigneeUserId: conv.assignee_user_id },
       { mode, assigneeUserId: assignee, messageId }, now),
   ]);

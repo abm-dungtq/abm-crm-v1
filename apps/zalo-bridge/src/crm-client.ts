@@ -45,7 +45,14 @@ export const RETRY_DELAYS_MS = [2000, 4000, 8000] as const;
 const MAX_PENDING_EVENTS = 10_000;
 const REQUEST_TIMEOUT_MS = 30_000;
 
-type SendOutcome = { kind: 'ok'; json: unknown } | { kind: 'retryable'; code: string } | { kind: 'rejected'; status: number };
+type SendOutcome =
+  | { kind: 'ok'; json: unknown }
+  | { kind: 'bytes'; bytes: Uint8Array; contentType: string }
+  | { kind: 'retryable'; code: string }
+  | { kind: 'rejected'; status: number };
+
+/** JSON routes never return raw bytes. Callers of `request` can read `.json` and `.code` directly. */
+type JsonOutcome = Exclude<SendOutcome, { kind: 'bytes' }>;
 
 export interface CrmClientOptions {
   baseUrl: string;
@@ -148,6 +155,18 @@ export class CrmClient {
   }
 
   /**
+   * Downloads one inbox image for a channel account. The GET is signed over an empty body, the same way a
+   * command poll is. A missing object or an account from another organization is `CRM_HTTP_404`.
+   */
+  async downloadMedia(accountId: string, key: string): Promise<{ bytes: Uint8Array; contentType: string }> {
+    const path = `/api/bridge/media?${new URLSearchParams({ accountId, key }).toString()}`;
+    const outcome = await this.send('GET', path, '', REQUEST_TIMEOUT_MS, false, 'bytes');
+    if (outcome.kind === 'bytes') return { bytes: outcome.bytes, contentType: outcome.contentType };
+    if (outcome.kind === 'retryable') throw new CodedError(outcome.code);
+    throw new CodedError(outcome.kind === 'rejected' ? `CRM_HTTP_${outcome.status}` : 'CRM_BAD_RESPONSE');
+  }
+
+  /**
    * Reports a command result. Network errors, 5xx and auth failures are retried after 2, 4 and 8 seconds and then
    * every 8 seconds while Worker time (this PC's clock plus the learned offset) is still more than 8 seconds
    * before `retryUntil` (epoch ms, normally the lease expiry). Any other 4xx is final.
@@ -171,7 +190,7 @@ export class CrmClient {
     return 'undelivered';
   }
 
-  private async withRetry(send: () => Promise<SendOutcome>): Promise<SendOutcome> {
+  private async withRetry<T extends SendOutcome>(send: () => Promise<T>): Promise<T> {
     let outcome = await send();
     for (const delay of RETRY_DELAYS_MS) {
       if (outcome.kind !== 'retryable') break;
@@ -201,12 +220,14 @@ export class CrmClient {
     this.log('warn', 'clock.skew', { offsetSeconds: seconds });
   }
 
-  private async request(method: 'GET' | 'POST', path: string, body: string, timeoutMs = REQUEST_TIMEOUT_MS): Promise<SendOutcome> {
-    return this.send(method, path, body, timeoutMs, false);
+  private async request(method: 'GET' | 'POST', path: string, body: string, timeoutMs = REQUEST_TIMEOUT_MS): Promise<JsonOutcome> {
+    const outcome = await this.send(method, path, body, timeoutMs, false, 'json');
+    if (outcome.kind === 'bytes') return { kind: 'ok', json: null };
+    return outcome;
   }
 
   private async send(
-    method: 'GET' | 'POST', path: string, body: string, timeoutMs: number, clockRetried: boolean,
+    method: 'GET' | 'POST', path: string, body: string, timeoutMs: number, clockRetried: boolean, mode: 'json' | 'bytes',
   ): Promise<SendOutcome> {
     const sentOffset = this.clockOffsetMs;
     const timestamp = String(Math.floor((this.now() + sentOffset) / 1000));
@@ -228,7 +249,7 @@ export class CrmClient {
     // with the corrected timestamp, before the usual auth retries.
     if (response.status === 401 && !clockRetried && Math.abs(this.clockOffsetMs - sentOffset) > 60_000) {
       await response.body?.cancel().catch(() => {});
-      return this.send(method, path, body, timeoutMs, true);
+      return this.send(method, path, body, timeoutMs, true, mode);
     }
     if (response.status >= 500) {
       await response.body?.cancel().catch(() => {});
@@ -243,6 +264,11 @@ export class CrmClient {
     if (!response.ok) {
       await response.body?.cancel().catch(() => {});
       return { kind: 'rejected', status: response.status };
+    }
+    if (mode === 'bytes') {
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      const contentType = (response.headers.get('content-type') ?? 'application/octet-stream').split(';')[0]!.trim();
+      return { kind: 'bytes', bytes, contentType };
     }
     try {
       return { kind: 'ok', json: await response.json() };

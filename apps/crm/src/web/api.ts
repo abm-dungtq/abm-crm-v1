@@ -4,7 +4,7 @@ import type { ApiError, CommandName, ConversationMode } from '@abm/contracts';
 import type {
   AssignResult, ChannelAccount, ChannelAccountList, ChannelAccountUpdate, ClassifyIntakeResult, ConversationFilter, CustomerBotSwitch, GroupSchedule,
   GroupScheduleInput, InboxContactCrm, InboxConversation, InboxMessage, InboxSettings, InboxSettingsUpdate, IntakeField, IntakePipeline, IntakeStatus,
-  IntakeValues, LeadIntake, RegistrationPolicyUpdate, RosterMember, SendMessageResult, SetModeResult, ZaloGroup, ZaloGroupMember, ZaloGroupUpdate,
+  IntakeValues, LeadIntake, RegistrationPolicyUpdate, RosterMember, SendMessageResult, SetModeResult, UploadedInboxMedia, ZaloGroup, ZaloGroupMember, ZaloGroupUpdate,
 } from './types';
 import { conversationsPath } from './inbox-format';
 
@@ -38,7 +38,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   // The session cookie travels on its own; the demo header only matters in demo mode.
   if (memoryUser && authMode !== 'password') headers.set('X-Demo-User', memoryUser);
-  if (init.body) headers.set('Content-Type', 'application/json');
+  if (init.body && !(init.body instanceof FormData)) headers.set('Content-Type', 'application/json');
   let response: Response;
   try {
     response = await fetch(`/api${path}`, { ...init, headers });
@@ -107,9 +107,19 @@ export const getConversation = (id: string) => api.get<InboxConversation>(`/inbo
 /** Latest page oldest first, or with `after` only the messages created after that instant. */
 export const listMessages = (id: string, after?: string) =>
   api.get<InboxMessage[]>(`/inbox/conversations/${enc(id)}/messages${after ? `?after=${enc(after)}` : ''}`);
+/** Uploads a compressed JPEG/PNG (<= 1 MB) for the inbox composer. */
+export const uploadInboxMedia = (file: Blob, filename = 'image.jpg') => {
+  const form = new FormData();
+  form.set('file', file, filename);
+  return request<UploadedInboxMedia>('/inbox/media', { method: 'POST', body: form });
+};
 /** `clientMessageId` identifies one composed message; resending it after a lost response never sends twice. */
-export const sendMessage = (id: string, text: string, clientMessageId: string) =>
-  api.post<SendMessageResult>(`/inbox/conversations/${enc(id)}/messages`, { text, clientMessageId });
+export const sendMessage = (id: string, text: string, clientMessageId: string, attachments?: { key: string }[]) =>
+  api.post<SendMessageResult>(`/inbox/conversations/${enc(id)}/messages`, {
+    ...(text ? { text } : {}),
+    clientMessageId,
+    ...(attachments?.length ? { attachments } : {}),
+  });
 export const setMode = (id: string, mode: ConversationMode) => api.post<SetModeResult>(`/inbox/conversations/${enc(id)}/mode`, { mode });
 export const listAccounts = () => api.get<ChannelAccountList>('/inbox/accounts');
 /** A Facebook Page is added with `channel: 'facebook'` and its page id as `externalId`; without `channel` a Zalo number is added. */

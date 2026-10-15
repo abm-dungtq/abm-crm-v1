@@ -1,16 +1,20 @@
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from 'react';
 import { Link } from '@tanstack/react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ChannelKind, ConversationMode } from '@abm/contracts';
-import { ApiFailure, listMessages, sendMessage, setMode } from '../api';
+import { ApiFailure, listMessages, sendMessage, setMode, uploadInboxMedia } from '../api';
 import { fmtDateTime } from '../format';
-import { conversationChannelLabel, mergeMessages, senderLabel } from '../inbox-format';
-import type { InboxConversation, InboxMessage, SendMessageResult, SetModeResult } from '../types';
+import { compressImage, IMAGE_DECODE_ERROR } from '../image-compress';
+import { canChannelSendImages, conversationChannelLabel, mergeMessages, senderLabel } from '../inbox-format';
+import type { InboxConversation, InboxMessage, SendMessageResult, SetModeResult, UploadedInboxMedia } from '../types';
 import { Icon } from './icons';
-import { Avatar, Badge, ChannelBadge, ErrorState, FormError, Loading, SegmentedControl, useToast, type Tone } from './ui';
+import { Avatar, Badge, ChannelBadge, ErrorState, FormError, ImageLightbox, Loading, SegmentedControl, useToast, type Tone } from './ui';
 
 /** Same limit as the Worker's staff send. */
 export const STAFF_TEXT_MAX = 2000;
+/** Maximum images per staff message. */
+export const STAFF_IMAGE_MAX = 4;
+export { canChannelSendImages };
 /** Open conversation polling interval. */
 const THREAD_POLL_MS = 3000;
 /** While an outgoing message is still pending, every n-th poll reloads the page so status changes (sent, failed) show. */
@@ -74,38 +78,120 @@ function useThreadMessages(conversationId: string) {
   });
 }
 
-interface Attachment { url: string; name?: string }
-/** Only http(s) links are rendered; anything else in the stored JSON is ignored. */
-function parseAttachments(json: string | null): Attachment[] {
+export interface Attachment { url: string; name?: string; mimeType?: string }
+
+const IMAGE_PLACEHOLDER_BODIES = new Set(['', '[Hình ảnh]', '[Tệp đính kèm]', '[Ảnh]']);
+
+/** Only http(s) links or root-relative media paths (e.g. /api/inbox/media/<key>) are rendered. */
+export function parseAttachments(json: string | null): Attachment[] {
   if (!json) return [];
   try {
     const value: unknown = JSON.parse(json);
     if (!Array.isArray(value)) return [];
     return value.flatMap((a: unknown) => {
       if (!a || typeof a !== 'object') return [];
-      const { url, name } = a as { url?: unknown; name?: unknown };
-      if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) return [];
-      return [{ url, name: typeof name === 'string' && name ? name : undefined }];
+      const { url, name, mimeType } = a as { url?: unknown; name?: unknown; mimeType?: unknown };
+      if (typeof url !== 'string' || !/^(https?:\/\/|\/(?!\/))/i.test(url)) return [];
+      const cleanMime = typeof mimeType === 'string' && mimeType.trim() ? mimeType.trim() : undefined;
+      return [{
+        url,
+        name: typeof name === 'string' && name ? name : undefined,
+        mimeType: cleanMime,
+      }];
     });
   } catch {
     return [];
   }
 }
 
-function MessageBubble({ message: m, channel, kind }: { message: InboxMessage; channel: ChannelKind; kind: 'direct' | 'group' }) {
+export function isImageAttachment(a: Attachment): boolean {
+  if (a.mimeType) {
+    return a.mimeType.toLowerCase().startsWith('image/');
+  }
+  try {
+    const parsed = new URL(a.url, 'https://crm.local');
+    const path = parsed.pathname.toLowerCase();
+    if (/\.(jpe?g|png|gif|webp)$/i.test(path)) return true;
+    const host = parsed.hostname.toLowerCase();
+    return (
+      host === 'zdn.vn' ||
+      host.endsWith('.zdn.vn') ||
+      host === 'fbcdn.net' ||
+      host.endsWith('.fbcdn.net') ||
+      host === 'fbsbx.com' ||
+      host.endsWith('.fbsbx.com')
+    );
+  } catch {
+    return /\.(jpe?g|png|gif|webp)(\?|#|$)/i.test(a.url);
+  }
+}
+
+function MessageBubble({
+  message: m,
+  channel,
+  kind,
+  onOpenImage,
+}: {
+  message: InboxMessage;
+  channel: ChannelKind;
+  kind: 'direct' | 'group';
+  onOpenImage: (img: { src: string; alt: string }) => void;
+}) {
+  const [brokenImages, setBrokenImages] = useState<Record<number, boolean>>({});
   const time = <time dateTime={m.createdAt} title={fmtDateTime(m.createdAt, true)}>{fmtShortTime(m.createdAt)}</time>;
   if (m.senderKind === 'system') {
     return <li className="msg-system" role="note"><span>{m.body}</span> · {time}</li>;
   }
   const attachments = parseAttachments(m.attachmentsJson);
+  const imageItems = attachments
+    .map((a, index) => ({ a, index }))
+    .filter(({ a }) => isImageAttachment(a));
+  const fileItems = attachments
+    .map((a, index) => ({ a, index }))
+    .filter(({ a }) => !isImageAttachment(a));
+  const visibleImages = imageItems.filter(({ index }) => !brokenImages[index]);
+  const failedImages = imageItems.filter(({ index }) => Boolean(brokenImages[index]));
+  const hasAnyImage = imageItems.length > 0;
+  const trimmedBody = m.body.trim();
+  const showBody = Boolean(m.body) && !(hasAnyImage && IMAGE_PLACEHOLDER_BODIES.has(trimmedBody));
+  const imageAlt = m.senderKind === 'customer' ? 'Ảnh khách gửi' : 'Ảnh đã gửi';
   const label = senderLabel(m, channel);
   const showSender = kind === 'group' && m.senderKind === 'customer';
   const content = (
     <>
       <div className="msg-bubble">
-        {m.body && <div className="msg-body">{m.body}</div>}
-        {attachments.map((a, i) => (
-          <a key={i} className="msg-attachment" href={a.url} target="_blank" rel="noopener noreferrer"><Icon name="file" />{a.name ?? 'Tệp đính kèm'}</a>
+        {showBody && <div className="msg-body">{m.body}</div>}
+        {visibleImages.length > 0 && (
+          <div className="msg-images" data-grid={visibleImages.length > 1 ? 'true' : undefined}>
+            {visibleImages.map(({ a, index }) => (
+              <button
+                key={index}
+                type="button"
+                className="msg-image-btn"
+                onClick={() => onOpenImage({ src: a.url, alt: imageAlt })}
+                aria-label={`Xem lớn: ${imageAlt}`}
+              >
+                <img
+                  className="msg-image"
+                  src={a.url}
+                  alt={imageAlt}
+                  loading="lazy"
+                  referrerPolicy="no-referrer"
+                  onError={() => setBrokenImages((prev) => ({ ...prev, [index]: true }))}
+                />
+              </button>
+            ))}
+          </div>
+        )}
+        {failedImages.map(({ a, index }) => (
+          <a key={`err-${index}`} className="msg-attachment" href={a.url} target="_blank" rel="noopener noreferrer">
+            <Icon name="external-link" />Mở ảnh
+          </a>
+        ))}
+        {fileItems.map(({ a, index }) => (
+          <a key={`file-${index}`} className="msg-attachment" href={a.url} target="_blank" rel="noopener noreferrer">
+            <Icon name="file" />{a.name ?? 'Tệp đính kèm'}
+          </a>
         ))}
       </div>
       <div className="msg-meta">
@@ -129,26 +215,237 @@ function MessageBubble({ message: m, channel, kind }: { message: InboxMessage; c
   );
 }
 
-function Composer({ conversationId }: { conversationId: string }) {
+interface ComposerImageItem {
+  id: string;
+  name: string;
+  previewUrl: string;
+  status: 'uploading' | 'uploaded' | 'error';
+  uploaded?: UploadedInboxMedia;
+  error?: string;
+}
+
+interface PendingSendPayload {
+  id: string;
+  text: string;
+  attachments: { key: string; previewUrl: string; url: string; name: string; mimeType: string }[];
+  keysSig: string;
+}
+
+const IMAGE_LIMIT_MESSAGE = 'Chỉ được đính kèm tối đa 4 ảnh trong một tin nhắn';
+
+function isCandidateImageFile(file: File): boolean {
+  return file.type.startsWith('image/') || /\.(jpe?g|png|webp|heic|heif)$/i.test(file.name);
+}
+
+function toFormError(err: unknown): ApiFailure {
+  if (err instanceof ApiFailure) return err;
+  const message = err instanceof Error && err.message ? err.message : IMAGE_DECODE_ERROR;
+  return new ApiFailure({ code: 'VALIDATION_FAILED', message }, 422);
+}
+
+function Composer({ conversationId, channel }: { conversationId: string; channel: ChannelKind }) {
   const client = useQueryClient();
   const [text, setText] = useState('');
-  /** Id of the message being composed; a retry of the same text reuses it, so the server sends it once. */
-  const pending = useRef<{ text: string; id: string } | null>(null);
-  const send = useMutation<SendMessageResult, ApiFailure, { text: string; id: string }>({
-    mutationFn: (message) => sendMessage(conversationId, message.text, message.id),
+  const [images, setImages] = useState<ComposerImageItem[]>([]);
+  const [composerError, setComposerError] = useState<ApiFailure | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const imagesRef = useRef<ComposerImageItem[]>([]);
+  const activeIdsRef = useRef<Set<string>>(new Set());
+  /** Id of the message being composed; a retry of the same text + attachments reuses it, so the server sends it once. */
+  const pending = useRef<PendingSendPayload | null>(null);
+
+  const canSendImages = canChannelSendImages(channel);
+
+  useEffect(() => {
+    imagesRef.current = images;
+  }, [images]);
+
+  // Revoke any remaining object URLs on unmount.
+  useEffect(() => {
+    return () => {
+      activeIdsRef.current.clear();
+      for (const item of imagesRef.current) {
+        URL.revokeObjectURL(item.previewUrl);
+      }
+      imagesRef.current = [];
+    };
+  }, []);
+
+  const clearImages = useCallback(() => {
+    activeIdsRef.current.clear();
+    for (const item of imagesRef.current) {
+      URL.revokeObjectURL(item.previewUrl);
+    }
+    imagesRef.current = [];
+    setImages([]);
+  }, []);
+
+  const removeImage = useCallback((id: string) => {
+    activeIdsRef.current.delete(id);
+    setImages((prev) => {
+      const target = prev.find((item) => item.id === id);
+      if (target) URL.revokeObjectURL(target.previewUrl);
+      const next = prev.filter((item) => item.id !== id);
+      imagesRef.current = next;
+      const firstRemainingError = next.find((item) => item.status === 'error' && item.error);
+      setComposerError(firstRemainingError ? toFormError(new Error(firstRemainingError.error)) : null);
+      return next;
+    });
+  }, []);
+
+  const processAndUpload = useCallback(async (id: string, file: File) => {
+    try {
+      const compressed = await compressImage(file);
+      if (!activeIdsRef.current.has(id)) return;
+      const uploaded = await uploadInboxMedia(compressed.blob, compressed.filename);
+      if (!activeIdsRef.current.has(id)) return;
+      setImages((prev) => {
+        const next = prev.map((item) =>
+          item.id === id ? { ...item, status: 'uploaded' as const, uploaded, error: undefined } : item,
+        );
+        imagesRef.current = next;
+        return next;
+      });
+    } catch (err) {
+      if (!activeIdsRef.current.has(id)) return;
+      const failure = toFormError(err);
+      setComposerError(failure);
+      setImages((prev) => {
+        const next = prev.map((item) =>
+          item.id === id ? { ...item, status: 'error' as const, error: failure.message } : item,
+        );
+        imagesRef.current = next;
+        return next;
+      });
+    }
+  }, []);
+
+  const addFiles = useCallback(
+    (incoming: File[]) => {
+      if (!canSendImages || !incoming.length) return;
+      const currentCount = imagesRef.current.length;
+      const remaining = STAFF_IMAGE_MAX - currentCount;
+      if (incoming.length > remaining) {
+        setComposerError(new ApiFailure({ code: 'VALIDATION_FAILED', message: IMAGE_LIMIT_MESSAGE }, 422));
+      } else {
+        const existingError = imagesRef.current.find((item) => item.status === 'error' && item.error);
+        if (!existingError) setComposerError(null);
+      }
+      if (remaining <= 0) return;
+
+      const selected = incoming.slice(0, remaining);
+      const pairs = selected.map((file) => {
+        const id = crypto.randomUUID();
+        activeIdsRef.current.add(id);
+        const item: ComposerImageItem = {
+          id,
+          name: file.name || 'image.jpg',
+          previewUrl: URL.createObjectURL(file),
+          status: 'uploading',
+        };
+        return { file, item };
+      });
+
+      const nextList = [...imagesRef.current, ...pairs.map((p) => p.item)];
+      imagesRef.current = nextList;
+      setImages(nextList);
+
+      for (const { file, item } of pairs) {
+        void processAndUpload(item.id, file);
+      }
+    },
+    [canSendImages, processAndUpload],
+  );
+
+  const send = useMutation<SendMessageResult, ApiFailure, PendingSendPayload>({
+    mutationFn: (message) =>
+      sendMessage(
+        conversationId,
+        message.text,
+        message.id,
+        message.attachments.length ? message.attachments.map((a) => ({ key: a.key })) : undefined,
+      ),
+    onMutate: async (message) => {
+      await client.cancelQueries({ queryKey: messagesKey(conversationId) });
+      const optimisticId = `optimistic-${message.id}`;
+      client.setQueryData<InboxMessage[]>(messagesKey(conversationId), (old) => {
+        if (!old) return old;
+        const lastCreatedAt = old.at(-1)?.createdAt ?? new Date().toISOString();
+        const optimistic: InboxMessage = {
+          id: optimisticId,
+          direction: 'out',
+          senderKind: 'staff_web',
+          senderExternalId: null,
+          sentByUserId: null,
+          sentByName: null,
+          externalMsgId: null,
+          body: message.text || (message.attachments.length ? '[Tệp đính kèm]' : ''),
+          attachmentsJson: message.attachments.length
+            ? JSON.stringify(
+                message.attachments.map((a) => ({
+                  url: a.url,
+                  name: a.name,
+                  mimeType: a.mimeType,
+                })),
+              )
+            : null,
+          status: 'pending',
+          createdAt: lastCreatedAt,
+        };
+        return [...old.filter((m) => m.id !== optimisticId), optimistic];
+      });
+    },
     onSuccess: () => {
       pending.current = null;
       setText('');
+      setComposerError(null);
+      clearImages();
     },
     // Refresh at once either way: a request whose response was lost may still have queued the message.
-    onSettled: () => client.invalidateQueries({ queryKey: ['inbox'] }),
+    onSettled: async (_data, _error, message) => {
+      const optimisticId = `optimistic-${message.id}`;
+      client.setQueryData<InboxMessage[]>(messagesKey(conversationId), (old) =>
+        old?.filter((m) => m.id !== optimisticId),
+      );
+      await client.invalidateQueries({ queryKey: ['inbox'] });
+    },
   });
+
   const trimmed = text.trim();
+  const isUploading = images.some((item) => item.status === 'uploading');
+  const uploadedImages = images.filter(
+    (item): item is ComposerImageItem & { uploaded: UploadedInboxMedia } =>
+      item.status === 'uploaded' && Boolean(item.uploaded),
+  );
+  const canSubmit =
+    (Boolean(trimmed) || uploadedImages.length > 0) &&
+    trimmed.length <= STAFF_TEXT_MAX &&
+    !isUploading &&
+    !send.isPending;
+
   const submit = () => {
-    if (!trimmed || trimmed.length > STAFF_TEXT_MAX || send.isPending) return;
-    if (pending.current?.text !== trimmed) pending.current = { text: trimmed, id: crypto.randomUUID() };
+    if (!canSubmit) return;
+    const attachments = uploadedImages.map((item) => ({
+      key: item.uploaded.key,
+      previewUrl: item.previewUrl,
+      url: item.uploaded.url,
+      name: item.name,
+      mimeType: item.uploaded.mimeType,
+    }));
+    const keysSig = attachments.map((a) => a.key).join(',');
+    if (
+      !pending.current ||
+      pending.current.text !== trimmed ||
+      pending.current.keysSig !== keysSig
+    ) {
+      pending.current = { id: crypto.randomUUID(), text: trimmed, attachments, keysSig };
+    } else {
+      pending.current = { ...pending.current, attachments };
+    }
     send.mutate(pending.current);
   };
+
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     // Vietnamese IMEs confirm a word with Enter; only a plain Enter outside composition sends.
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -156,13 +453,134 @@ function Composer({ conversationId }: { conversationId: string }) {
       submit();
     }
   };
+
+  const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
+    if (!canSendImages) return;
+    const items = Array.from(e.clipboardData?.items ?? []);
+    let files = items
+      .filter((item) => item.kind === 'file')
+      .map((item) => item.getAsFile())
+      .filter((f): f is File => f !== null && isCandidateImageFile(f));
+    if (!files.length && e.clipboardData?.files?.length) {
+      files = Array.from(e.clipboardData.files).filter(isCandidateImageFile);
+    }
+    if (files.length > 0) {
+      e.preventDefault();
+      addFiles(files);
+    }
+  };
+
+  const onDragOver = (e: DragEvent<HTMLFormElement>) => {
+    if (!canSendImages) return;
+    if (Array.from(e.dataTransfer?.types ?? []).includes('Files')) {
+      e.preventDefault();
+      if (!dragOver) setDragOver(true);
+    }
+  };
+
+  const onDragLeave = (e: DragEvent<HTMLFormElement>) => {
+    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+      setDragOver(false);
+    }
+  };
+
+  const onDrop = (e: DragEvent<HTMLFormElement>) => {
+    if (!canSendImages) return;
+    setDragOver(false);
+    const files = Array.from(e.dataTransfer?.files ?? []).filter(isCandidateImageFile);
+    if (files.length > 0) {
+      e.preventDefault();
+      addFiles(files);
+    }
+  };
+
   return (
-    <form className="inbox-composer" onSubmit={(e) => { e.preventDefault(); submit(); }}>
-      <FormError error={send.error} />
+    <form
+      className="inbox-composer"
+      data-drag={dragOver ? 'true' : undefined}
+      onSubmit={(e) => {
+        e.preventDefault();
+        submit();
+      }}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
+      <FormError error={send.error ?? composerError} />
+      {images.length > 0 && (
+        <div className="composer-strip" role="list" aria-label="Ảnh đính kèm">
+          {images.map((item) => (
+            <div
+              key={item.id}
+              className="composer-thumb"
+              role="listitem"
+              data-status={item.status}
+              title={item.error ?? item.name}
+            >
+              <img src={item.previewUrl} alt={item.name} />
+              {item.status === 'uploading' && (
+                <span className="composer-thumb-state" role="status" aria-label="Đang tải ảnh">
+                  <span className="composer-spinner" aria-hidden="true" />
+                </span>
+              )}
+              {item.status === 'error' && (
+                <span className="composer-thumb-state composer-thumb-error" role="status" aria-label={item.error ?? 'Lỗi tải ảnh'}>
+                  <Icon name="alert" />
+                </span>
+              )}
+              <button
+                type="button"
+                className="composer-thumb-remove"
+                aria-label="Bỏ ảnh"
+                title="Bỏ ảnh"
+                onClick={() => removeImage(item.id)}
+                disabled={send.isPending}
+              >
+                <Icon name="close" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="row" style={{ alignItems: 'flex-end' }}>
-        <textarea aria-label="Nội dung tin nhắn" placeholder="Nhập tin nhắn… (Enter gửi, Shift+Enter xuống dòng)" rows={2}
-          maxLength={STAFF_TEXT_MAX} value={text} onChange={(e) => setText(e.target.value)} onKeyDown={onKeyDown} />
-        <button type="submit" className="btn btn-primary" aria-label="Gửi tin nhắn" disabled={!trimmed || send.isPending}>
+        {canSendImages && (
+          <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp,image/heic"
+              multiple
+              className="visually-hidden"
+              tabIndex={-1}
+              onChange={(e) => {
+                const files = Array.from(e.currentTarget.files ?? []);
+                e.currentTarget.value = '';
+                if (files.length > 0) addFiles(files);
+              }}
+            />
+            <button
+              type="button"
+              className="btn icon-btn composer-add-btn"
+              aria-label="Thêm ảnh"
+              title="Thêm ảnh (hoặc dán Ctrl+V)"
+              disabled={send.isPending}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <Icon name="plus" />
+            </button>
+          </>
+        )}
+        <textarea
+          aria-label="Nội dung tin nhắn"
+          placeholder="Nhập tin nhắn… (Enter gửi, Shift+Enter xuống dòng)"
+          rows={2}
+          maxLength={STAFF_TEXT_MAX}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={onKeyDown}
+          onPaste={onPaste}
+        />
+        <button type="submit" className="btn btn-primary composer-send-btn" aria-label="Gửi tin nhắn" disabled={!canSubmit}>
           <Icon name="arrow" /><span className="hide-sm">{send.isPending ? 'Đang gửi…' : 'Gửi'}</span>
         </button>
       </div>
@@ -189,6 +607,7 @@ export function InboxThread({
   const client = useQueryClient();
   const toast = useToast();
   const messages = useThreadMessages(conversation.id);
+  const [lightboxImage, setLightboxImage] = useState<{ src: string; alt: string } | null>(null);
   const changeMode = useMutation<SetModeResult, ApiFailure, ConversationMode>({
     mutationFn: (mode) => setMode(conversation.id, mode),
     onSuccess: (_data, mode) => toast(MODE_DONE_TOAST[mode] ?? 'Đã đổi chế độ'),
@@ -196,7 +615,10 @@ export function InboxThread({
   });
   const list = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
-  useEffect(() => { stick.current = true; }, [conversation.id]);
+  useEffect(() => {
+    stick.current = true;
+    setLightboxImage(null);
+  }, [conversation.id]);
   const count = messages.data?.length ?? 0;
   const lastId = messages.data?.at(-1)?.id;
   useLayoutEffect(() => {
@@ -256,10 +678,23 @@ export function InboxThread({
         {messages.error && <ErrorState error={messages.error} onRetry={() => messages.refetch()} />}
         {messages.data && !messages.data.length && <div className="empty"><strong>Chưa có tin nhắn</strong></div>}
         <ol className="msg-list" aria-live="polite" aria-relevant="additions">
-          {messages.data?.map((m) => <MessageBubble key={m.id} message={m} channel={conversation.channel} kind={conversation.kind} />)}
+          {messages.data?.map((m) => (
+            <MessageBubble
+              key={m.id}
+              message={m}
+              channel={conversation.channel}
+              kind={conversation.kind}
+              onOpenImage={setLightboxImage}
+            />
+          ))}
         </ol>
       </div>
-      <Composer key={conversation.id} conversationId={conversation.id} />
+      <Composer key={conversation.id} conversationId={conversation.id} channel={conversation.channel} />
+      <ImageLightbox
+        src={lightboxImage?.src ?? null}
+        alt={lightboxImage?.alt}
+        onClose={() => setLightboxImage(null)}
+      />
     </section>
   );
 }

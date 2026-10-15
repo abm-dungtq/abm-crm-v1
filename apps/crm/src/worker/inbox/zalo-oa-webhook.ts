@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import type { Env } from '../env';
-import { ZALO_OA_PLACEHOLDER_NAME } from './conversation-flow';
+import { ATTACHMENT_ONLY_TEXT, ZALO_OA_PLACEHOLDER_NAME } from './conversation-flow';
 import { httpsAvatarUrl, ingestMessage, type ChannelAccountRef, type InboundMessage } from './ingest';
 import { accessToken, zaloOaOauthCallback } from './zalo-oa-oauth';
 import { splitZaloOaText } from './zalo-oa-send';
@@ -196,12 +196,116 @@ async function linkOwnSend(db: D1Database, conversationId: string, msgId: string
     }
   }
   if (!ownId) return false;
-  await db.prepare(`UPDATE message SET external_msg_id = ?1
+  await fillExternalMsgId(db, ownId, msgId);
+  return true;
+}
+
+function storedHasImage(raw: string | null): boolean {
+  if (!raw) return false;
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { return false; }
+  if (!Array.isArray(parsed)) return false;
+  return parsed.some((item) => {
+    const mime = item && typeof item === 'object' ? (item as { mimeType?: unknown }).mimeType : undefined;
+    return typeof mime === 'string' && mime.startsWith('image/');
+  });
+}
+
+/** A photo echo. Stickers and GIFs use their own event names and Zalo types, and are not our image send. */
+function echoIsImage(name: string, attachments: ZaloAttachment[] | undefined): boolean {
+  if (name === 'oa_send_image') return true;
+  return Boolean(attachments?.some((item) => item.type === 'image'));
+}
+
+const fillExternalMsgId = (db: D1Database, messageId: string, msgId: string) =>
+  db.prepare(`UPDATE message SET external_msg_id = ?1
     WHERE id = ?2 AND direction = 'out' AND external_msg_id IS NULL
       AND NOT EXISTS (
         SELECT 1 FROM message o
         WHERE o.conversation_id = message.conversation_id AND o.external_msg_id = ?1 AND o.id <> message.id
-      )`).bind(msgId, ownId).run();
+      )`).bind(msgId, messageId).run();
+
+/**
+ * An echo whose Zalo id was already stored on a `send_zalo_oa` command of this conversation.
+ * The row keeps the first id `fillExternalMsgId` wrote. No second row is created.
+ */
+async function linkOwnRecordedMid(db: D1Database, conversationId: string, msgId: string, now: Date): Promise<boolean> {
+  const since = new Date(now.getTime() - OWN_SEND_WINDOW_MS).toISOString();
+  const row = await db.prepare(`SELECT json_extract(c.payload_json, '$.messageId') AS message_id
+    FROM channel_command c
+    WHERE c.kind = 'send_zalo_oa' AND c.conversation_id = ?1
+      AND (
+        c.updated_at >= ?2 OR c.created_at >= ?2
+        OR EXISTS (
+          SELECT 1 FROM message m
+          WHERE m.id = json_extract(c.payload_json, '$.messageId')
+            AND m.conversation_id = c.conversation_id AND m.created_at >= ?2
+        )
+      )
+      AND EXISTS (
+        SELECT 1 FROM json_each(json_extract(c.payload_json, '$.sentMids'))
+        WHERE value = ?3
+      )
+    LIMIT 1`).bind(conversationId, since, msgId).first<{ message_id: string | null }>();
+  if (!row?.message_id) return false;
+  await fillExternalMsgId(db, row.message_id, msgId);
+  return true;
+}
+
+/**
+ * Fallback for an image echo that arrives before the send call records its Zalo id. The image
+ * condition is in the query, and a row that is already fully sent is left alone, so a later photo
+ * typed in the OA app is stored. A Zalo image URL is copied only when the row has no attachments.
+ */
+async function linkOwnImageSend(
+  db: D1Database, conversationId: string, msgId: string, attachments: InboundMessage['attachments'], now: Date,
+): Promise<boolean> {
+  const since = new Date(now.getTime() - OWN_SEND_WINDOW_MS).toISOString();
+  const candidates = await db.prepare(`SELECT m.id, m.attachments_json FROM message m
+    WHERE m.conversation_id = ?1 AND m.direction = 'out'
+      AND m.sender_kind IN ('bot', 'staff_web', 'system')
+      AND (
+        m.body = ?3
+        OR EXISTS (
+          SELECT 1 FROM json_each(m.attachments_json) AS att
+          WHERE json_extract(att.value, '$.mimeType') IN ('image/jpeg', 'image/png')
+        )
+      )
+      AND (
+        m.created_at >= ?2
+        OR EXISTS (
+          SELECT 1 FROM channel_command c
+          WHERE c.kind = 'send_zalo_oa' AND c.conversation_id = m.conversation_id
+            AND json_extract(c.payload_json, '$.messageId') = m.id AND c.updated_at >= ?2
+        )
+      )
+      AND (
+        m.status = 'pending'
+        OR EXISTS (
+          SELECT 1 FROM channel_command c
+          WHERE c.kind = 'send_zalo_oa' AND c.conversation_id = m.conversation_id
+            AND json_extract(c.payload_json, '$.messageId') = m.id
+            AND json_array_length(json_extract(c.payload_json, '$.sentMids')) < (
+              SELECT COUNT(*) FROM json_each(m.attachments_json) AS att
+              WHERE json_extract(att.value, '$.mimeType') IN ('image/jpeg', 'image/png')
+            )
+        )
+      )
+    ORDER BY COALESCE((
+      SELECT MAX(c.updated_at) FROM channel_command c
+      WHERE c.kind = 'send_zalo_oa' AND c.conversation_id = m.conversation_id
+        AND json_extract(c.payload_json, '$.messageId') = m.id
+    ), m.created_at) DESC, m.rowid DESC
+    LIMIT ${OWN_SEND_CANDIDATES}`).bind(conversationId, since, ATTACHMENT_ONLY_TEXT)
+    .all<{ id: string; attachments_json: string | null }>();
+  const own = candidates.results[0];
+  if (!own) return false;
+  const echoImages = (attachments ?? []).filter((item) => item.url && item.mimeType?.startsWith('image/'));
+  if (!storedHasImage(own.attachments_json) && echoImages.length) {
+    await db.prepare(`UPDATE message SET attachments_json = ? WHERE id = ? AND attachments_json IS NULL`)
+      .bind(JSON.stringify(echoImages), own.id).run();
+  }
+  await fillExternalMsgId(db, own.id, msgId);
   return true;
 }
 
@@ -447,7 +551,10 @@ async function handleOaSend(db: D1Database, ev: ZaloEvent, name: string, now: Da
     .bind(account.id, customerId).first<{ id: string }>();
   if (!conv) return;
   if (await messageExists(db, conv.id, msgId)) return;
-  if (await linkOwnSend(db, conv.id, msgId, built.text, now)) return;
+  if (await linkOwnRecordedMid(db, conv.id, msgId, now)) return;
+  if (echoIsImage(name, ev.message?.attachments)) {
+    if (await linkOwnImageSend(db, conv.id, msgId, built.attachments, now)) return;
+  } else if (await linkOwnSend(db, conv.id, msgId, built.text, now)) return;
   if (await isAutoReply(db, conv.id, now)) {
     await storeAutoReply(db, conv.id, built, msgId, now);
     return;

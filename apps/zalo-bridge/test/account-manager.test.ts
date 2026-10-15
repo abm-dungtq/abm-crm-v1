@@ -13,7 +13,7 @@ class FakeSession implements ZaloSession {
   closeCb: ((c: SessionClose) => void) | null = null;
   closed = false;
   nextMsgId = 1000;
-  send = vi.fn(async () => ({ msgId: String(this.nextMsgId++) }));
+  send = vi.fn(async (): Promise<{ msgId: string; msgIds?: string[] }> => ({ msgId: String(this.nextMsgId++) }));
   getUserProfile = vi.fn(async (_userId: string): Promise<ZaloUserProfile | null> => null);
   listGroups = vi.fn(async () => [{ threadId: 'g1', name: 'Nhóm 1' }]);
   listGroupMembers = vi.fn(async (_groupId: string): Promise<{ id: string; name: string; avatar?: string }[]> => [{ id: 'mem-1', name: 'An' }]);
@@ -90,6 +90,23 @@ describe('AccountManager', () => {
     session.messageCb!(selfMessage(msgId));
     expect(messages()).toHaveLength(1);
     expect(messages()[0]).toMatchObject({ msgId, fromSelf: true, commandId: 'cmd-7', accountExternalId: 'own-uid' });
+  });
+
+  it('records every attachment message id, including one that echoes before send() returns', async () => {
+    const { accounts, session } = await loggedIn();
+    session.send.mockResolvedValueOnce({ msgId: '1000', msgIds: ['1000', '1001'] });
+    await accounts.send('acc-1', 'cust-1', 'direct', '', 'cmd-img');
+    session.messageCb!({ ...selfMessage('1001'), text: '' });
+    expect(messages()[0]).toMatchObject({ msgId: '1001', commandId: 'cmd-img' });
+
+    session.send.mockImplementationOnce(async () => {
+      session.messageCb!({ ...selfMessage('1002'), text: '' });
+      return { msgId: '1002', msgIds: ['1002'] };
+    });
+    await accounts.send('acc-1', 'cust-1', 'direct', '', 'cmd-early');
+    expect(messages().some((message) => message.msgId === '1002')).toBe(false);
+    await vi.advanceTimersByTimeAsync(ECHO_HOLD_MS);
+    expect(messages().find((message) => message.msgId === '1002')).toMatchObject({ commandId: 'cmd-early' });
   });
 
   it('matches an echo that arrives before send() returns, within the hold time', async () => {

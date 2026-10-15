@@ -4,7 +4,7 @@ import { CodedError, errorCode, silentLogger, type Logger } from './config';
 import type { BridgeCommand, ResultDelivery } from './crm-client';
 import type { CompletionRequest, MediaCompletionRequest } from './goclaw-client';
 import { downloadImage as fetchCustomerImage } from './image-fetch';
-import type { ThreadKind, ZaloSendReply, ZaloUserProfile } from './zalo-client';
+import { imageDimensions, type ThreadKind, type ZaloOutgoingFile, type ZaloSendReply, type ZaloUserProfile } from './zalo-client';
 
 /**
  * Executes bridge commands. Commands of one conversation run strictly one after another (never two GoClaw runs
@@ -32,6 +32,11 @@ const completionPayload = z.object({
   zaloUserId: z.string().min(1).optional(),
   images: z.array(z.string().url()).max(3).optional(),
 });
+const sendAttachment = z.object({
+  key: z.string().min(1).max(300),
+  mimeType: z.enum(['image/jpeg', 'image/png']),
+  filename: z.string().min(1).max(200),
+});
 const sendPayload = z.object({
   threadId: z.string().min(1),
   threadKind: z.enum(['direct', 'group']),
@@ -41,12 +46,15 @@ const sendPayload = z.object({
     senderId: z.string().min(1),
     senderName: z.string().max(200),
   }).optional(),
+  attachments: z.array(sendAttachment).max(4).optional(),
 });
 const sessionPayload = z.object({ accountId: z.string().min(1) }).partial();
 
 export interface RunnerCrm {
   pollCommands(): Promise<BridgeCommand[]>;
   postResult(id: string, result: BridgeCommandResult, retryUntil?: number): Promise<ResultDelivery>;
+  /** Signed download of one inbox image. Required only when a send carries attachments. */
+  downloadMedia?(accountId: string, key: string): Promise<{ bytes: Uint8Array; contentType: string }>;
 }
 export interface RunnerGoClaw {
   complete(request: CompletionRequest): Promise<string>;
@@ -62,6 +70,7 @@ export interface RunnerAccounts {
     text: string,
     commandId: string,
     reply?: ZaloSendReply,
+    files?: ZaloOutgoingFile[],
   ): Promise<{ msgId: string }>;
   /** Zalo profile of a direct customer. Null when the account has no live session or Zalo has no profile. */
   profile(accountId: string, zaloUserId: string): Promise<ZaloUserProfile | null>;
@@ -323,27 +332,59 @@ export class CommandRunner {
   private async sendZalo(command: BridgeCommand): Promise<Outcome> {
     const payload = sendPayload.safeParse(command.payload);
     if (!payload.success || !command.channelAccountId) return { ok: false, error: 'INVALID_PAYLOAD' };
+    const requested = payload.data.attachments ?? [];
     const chunks = splitIntoChunks(payload.data.text);
-    if (!chunks.length) return { ok: false, error: 'EMPTY_TEXT' };
+    if (!chunks.length && requested.length === 0) return { ok: false, error: 'EMPTY_TEXT' };
+    // Text chunks first, then one Zalo message per image with an empty caption. A download happens on
+    // that image's own step, so a later failure does not send the text or an earlier image again.
+    const steps: { text: string; image?: (typeof requested)[number] }[] = [
+      ...chunks.map((text) => ({ text })),
+      ...requested.map((image) => ({ text: '', image })),
+    ];
     const { sendMinDelayMs: min, sendMaxDelayMs: max } = this.options;
     const progress = this.sendProgress.get(command.id);
     let firstMsgId = progress?.firstMsgId;
-    for (let index = progress?.delivered ?? 0; index < chunks.length; index += 1) {
+    for (let index = progress?.delivered ?? 0; index < steps.length; index += 1) {
       await this.sleep(min + Math.floor(this.random() * (max - min + 1)));
       try {
+        const step = steps[index]!;
         const reply = index === 0 ? payload.data.replyTo : undefined;
-        const { msgId } = await this.options.accounts.send(
-          command.channelAccountId, payload.data.threadId, payload.data.threadKind, chunks[index]!, command.id, reply,
-        );
-        firstMsgId ??= msgId;
+        const files = step.image ? await this.prepareFiles(command.channelAccountId, [step.image]) : undefined;
+        const sent = files
+          ? await this.options.accounts.send(
+            command.channelAccountId, payload.data.threadId, payload.data.threadKind, step.text, command.id, reply, files,
+          )
+          : await this.options.accounts.send(
+            command.channelAccountId, payload.data.threadId, payload.data.threadKind, step.text, command.id, reply,
+          );
+        firstMsgId ??= sent.msgId;
         this.rememberProgress(command.id, { delivered: index + 1, firstMsgId });
       } catch (error) {
-        // Name a failure after some chunks went out; the retry continues from this chunk.
-        if (index > 0) return { ok: false, error: `${errorCode(error)}:PARTIAL_${index}_OF_${chunks.length}` };
+        // Name a failure after some steps went out; the retry continues from this step.
+        if (index > 0) return { ok: false, error: `${errorCode(error)}:PARTIAL_${index}_OF_${steps.length}` };
         throw error;
       }
     }
     return { ok: true, externalMsgId: firstMsgId };
+  }
+
+  /** Downloads each image and fills the size zca-js wants. A bad type fails the command. */
+  private async prepareFiles(
+    accountId: string, files: { key: string; mimeType: 'image/jpeg' | 'image/png'; filename: string }[],
+  ): Promise<ZaloOutgoingFile[]> {
+    const download = this.options.crm.downloadMedia;
+    if (!download) throw new CodedError('MEDIA_UNAVAILABLE');
+    const out: ZaloOutgoingFile[] = [];
+    for (const file of files) {
+      const media = await download(accountId, file.key);
+      const mime = media.contentType.toLowerCase();
+      if (mime !== file.mimeType) throw new CodedError('MEDIA_TYPE');
+      const filename = /^[^/\\]+\.[A-Za-z0-9]+$/.test(file.filename)
+        ? file.filename as `${string}.${string}`
+        : (file.mimeType === 'image/png' ? 'image.png' : 'image.jpg');
+      out.push({ data: media.bytes, filename, mimeType: file.mimeType, ...imageDimensions(media.bytes, file.mimeType) });
+    }
+    return out;
   }
 
   private rememberProgress(commandId: string, progress: SendProgress) {

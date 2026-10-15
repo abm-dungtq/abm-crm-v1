@@ -472,3 +472,63 @@ export function useDebounced<T>(value: T, ms: number) {
   useEffect(() => { const t = setTimeout(() => setDebounced(value), ms); return () => clearTimeout(t); }, [value, ms]);
   return debounced;
 }
+
+export function ImageLightbox({
+  src,
+  alt,
+  onClose,
+}: {
+  src: string | null;
+  alt?: string;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    if (!src) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [src, onClose]);
+
+  if (!src) return null;
+
+  return (
+    <div
+      className="lightbox-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-label={alt || 'Xem ảnh lớn'}
+      onClick={onClose}
+    >
+      <div className="lightbox-bar" onClick={(e) => e.stopPropagation()}>
+        <a
+          href={src}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="lightbox-open-original"
+        >
+          <Icon name="external-link" />
+          <span>Mở ảnh gốc</span>
+        </a>
+        <button
+          type="button"
+          className="lightbox-close"
+          onClick={onClose}
+          aria-label="Đóng"
+          title="Đóng (Esc)"
+        >
+          <Icon name="close" />
+        </button>
+      </div>
+      <img
+        src={src}
+        alt={alt || 'Ảnh phóng to'}
+        className="lightbox-img"
+        referrerPolicy="no-referrer"
+        onClick={(e) => e.stopPropagation()}
+      />
+    </div>
+  );
+}
+

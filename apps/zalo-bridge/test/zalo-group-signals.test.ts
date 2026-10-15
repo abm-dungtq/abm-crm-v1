@@ -1,6 +1,6 @@
 import { ThreadType, type API, type Message } from 'zca-js';
 import { describe, expect, it, vi } from 'vitest';
-import { normalizeMessage, openZcaSession, type ZaloSendReply } from '../src/zalo-client';
+import { imageDimensions, normalizeMessage, openZcaSession, type ZaloSendReply } from '../src/zalo-client';
 
 const OWN = 'bot-1';
 
@@ -142,6 +142,41 @@ const quoteOfAsk = {
 
 const reply: ZaloSendReply = { msgId: 'ask-1', senderId: 'user-9', senderName: 'Hùng' };
 const mention = { pos: 0, uid: 'user-9', len: 'Hùng'.length + 1 };
+
+describe('imageDimensions', () => {
+  it('reads a JPEG SOF after fill bytes, a restart marker, and a Huffman table', () => {
+    const jpeg = new Uint8Array([
+      0xff, 0xd8,
+      0xff, 0xd0,
+      0xff, 0xff, 0xc4, 0x00, 0x04, 0x00, 0x00,
+      0xff, 0xc5, 0x00, 0x08, 0x08, 0x00, 0x14, 0x00, 0x28, 0x01,
+    ]);
+    expect(imageDimensions(jpeg, 'image/jpeg')).toEqual({ width: 40, height: 20 });
+  });
+});
+
+describe('ZcaSession.send files', () => {
+  it('passes one attachment and collects message ids from the attachment result', async () => {
+    const { session, sendMessage } = harness();
+    const data = new Uint8Array([1, 2, 3, 4]);
+    sendMessage.mockResolvedValueOnce({
+      message: { msgId: 10 },
+      attachment: [{ msgId: 11 }, { msgId: 12 }],
+    });
+    const sent = await session.send('user-9', 'direct', '', undefined, [{
+      data, filename: 'a.jpg', mimeType: 'image/jpeg', width: 8, height: 6,
+    }]);
+    expect(sendMessage).toHaveBeenCalledWith({
+      msg: '',
+      attachments: [{
+        data: Buffer.from(data),
+        filename: 'a.jpg',
+        metadata: { totalSize: 4, width: 8, height: 6 },
+      }],
+    }, 'user-9', ThreadType.User);
+    expect(sent).toEqual({ msgId: '10', msgIds: ['10', '11', '12'] });
+  });
+});
 
 describe('group reply send', () => {
   it('quotes the cached message and tags the sender', async () => {

@@ -16,7 +16,7 @@ export const EVERY_MINUTE_CRON = '* * * * *';
 export const DAILY_SUMMARY_CRON = '0 14 * * *';
 const SLA_BATCH = 50;
 
-type ScheduledEnv = Pick<Env, 'DB' | 'LARK_APP_ID' | 'LARK_APP_SECRET' | 'LARK_INBOX_CHAT_ID' | 'APP_URL' | 'ZALO_OA_APP_ID' | 'ZALO_OA_APP_SECRET' | 'ZALO_OA_TOKEN_KEY'>;
+type ScheduledEnv = Pick<Env, 'DB' | 'MEDIA' | 'LARK_APP_ID' | 'LARK_APP_SECRET' | 'LARK_INBOX_CHAT_ID' | 'APP_URL' | 'ZALO_OA_APP_ID' | 'ZALO_OA_APP_SECRET' | 'ZALO_OA_TOKEN_KEY'>;
 
 interface OverdueRow {
   id: string;

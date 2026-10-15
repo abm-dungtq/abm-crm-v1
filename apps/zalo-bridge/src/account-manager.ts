@@ -2,7 +2,7 @@ import { readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { BridgeEvent } from '@abm/contracts';
 import { CodedError, errorCode, silentLogger, type Logger } from './config';
-import { httpsAvatarUrl, type IncomingMessage, type ThreadKind, type ZaloConnector, type ZaloGroup, type ZaloSendReply, type ZaloSession, type ZaloUserProfile } from './zalo-client';
+import { httpsAvatarUrl, type IncomingMessage, type ThreadKind, type ZaloConnector, type ZaloGroup, type ZaloOutgoingFile, type ZaloSendReply, type ZaloSession, type ZaloUserProfile } from './zalo-client';
 
 /**
  * Session lifecycle of every Zalo account the bridge holds. One session file per CRM account id lives in
@@ -140,7 +140,10 @@ export class AccountManager {
     this.options.emit([{ type: 'account_status', accountId, status: 'disconnected' }]);
   }
 
-  /** Sends text from the account and remembers the message id so its echo carries `commandId`. */
+  /**
+   * Sends text or images from the account and remembers every returned message id, including ids that
+   * arrive on `result.attachment`, so each echo carries `commandId`. The ids are stored before this returns.
+   */
   async send(
     accountId: string,
     threadId: string,
@@ -148,14 +151,18 @@ export class AccountManager {
     text: string,
     commandId: string,
     reply?: ZaloSendReply,
-  ): Promise<{ msgId: string }> {
+    files?: ZaloOutgoingFile[],
+  ): Promise<{ msgId: string; msgIds: string[] }> {
     const session = this.accounts.get(accountId)?.session;
     if (!session) throw new CodedError('ACCOUNT_NOT_CONNECTED');
-    const result = await session.send(threadId, threadKind, text, reply);
+    const result = files?.length
+      ? await session.send(threadId, threadKind, text, reply, files)
+      : await session.send(threadId, threadKind, text, reply);
+    const ids = result.msgIds?.length ? result.msgIds : [result.msgId];
     const now = Date.now();
     for (const [msgId, entry] of this.sent) if (now - entry.at > SENT_ID_TTL_MS) this.sent.delete(msgId);
-    this.sent.set(result.msgId, { commandId, at: now });
-    return result;
+    for (const msgId of ids) this.sent.set(msgId, { commandId, at: now });
+    return { msgId: ids[0] ?? result.msgId, msgIds: ids };
   }
 
   /**

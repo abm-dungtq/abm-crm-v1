@@ -3,6 +3,8 @@ import type { Context } from 'hono';
 
 export interface Env {
   DB: D1Database;
+  /** Inbox images uploaded by staff. Keys are `org/<organizationId>/<yyyy>/<mm>/<uuid>.<jpg|png>`. */
+  MEDIA: R2Bucket;
   ASSETS: Fetcher;
   /** `password` enables cookie sessions; otherwise the evaluation header path applies. */
   AUTH_MODE?: string;
