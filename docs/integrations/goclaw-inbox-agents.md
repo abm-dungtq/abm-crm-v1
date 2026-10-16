@@ -138,6 +138,18 @@ Không giới hạn số tin trong nhóm. Câu trả lời của Long cũng khô
 
 Mỗi lượt tốn khoảng 47.000 token đầu vào.
 
+## 5. `crm-sales-poc` (bot Lark nội bộ)
+
+Kênh `abm-lark` gắn agent này. Từ 16/10/2026 nó dùng CRM thật qua kết nối MCP `abm-crm-main` (`/api/mcp`, mỗi người một chìa khóa, đủ 11 lệnh). Công cụ có sẵn chỉ gồm `datetime`, `web_search`, `web_fetch`, `read_image`, `read_document`, `memory_*` và `mcp_tool_search`; không mở chạy lệnh, ghi file, trình duyệt hay cron.
+
+**Cấp chìa khóa.** Người dùng phải liên kết Lark (`lark_link_status = linked`). Chạy trong `apps/crm`:
+
+```
+node scripts/issue-agent-tokens.mjs --server 01a1062a-ce8f-77b8-a16d-d69a39b2a6f5 --email <email> [--tenant-user <goclaw user_id>]
+```
+
+Trong nhóm, GoClaw tìm chìa khóa theo open_id Lark của người nhắn. Trong tin nhắn riêng, nếu contact đã được gộp vào một tenant user thì GoClaw dùng `user_id` của tenant user đó, nên phải thêm `--tenant-user`. Anh Dũng (Admin) được gộp vào `crm-poc-a`. Mỗi lần chạy lại script, chìa khóa cũ của người đó bị thu hồi.
+
 ## Cài lại bridge
 
 Sidecar Zalo chạy bằng task "ABM Zalo Bridge" lúc đăng nhập Windows, cửa sổ ẩn, lặp mỗi 5 phút. Không cần quyền Admin và không cần chỉnh đồng hồ máy. Từ thư mục gốc repo:
