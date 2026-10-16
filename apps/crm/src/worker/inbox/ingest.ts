@@ -138,13 +138,18 @@ const touchGroupInbound = (db: D1Database, conversationId: string, now: string) 
 /**
  * Stores one group message. Someone typing on the bot's account pauses the group for 30 minutes without
  * leaving `ai`. An ABM staff member cancels pending replies and never starts one. Anyone else starts a reply
- * only when they mention the bot, quote it, or call "Long ơi".
+ * only when they mention the bot, quote it, or call "Long ơi". A newly stored message in a group the company
+ * number had left clears that state; that message itself does not start a bot reply, and bot settings stay as they are.
  */
 async function ingestGroupMessage(db: D1Database, account: ChannelAccountRef, event: InboundMessage, now: Date, isEcho: EchoMatcher) {
   const nowIso = now.toISOString();
   const conv = await upsertConversation(db, account, event.threadId, 'group', null, nowIso).first<ConversationRef>();
   if (!conv) throw new Error('conversation upsert returned no row');
   if (event.fromSelf && await isEcho(conv.id)) return;
+
+  const prior = await db.prepare('SELECT left_at FROM conversation WHERE id = ?')
+    .bind(conv.id).first<{ left_at: string | null }>();
+  const rejoining = prior?.left_at != null;
 
   const messageId = crypto.randomUUID();
   const inserted = await db.prepare(`INSERT INTO message
@@ -156,6 +161,11 @@ async function ingestGroupMessage(db: D1Database, account: ChannelAccountRef, ev
       event.fromSelf ? 'sent' : 'received', nowIso)
     .run();
   if (inserted.meta.changes === 0) return;
+
+  if (rejoining) {
+    await db.prepare(`UPDATE conversation SET left_at = NULL, leave_requested_at = NULL, updated_at = ?
+      WHERE id = ? AND left_at IS NOT NULL`).bind(nowIso, conv.id).run();
+  }
 
   if (event.fromSelf) {
     const pauseUntil = new Date(now.getTime() + GROUP_PAUSE_MS).toISOString();
@@ -175,7 +185,7 @@ async function ingestGroupMessage(db: D1Database, account: ChannelAccountRef, ev
     return;
   }
   await touchGroupInbound(db, conv.id, nowIso).run();
-  if (event.mentionsSelf || event.quotesSelf || BOT_CALL_RE.test(event.text.normalize('NFC'))) {
+  if (!rejoining && (event.mentionsSelf || event.quotesSelf || BOT_CALL_RE.test(event.text.normalize('NFC')))) {
     await scheduleGroupReply(db, conv.id, messageId, event, now);
   }
 }

@@ -598,11 +598,13 @@ export function InboxThread({
   backTo = '/inbox',
   onToggleSide,
   sideOpen,
+  readOnlyReason,
 }: {
   conversation: InboxConversation;
   backTo?: '/inbox' | '/zalo-groups';
   onToggleSide?: () => void;
   sideOpen?: boolean;
+  readOnlyReason?: string | null;
 }) {
   const client = useQueryClient();
   const toast = useToast();
@@ -689,7 +691,16 @@ export function InboxThread({
           ))}
         </ol>
       </div>
-      <Composer key={conversation.id} conversationId={conversation.id} channel={conversation.channel} />
+      {readOnlyReason ? (
+        <div className="inbox-composer inbox-composer-readonly" role="note">
+          <div className="row small muted">
+            <Icon name="info" />
+            <span>{readOnlyReason}</span>
+          </div>
+        </div>
+      ) : (
+        <Composer key={conversation.id} conversationId={conversation.id} channel={conversation.channel} />
+      )}
       <ImageLightbox
         src={lightboxImage?.src ?? null}
         alt={lightboxImage?.alt}

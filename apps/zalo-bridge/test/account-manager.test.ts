@@ -17,6 +17,7 @@ class FakeSession implements ZaloSession {
   getUserProfile = vi.fn(async (_userId: string): Promise<ZaloUserProfile | null> => null);
   listGroups = vi.fn(async () => [{ threadId: 'g1', name: 'Nhóm 1' }]);
   listGroupMembers = vi.fn(async (_groupId: string): Promise<{ id: string; name: string; avatar?: string }[]> => [{ id: 'mem-1', name: 'An' }]);
+  leaveGroup = vi.fn(async (_threadId: string) => {});
   onMessage(cb: (m: IncomingMessage) => void) { this.messageCb = cb; }
   onClose(cb: (c: SessionClose) => void) { this.closeCb = cb; }
   save = vi.fn(async (file: string) => { await writeFile(file, '{}'); });
@@ -165,6 +166,14 @@ describe('AccountManager', () => {
     expect(await readdir(dir)).toEqual([]);
     expect(events.at(-1)).toEqual({ type: 'account_status', accountId: 'acc-1', status: 'disconnected' });
     await expect(accounts.send('acc-1', 't', 'direct', 'x', 'c')).rejects.toThrow('ACCOUNT_NOT_CONNECTED');
+  });
+
+  it('leaves a group through the live session and refuses when there is none', async () => {
+    const { accounts, session } = await loggedIn();
+    await accounts.leaveGroup('acc-1', 'g-9');
+    expect(session.leaveGroup).toHaveBeenCalledWith('g-9');
+    await accounts.logout('acc-1');
+    await expect(accounts.leaveGroup('acc-1', 'g-9')).rejects.toThrow('ACCOUNT_NOT_CONNECTED');
   });
 
   it('refuses account ids that could escape the sessions directory or clobber the cleanup id list', async () => {

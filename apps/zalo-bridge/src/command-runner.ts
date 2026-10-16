@@ -49,6 +49,7 @@ const sendPayload = z.object({
   attachments: z.array(sendAttachment).max(4).optional(),
 });
 const sessionPayload = z.object({ accountId: z.string().min(1) }).partial();
+const leavePayload = z.object({ threadId: z.string().min(1) });
 
 export interface RunnerCrm {
   pollCommands(): Promise<BridgeCommand[]>;
@@ -74,6 +75,8 @@ export interface RunnerAccounts {
   ): Promise<{ msgId: string }>;
   /** Zalo profile of a direct customer. Null when the account has no live session or Zalo has no profile. */
   profile(accountId: string, zaloUserId: string): Promise<ZaloUserProfile | null>;
+  /** Leaves a Zalo group. Throws when the account has no live session. */
+  leaveGroup(accountId: string, threadId: string): Promise<void>;
 }
 
 export interface CommandRunnerOptions {
@@ -236,6 +239,8 @@ export class CommandRunner {
       }
       case 'send_zalo':
         return this.sendZalo(command);
+      case 'leave_zalo_group':
+        return this.leaveZaloGroup(command);
       case 'zalo_login':
       case 'zalo_logout': {
         const accountId = this.sessionAccountId(command);
@@ -327,6 +332,13 @@ export class CommandRunner {
     const accountId = (payload.success ? payload.data.accountId : undefined) ?? command.channelAccountId;
     if (!accountId) throw new CodedError('INVALID_PAYLOAD');
     return accountId;
+  }
+
+  private async leaveZaloGroup(command: BridgeCommand): Promise<Outcome> {
+    const payload = leavePayload.safeParse(command.payload);
+    if (!payload.success || !command.channelAccountId) return { ok: false, error: 'INVALID_PAYLOAD' };
+    await this.options.accounts.leaveGroup(command.channelAccountId, payload.data.threadId);
+    return { ok: true };
   }
 
   private async sendZalo(command: BridgeCommand): Promise<Outcome> {

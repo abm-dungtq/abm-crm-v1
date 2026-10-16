@@ -11,6 +11,7 @@ import { STAFF_TEXT_MAX, setMode, staffSend } from './conversation-flow';
 import { MEDIA_BODY_OVERHEAD, MEDIA_MAX_BYTES, asUploadFile, loadOwnedAttachments, ownsMediaKey, storeInboxImage } from './media';
 import { readBridgePresence } from './bridge-routes';
 import { enqueueCommand } from './dispatcher';
+import { deleteLeftGroupHistory } from './group-leave';
 import {
   SCHEDULE_TEXT_MAX, approveSchedule, deleteSchedule, getSchedule, listSchedules, pauseSchedule, saveSchedule, submitSchedule,
 } from './group-schedules';
@@ -194,6 +195,7 @@ inboxRoutes.post('/conversations/:id/messages', async (c) => {
   const sent = await staffSend(c.env.DB, actor, c.req.param('id'), input.data.text ?? '', input.data.clientMessageId, attachments);
   if (!sent) return c.json(notFound, 404);
   if ('unsupported' in sent) return c.json(fail('VALIDATION_FAILED', 'Kênh này chưa gửi được ảnh', { fields: { attachments: 'Kênh này chưa gửi được ảnh' } }), 422);
+  if ('left' in sent) return c.json(fail('CONFLICT', 'Nhóm đã rời'), 409);
   if (sent.conflict) return c.json(fail('IDEMPOTENCY_CONFLICT', 'Mã tin nhắn đã dùng cho một tin khác'), 409);
   if (sent.workerCommandQueued) await background(c, processWorkerCommands(c.env));
   const { workerCommandQueued: _queued, conflict: _conflict, ...data } = sent;
@@ -671,12 +673,14 @@ interface GroupRow {
   id: string; channelAccountId: string; accountName: string; accountStatus: string; sendPaused: number; externalThreadId: string;
   displayName: string | null; summaryEnabled: number; scheduledOptOut: number; lastMessageAt: string | null; activeSchedules: number;
   botReplyEnabled: number; agentKey: string | null; botPausedUntil: string | null;
+  leftAt: string | null; leaveRequestedAt: string | null;
 }
 const GROUP_SELECT = `SELECT c.id, c.channel_account_id AS channelAccountId, a.display_name AS accountName, a.status AS accountStatus,
     a.send_paused AS sendPaused, c.external_thread_id AS externalThreadId, c.display_name AS displayName,
     c.summary_enabled AS summaryEnabled, c.scheduled_opt_out AS scheduledOptOut, c.last_message_at AS lastMessageAt,
     (SELECT COUNT(*) FROM group_schedule s WHERE s.conversation_id = c.id AND s.status = 'active') AS activeSchedules,
-    c.bot_reply_enabled AS botReplyEnabled, c.group_agent_key AS agentKey, c.bot_paused_until AS botPausedUntil
+    c.bot_reply_enabled AS botReplyEnabled, c.group_agent_key AS agentKey, c.bot_paused_until AS botPausedUntil,
+    c.left_at AS leftAt, c.leave_requested_at AS leaveRequestedAt
   FROM conversation c JOIN channel_account a ON a.id = c.channel_account_id`;
 const GROUP_PAGE = 1000;
 const presentGroup = (row: GroupRow) => ({
@@ -733,6 +737,57 @@ inboxRoutes.patch('/groups/:id', async (c) => {
       }, next, now),
   ]);
   return c.json(ok(presentGroup((await loadGroup(db, actor, current.id))!)));
+});
+
+/**
+ * Asks the company Zalo number to leave this group. A manager only. Repeating the request while Zalo has not
+ * answered yet returns the same timestamp and does not queue a second command.
+ */
+inboxRoutes.post('/groups/:id/leave', async (c) => {
+  const actor = c.get('actor');
+  if (!MANAGER_ROLES.has(actor.role)) {
+    return c.json(fail('FORBIDDEN', 'Chỉ trưởng nhóm, trưởng phòng, giám đốc hoặc quản trị được rời nhóm'), 403);
+  }
+  const db = c.env.DB;
+  const current = await loadGroup(db, actor, c.req.param('id'));
+  if (!current) return c.json(notFound, 404);
+  if (current.leftAt) return c.json(fail('CONFLICT', 'Nhóm đã rời'), 409);
+  if (current.leaveRequestedAt) return c.json(ok({ id: current.id, leaveRequestedAt: current.leaveRequestedAt }));
+  const now = new Date().toISOString();
+  const claimed = await db.prepare(`UPDATE conversation SET leave_requested_at = ?, updated_at = ?
+    WHERE id = ? AND organization_id = ? AND kind = 'group' AND left_at IS NULL AND leave_requested_at IS NULL`)
+    .bind(now, now, current.id, actor.organizationId).run();
+  if (claimed.meta.changes !== 1) {
+    const again = await loadGroup(db, actor, current.id);
+    if (!again) return c.json(notFound, 404);
+    if (again.leftAt) return c.json(fail('CONFLICT', 'Nhóm đã rời'), 409);
+    if (again.leaveRequestedAt) return c.json(ok({ id: again.id, leaveRequestedAt: again.leaveRequestedAt }));
+    return c.json(fail('CONFLICT', 'Nhóm đã rời'), 409);
+  }
+  await enqueueCommand(db, {
+    kind: 'leave_zalo_group', target: 'bridge', channelAccountId: current.channelAccountId, conversationId: current.id,
+    payload: { threadId: current.externalThreadId }, dedupeKey: `leave:${current.id}:${now}`,
+  });
+  await auditRow(db, actor, 'inbox.leaveGroup', 'conversation', current.id,
+    { leftAt: null, leaveRequestedAt: null },
+    { leaveRequestedAt: now, requestedByName: actor.displayName.trim() || 'không rõ' }, now).run();
+  return c.json(ok({ id: current.id, leaveRequestedAt: now }));
+});
+
+/** Permanently deletes a Zalo group the company number has already left and every row tied to it. A manager only. */
+inboxRoutes.delete('/groups/:id', async (c) => {
+  const actor = c.get('actor');
+  if (!MANAGER_ROLES.has(actor.role)) {
+    return c.json(fail('FORBIDDEN', 'Chỉ trưởng nhóm, trưởng phòng, giám đốc hoặc quản trị được xoá lịch sử nhóm'), 403);
+  }
+  const db = c.env.DB;
+  const current = await loadGroup(db, actor, c.req.param('id'));
+  if (!current) return c.json(notFound, 404);
+  if (!current.leftAt) return c.json(fail('CONFLICT', 'Chỉ xoá được lịch sử nhóm đã rời'), 409);
+  await deleteLeftGroupHistory(db, c.env.MEDIA, actor, {
+    id: current.id, displayName: current.displayName, leftAt: current.leftAt,
+  });
+  return c.json(ok({ id: current.id }));
 });
 
 /** Members of one Zalo group, staff first, then by name. */

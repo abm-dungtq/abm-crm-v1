@@ -494,7 +494,10 @@ export interface ZaloGroup {
   botPausedUntil: string | null;
   lastMessageAt: string | null;
   activeSchedules: number;
+  leftAt: string | null;
+  leaveRequestedAt: string | null;
 }
+export interface LeaveZaloGroupResult { id: string; leaveRequestedAt: string }
 export interface ZaloGroupUpdate {
   summaryEnabled?: boolean;
   scheduledOptOut?: boolean;

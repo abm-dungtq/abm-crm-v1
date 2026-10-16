@@ -4,9 +4,10 @@ import type { ApiError, CommandName, ConversationMode } from '@abm/contracts';
 import type {
   AssignResult, ChannelAccount, ChannelAccountList, ChannelAccountUpdate, ClassifyIntakeResult, ConversationFilter, CustomerBotSwitch, GroupSchedule,
   GroupScheduleInput, InboxContactCrm, InboxConversation, InboxMessage, InboxSettings, InboxSettingsUpdate, IntakeField, IntakePipeline, IntakeStatus,
-  IntakeValues, LeadIntake, RegistrationPolicyUpdate, RosterMember, SendMessageResult, SetModeResult, UploadedInboxMedia, ZaloGroup, ZaloGroupMember, ZaloGroupUpdate,
+  IntakeValues, LeadIntake, LeaveZaloGroupResult, RegistrationPolicyUpdate, RosterMember, SendMessageResult, SetModeResult, UploadedInboxMedia, ZaloGroup, ZaloGroupMember, ZaloGroupUpdate,
 } from './types';
 import { buildClassifyPayload } from './components/note-format';
+import { fmtDateTime } from './format';
 import { conversationsPath } from './inbox-format';
 
 const USER_KEY = 'abm-crm-demo-user';
@@ -171,6 +172,44 @@ export const getInboxContactCrm = (contactId: string) =>
 /** Groups of the organization, optionally of one channel account. */
 export const listGroups = (account?: string) => api.get<ZaloGroup[]>(`/inbox/groups${account ? `?account=${enc(account)}` : ''}`);
 export const updateGroup = (id: string, input: ZaloGroupUpdate) => api.patch<ZaloGroup>(`/inbox/groups/${enc(id)}`, input);
+export const leaveGroup = (id: string) => api.post<LeaveZaloGroupResult>(`/inbox/groups/${enc(id)}/leave`);
+export const deleteGroupHistory = (id: string) => api.delete<{ id: string }>(`/inbox/groups/${enc(id)}`);
+
+const GROUP_LEAVE_ROLES: readonly string[] = ['leader', 'head', 'director', 'admin'];
+const GROUP_LIST_POLL_MS = 30_000;
+const GROUP_LEAVING_POLL_MS = 5000;
+
+export type GroupLeaveState = 'active' | 'leaving' | 'left';
+
+export function groupLeaveState(group: Pick<ZaloGroup, 'leftAt' | 'leaveRequestedAt'> | null | undefined): GroupLeaveState {
+  if (!group) return 'active';
+  if (group.leftAt) return 'left';
+  if (group.leaveRequestedAt) return 'leaving';
+  return 'active';
+}
+
+export function canLeaveZaloGroup(role: string, group: Pick<ZaloGroup, 'leftAt'> | null | undefined): boolean {
+  return Boolean(group && !group.leftAt && GROUP_LEAVE_ROLES.includes(role));
+}
+
+export function canDeleteZaloGroupHistory(role: string, group: Pick<ZaloGroup, 'leftAt'> | null | undefined): boolean {
+  return Boolean(group && group.leftAt && GROUP_LEAVE_ROLES.includes(role));
+}
+
+export function groupLeavePollMs(
+  groups: readonly Pick<ZaloGroup, 'id' | 'leftAt' | 'leaveRequestedAt'>[] | undefined,
+  groupId?: string,
+): number {
+  const relevant = groupId ? groups?.filter((g) => g.id === groupId) : groups;
+  const leaving = relevant?.some((g) => groupLeaveState(g) === 'leaving') ?? false;
+  return leaving ? GROUP_LEAVING_POLL_MS : GROUP_LIST_POLL_MS;
+}
+
+export function groupLeftNotice(leftAt: string | null | undefined): string | null {
+  if (!leftAt) return null;
+  return `Nick đã rời nhóm này lúc ${fmtDateTime(leftAt)}. Lịch sử tin nhắn vẫn được giữ.`;
+}
+
 export const listGroupMembers = (id: string) => api.get<ZaloGroupMember[]>(`/inbox/groups/${enc(id)}/members`);
 /** Marks one member as ABM staff for every group of this account, or clears that mark. */
 export const setGroupStaff = (id: string, externalUserId: string, isStaff: boolean) =>

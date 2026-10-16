@@ -47,7 +47,7 @@ export async function enqueueDailyGroupSummaries(db: D1Database, now = new Date(
   const since = vnDayStart(now).toISOString();
   const day = vnDate(now);
   const groups = await db.prepare(`SELECT c.id, c.channel_account_id, c.display_name, c.external_thread_id FROM conversation c
-    WHERE c.kind = 'group' AND c.summary_enabled = 1
+    WHERE c.kind = 'group' AND c.summary_enabled = 1 AND c.left_at IS NULL
       AND EXISTS (SELECT 1 FROM message m WHERE m.conversation_id = c.id AND m.direction = 'in' AND m.created_at >= ?)
     ORDER BY c.id LIMIT ?`).bind(since, GROUP_BATCH).all<GroupRow>();
   let queued = 0;

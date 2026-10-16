@@ -21,6 +21,7 @@
  *   api.getAllGroups()                                -> { gridVerMap: { [groupId]: version } }
  *   api.getGroupInfo(ids)                             -> { gridInfoMap: { [groupId]: { name, memVerList, currentMems, ... } } }
  *   api.getGroupMembersInfo(ids)                      -> { profiles: { [id]: { displayName, zaloName, avatar, ... } } }
+ *   api.leaveGroup(groupId, silent?)                  silent true leaves without a notice; -> { memberError: unknown[] }
  *   api.getUserInfo(userId)                           -> { changed_profiles: { [userId | userId_0]: User } }
  *                                                     User.displayName, else User.zaloName; User.avatar (https only, else omitted)
  *                                                     Gender.Male = 0, Gender.Female = 1
@@ -141,6 +142,8 @@ export interface ZaloSession {
   listGroups(): Promise<ZaloGroup[]>;
   /** Members of one group: Zalo uid, display name, and an https avatar when the profile has one. */
   listGroupMembers(groupId: string): Promise<{ id: string; name: string; avatar?: string }[]>;
+  /** Leaves a group without posting a notice. A resolved call is success. */
+  leaveGroup(threadId: string): Promise<void>;
   onMessage(cb: (message: IncomingMessage) => void): void;
   /** Called once when the connection ends for good; not called after close(). */
   onClose(cb: (close: SessionClose) => void): void;
@@ -362,6 +365,10 @@ class ZcaSession implements ZaloSession {
     }
     if (!ids.length) throw new CodedError('ZALO_SEND_NO_MSG_ID');
     return { msgId: ids[0]!, msgIds: ids };
+  }
+
+  async leaveGroup(threadId: string): Promise<void> {
+    await this.api.leaveGroup(threadId, true);
   }
 
   /** A direct thread, or a send with no reply, goes out as plain text. A missing cached message is not an error. */

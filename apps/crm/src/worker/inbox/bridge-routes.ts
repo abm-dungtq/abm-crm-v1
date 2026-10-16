@@ -9,6 +9,7 @@ import {
   markMessageSent, notifyGroupHelp,
 } from './conversation-flow';
 import { MAX_COMMAND_ATTEMPTS, claimCommands, completeCommand, dropBotSend, failCommand, type ClaimedCommand } from './dispatcher';
+import { applyGroupLeft, noteLeaveFailed } from './group-leave';
 import { applyGroupSummaryResult } from './group-summaries';
 import { ingestEvents } from './ingest';
 import { applyExtractionResult } from './intake';
@@ -67,12 +68,15 @@ export async function readBridgePresence(db: D1Database, now = new Date()): Prom
   return { bridgeOnline: Number.isFinite(seen) && age >= -5_000 && age <= BRIDGE_ONLINE_MS, bridgeLastSeenAt };
 }
 
-/** Logins and logouts are never retried: a later retry would show QR codes nobody is watching. */
-const SESSION_KINDS = new Set(['zalo_login', 'zalo_logout']);
+/**
+ * Logins and logouts are never retried: a later retry would show QR codes nobody is watching.
+ * A leave is final on the first failure too, so staff can ask again instead of waiting out the backoff.
+ */
+const NO_RETRY_KINDS = new Set(['zalo_login', 'zalo_logout', 'leave_zalo_group']);
 
 /** A send that will not be retried leaves its message failed. */
 async function failSend(db: D1Database, command: { id: string; kind: string; payload: unknown }, attempts: number, error: string) {
-  const moved = await failCommand(db, command.id, attempts, error, new Date(), SESSION_KINDS.has(command.kind));
+  const moved = await failCommand(db, command.id, attempts, error, new Date(), NO_RETRY_KINDS.has(command.kind));
   if (moved && attempts >= MAX_COMMAND_ATTEMPTS && SEND_KINDS.has(command.kind)) {
     const messageId = (command.payload as { messageId?: unknown } | null)?.messageId;
     if (typeof messageId === 'string') {
@@ -102,6 +106,11 @@ async function claimDeliverable(db: D1Database): Promise<ClaimedCommand[]> {
   const paused = await db.prepare(`SELECT id FROM channel_account WHERE send_paused = 1 AND id IN (${accountIds.map(() => '?').join(', ')})`)
     .bind(...accountIds).all<{ id: string }>();
   const pausedIds = new Set(paused.results.map((r) => r.id));
+  const left = await db.prepare(`SELECT cc.id FROM channel_command cc
+      JOIN conversation c ON c.id = cc.conversation_id
+    WHERE cc.id IN (SELECT value FROM json_each(?)) AND c.left_at IS NOT NULL`)
+    .bind(JSON.stringify(sends.map((c) => c.id))).all<{ id: string }>();
+  const leftIds = new Set(left.results.map((r) => r.id));
   const blocked = await db.prepare(`SELECT cc.id FROM channel_command cc
       JOIN message m ON m.id = json_extract(cc.payload_json, '$.messageId') JOIN channel_account a ON a.id = cc.channel_account_id
     WHERE cc.id IN (SELECT value FROM json_each(?)) AND ${BOT_SEND_BLOCKED_SQL}`)
@@ -111,6 +120,8 @@ async function claimDeliverable(db: D1Database): Promise<ClaimedCommand[]> {
   for (const command of claimed) {
     if (blockedIds.has(command.id)) {
       await dropBotSend(db, command, BOT_OFF);
+    } else if (leftIds.has(command.id)) {
+      await dropBotSend(db, command, 'LEFT_GROUP');
     } else if (SEND_KINDS.has(command.kind) && command.channelAccountId && pausedIds.has(command.channelAccountId)) {
       await failSend(db, command, command.attempts, 'ACCOUNT_PAUSED');
     } else {
@@ -175,6 +186,9 @@ bridgeRoutes.post('/commands/:id/result', async (c) => {
   const purpose = row.kind === 'run_completion' ? (command.payload as { purpose?: unknown } | null)?.purpose : undefined;
   if (!result.ok) {
     const moved = await failSend(db, command, result.attempts, result.error || 'BRIDGE_ERROR');
+    if (moved && row.kind === 'leave_zalo_group' && row.conversation_id) {
+      await noteLeaveFailed(db, row.conversation_id, result.error || 'BRIDGE_ERROR');
+    }
     // The bot's reply failed for good. A direct chat is handed to people; a group only notifies Lark.
     if (moved && result.attempts >= MAX_COMMAND_ATTEMPTS && purpose === 'reply' && row.conversation_id) {
       const kind = await db.prepare('SELECT kind FROM conversation WHERE id = ?').bind(row.conversation_id).first<{ kind: string }>();
@@ -202,6 +216,10 @@ bridgeRoutes.post('/commands/:id/result', async (c) => {
     { externalMsgId: result.externalMsgId ?? null, text: result.text ?? null });
   if (!completed) return c.json(ok({ ignored: true }));
 
+  if (row.kind === 'leave_zalo_group') {
+    if (row.conversation_id) await applyGroupLeft(db, row.conversation_id);
+    return c.json(ok({ ignored: false }));
+  }
   if (row.kind === 'run_completion' && row.conversation_id) {
     const outcome = await applyCompletionResult(db, c.env, row.conversation_id, result.text ?? '', new URL(c.req.url).origin,
       { ...payload, commandId: row.id });

@@ -93,11 +93,13 @@ function harness() {
   const sendMessage = vi.fn(async (..._args: unknown[]) => ({ message: { msgId: 77 }, attachment: [] as { msgId: number }[] }));
   const getGroupInfo = vi.fn();
   const getGroupMembersInfo = vi.fn();
+  const leaveGroup = vi.fn(async () => ({ memberError: [] as unknown[] }));
   const api = {
     getOwnId: () => OWN,
     sendMessage,
     getGroupInfo,
     getGroupMembersInfo,
+    leaveGroup,
     listener: {
       on(event: string, cb: (...args: unknown[]) => void) { handlers.set(event, cb); },
       start() {},
@@ -110,6 +112,7 @@ function harness() {
     sendMessage,
     getGroupInfo,
     getGroupMembersInfo,
+    leaveGroup,
     deliver: (message: Message) => handlers.get('message')?.(message),
   };
 }
@@ -305,5 +308,13 @@ describe('listGroupMembers', () => {
       { id: '111', name: 'An', avatar: 'https://photo.zalo.me/an.jpg' },
       { id: '222', name: 'Bình' },
     ]);
+  });
+});
+
+describe('ZcaSession.leaveGroup', () => {
+  it('calls api.leaveGroup with the group id and silent true', async () => {
+    const { session, leaveGroup } = harness();
+    await session.leaveGroup('g-9');
+    expect(leaveGroup).toHaveBeenCalledWith('g-9', true);
   });
 });

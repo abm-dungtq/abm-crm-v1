@@ -1,10 +1,11 @@
 import { useState, type FormEvent } from 'react';
-import { Link, useParams } from '@tanstack/react-router';
+import { Link, useNavigate, useParams } from '@tanstack/react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ChannelAccountStatus } from '@abm/contracts';
 import { useActor } from '../actor-context';
 import {
-  ApiFailure, createGroupSchedule, deleteGroupSchedule, getConversation, getInboxSettings, listAccounts, listGroupMembers, listGroupSchedules,
+  ApiFailure, canDeleteZaloGroupHistory, canLeaveZaloGroup, createGroupSchedule, deleteGroupHistory, deleteGroupSchedule, getConversation,
+  getInboxSettings, groupLeavePollMs, groupLeaveState, groupLeftNotice, leaveGroup, listAccounts, listGroupMembers, listGroupSchedules,
   listGroups, moveGroupSchedule, setGroupStaff, updateGroup, updateGroupSchedule, updateInboxSettings, type GroupScheduleAction,
 } from '../api';
 import { Icon } from '../components/icons';
@@ -13,7 +14,7 @@ import { Alert, Avatar, Badge, Empty, ErrorState, Field, FormError, Loading, Mod
 import { fmtDateTime } from '../format';
 import { WEEKDAYS, weekdaysLabel } from '../inbox-format';
 import type {
-  ChannelAccountList, GroupSchedule, GroupScheduleInput, GroupScheduleStatus, InboxConversation, InboxSettings, ScheduleSkipReason, ZaloGroup,
+  ChannelAccountList, GroupSchedule, GroupScheduleInput, GroupScheduleStatus, InboxConversation, InboxSettings, LeaveZaloGroupResult, ScheduleSkipReason, ZaloGroup,
   ZaloGroupMember, ZaloGroupUpdate,
 } from '../types';
 import { MANAGER_ROLES, SETTINGS_ROLES } from './inbox';
@@ -85,7 +86,7 @@ export function ZaloGroupsPage() {
   const groups = useQuery<ZaloGroup[], ApiFailure>({
     queryKey: groupsKey(account),
     queryFn: () => listGroups(account || undefined),
-    refetchInterval: LIST_POLL_MS,
+    refetchInterval: (query) => groupLeavePollMs(query.state.data),
     refetchIntervalInBackground: false,
   });
   const zaloAccounts = accounts.data?.accounts.filter((a) => a.channel === 'zalo') ?? [];
@@ -118,9 +119,12 @@ export function ZaloGroupsPage() {
               </thead>
               <tbody>
                 {groups.data.map((g) => (
-                  <tr key={g.id}>
+                  <tr key={g.id} className={g.leftAt ? 'row-muted' : undefined}>
                     <td data-label="Nhóm">
-                      <Link to="/zalo-groups/$groupId" params={{ groupId: g.id }} className="cell-title">{groupName(g)}</Link>
+                      <div className="row-wrap">
+                        <Link to="/zalo-groups/$groupId" params={{ groupId: g.id }} className="cell-title">{groupName(g)}</Link>
+                        <GroupLeaveBadge group={g} />
+                      </div>
                     </td>
                     <td data-label="Tài khoản"><div className="stack-sm"><span>{g.accountName}</span><AccountState group={g} /></div></td>
                     <td data-label="Cài đặt nhóm"><GroupSwitches group={g} /></td>
@@ -145,7 +149,10 @@ export function ZaloGroupsPage() {
 
 /** `/zalo-groups/$groupId`: the group's messages and composer, its switches, members and schedules. */
 export function ZaloGroupPage() {
+  const actor = useActor();
   const { groupId } = useParams({ from: '/zalo-groups/$groupId' });
+  const [confirmingLeave, setConfirmingLeave] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const conversation = useQuery<InboxConversation, ApiFailure>({
     queryKey: ['inbox', 'conversation', groupId],
     queryFn: () => getConversation(groupId),
@@ -157,7 +164,7 @@ export function ZaloGroupPage() {
     queryKey: groupsKey(accountId),
     queryFn: () => listGroups(accountId),
     enabled: Boolean(accountId),
-    refetchInterval: LIST_POLL_MS,
+    refetchInterval: (query) => groupLeavePollMs(query.state.data, groupId),
     refetchIntervalInBackground: false,
   });
   const group = groups.data?.find((g) => g.id === groupId);
@@ -176,18 +183,42 @@ export function ZaloGroupPage() {
       </div>
     );
   }
+  const leaveState = groupLeaveState(group);
+  const leftNotice = groupLeftNotice(group?.leftAt);
   return (
     <div className="stack">
       <div className="page-head">
         <div>
           <div className="small"><Link to="/zalo-groups">Nhóm Zalo</Link> / {conversationName(c)}</div>
-          <h1>{conversationName(c)}</h1>
+          <div className="row-wrap">
+            <h1>{conversationName(c)}</h1>
+            {group && <GroupLeaveBadge group={group} />}
+          </div>
           <p className="sub">Zalo · {c.accountName}</p>
         </div>
+        {canLeaveZaloGroup(actor.role, group) && (
+          <button
+            type="button"
+            className="btn btn-danger"
+            disabled={leaveState === 'leaving'}
+            onClick={() => setConfirmingLeave(true)}
+          >
+            Rời nhóm
+          </button>
+        )}
+        {canDeleteZaloGroupHistory(actor.role, group) && (
+          <button
+            type="button"
+            className="btn btn-danger"
+            onClick={() => setConfirmingDelete(true)}
+          >
+            Xoá lịch sử
+          </button>
+        )}
       </div>
       <ScheduledSendsBanner />
       <div className="zalo-group-chat">
-        <InboxThread conversation={c} backTo="/zalo-groups" />
+        <InboxThread conversation={c} backTo="/zalo-groups" readOnlyReason={leftNotice} />
         <aside className="inbox-side" aria-label="Cài đặt nhóm">
           <div className="stack-sm">
             <div className="field-label">Tài khoản</div>
@@ -208,7 +239,80 @@ export function ZaloGroupPage() {
       </div>
       <MembersCard groupId={c.id} />
       <SchedulesCard conversationId={c.id} />
+      {confirmingLeave && group && !group.leftAt && (
+        <LeaveGroupModal group={group} onClose={() => setConfirmingLeave(false)} />
+      )}
+      {confirmingDelete && group && group.leftAt && (
+        <DeleteGroupHistoryModal group={group} onClose={() => setConfirmingDelete(false)} />
+      )}
     </div>
+  );
+}
+
+function GroupLeaveBadge({ group: g }: { group: Pick<ZaloGroup, 'leftAt' | 'leaveRequestedAt'> }) {
+  const state = groupLeaveState(g);
+  if (state === 'left') return <Badge tone="neutral" dot>Đã rời</Badge>;
+  if (state === 'leaving') return <Badge tone="warn" dot>Đang rời nhóm…</Badge>;
+  return null;
+}
+
+function LeaveGroupModal({ group: g, onClose }: { group: ZaloGroup; onClose: () => void }) {
+  const toast = useToast();
+  const leave = useInboxMutation<string, LeaveZaloGroupResult>(leaveGroup);
+  const name = groupName(g);
+  return (
+    <Modal open title={`Rời nhóm ${name}?`} onClose={onClose} footer={<>
+      <button type="button" className="btn" onClick={onClose}>Huỷ</button>
+      <button
+        type="button"
+        className="btn btn-danger"
+        disabled={leave.isPending}
+        onClick={() => leave.mutate(g.id, {
+          onSuccess: () => {
+            toast('Đã gửi yêu cầu rời nhóm');
+            onClose();
+          },
+        })}
+      >
+        Rời nhóm
+      </button>
+    </>}>
+      <FormError error={leave.error} />
+      <p>Nick Zalo của công ty sẽ rời khỏi nhóm này trên Zalo. Bot, tin định kỳ và tóm tắt của nhóm sẽ dừng. Muốn quay lại cần một thành viên trong nhóm mời lại.</p>
+    </Modal>
+  );
+}
+
+function DeleteGroupHistoryModal({ group: g, onClose }: { group: ZaloGroup; onClose: () => void }) {
+  const client = useQueryClient();
+  const navigate = useNavigate();
+  const toast = useToast();
+  const remove = useMutation<{ id: string }, ApiFailure, string>({
+    mutationFn: deleteGroupHistory,
+    onSuccess: () => {
+      toast('Đã xoá lịch sử nhóm');
+      onClose();
+      void client.invalidateQueries({ queryKey: ['inbox', 'groups'] });
+      client.removeQueries({ queryKey: ['inbox', 'conversation', g.id] });
+      void navigate({ to: '/zalo-groups' });
+    },
+  });
+  const name = groupName(g);
+  return (
+    <Modal open title={`Xoá lịch sử nhóm ${name}?`} onClose={onClose} footer={<>
+      <button type="button" className="btn" onClick={onClose}>Huỷ</button>
+      <button
+        type="button"
+        className="btn btn-danger"
+        disabled={remove.isPending}
+        onClick={() => remove.mutate(g.id)}
+      >
+        Xoá vĩnh viễn
+      </button>
+    </>}>
+      <FormError error={remove.error} />
+      <p>Toàn bộ tin nhắn, ảnh, thành viên, lịch gửi và tóm tắt của nhóm này sẽ bị xoá vĩnh viễn khỏi CRM. Không thể khôi phục.</p>
+    </Modal>
   );
 }
 
@@ -230,31 +334,33 @@ function GroupSwitches({ group: g }: { group: ZaloGroup }) {
   const update = useInboxMutation<ZaloGroupUpdate, ZaloGroup>((input) => updateGroup(g.id, input));
   const save = (input: ZaloGroupUpdate, done: string) => update.mutate(input, { onSuccess: () => toast(done) });
   const name = groupName(g);
+  const left = Boolean(g.leftAt);
+  const busy = update.isPending || left;
   const canSettings = SETTINGS_ROLES.includes(actor.role);
   const optOutLocked = g.scheduledOptOut && !MANAGER_ROLES.includes(actor.role);
   const paused = pauseUntilLabel(g.botPausedUntil);
   return (
     <div className="stack-sm">
       <label className="row" title={canSettings ? undefined : 'Chỉ trưởng nhóm hoặc quản trị được bật bot trong nhóm'}>
-        <input type="checkbox" checked={g.botReplyEnabled} disabled={update.isPending || !canSettings} aria-label={`Long trả lời trong nhóm ${name}`}
+        <input type="checkbox" checked={g.botReplyEnabled} disabled={busy || !canSettings} aria-label={`Long trả lời trong nhóm ${name}`}
           onChange={(e) => save({ botReplyEnabled: e.target.checked }, e.target.checked ? `Long sẽ trả lời trong ${name}` : `Long không trả lời trong ${name}`)} />
         Long trả lời trong nhóm
       </label>
       <span className="small muted">Khi học viên @tag Long, trả lời vào tin của Long hoặc gõ “Long ơi”</span>
       {paused && <span className="small">{paused}</span>}
       {actor.role === 'admin' && (
-        <GroupAgentField group={g} pending={update.isPending} onSave={(agentKey) => save(
+        <GroupAgentField group={g} pending={busy} onSave={(agentKey) => save(
           { agentKey },
           agentKey ? `Đã đặt agent ${agentKey} cho ${name}` : `${name} dùng lại agent mặc định`,
         )} />
       )}
       <label className="row">
-        <input type="checkbox" checked={g.summaryEnabled} disabled={update.isPending} aria-label={`Tóm tắt hằng ngày nhóm ${name}`}
+        <input type="checkbox" checked={g.summaryEnabled} disabled={busy} aria-label={`Tóm tắt hằng ngày nhóm ${name}`}
           onChange={(e) => save({ summaryEnabled: e.target.checked }, e.target.checked ? `Đã bật tóm tắt hằng ngày cho ${name}` : `Đã tắt tóm tắt hằng ngày cho ${name}`)} />
         Tóm tắt hằng ngày
       </label>
       <label className="row" title={optOutLocked ? 'Chỉ quản lý được cho nhóm nhận lại tin định kỳ' : undefined}>
-        <input type="checkbox" checked={g.scheduledOptOut} disabled={update.isPending || optOutLocked} aria-label={`Không nhận tin định kỳ nhóm ${name}`}
+        <input type="checkbox" checked={g.scheduledOptOut} disabled={busy || optOutLocked} aria-label={`Không nhận tin định kỳ nhóm ${name}`}
           onChange={(e) => save({ scheduledOptOut: e.target.checked }, e.target.checked ? `${name} không nhận tin định kỳ nữa` : `${name} nhận lại tin định kỳ`)} />
         Không nhận tin định kỳ
       </label>

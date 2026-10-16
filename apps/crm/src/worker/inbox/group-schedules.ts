@@ -162,6 +162,7 @@ export async function runDueSchedules(db: D1Database, now = new Date(), random: 
       (SELECT enabled FROM customer_bot_switch WHERE id = 1) AS bot_switch
     FROM group_schedule s JOIN conversation c ON c.id = s.conversation_id JOIN channel_account a ON a.id = c.channel_account_id
     WHERE s.status = 'active' AND s.next_run_at IS NOT NULL AND s.next_run_at <= ?
+      AND c.left_at IS NULL
     ORDER BY s.next_run_at LIMIT ?`).bind(nowIso, RUN_BATCH).all<DueRow>();
   const summary: RunSummary = { sent: 0, skipped: 0 };
   for (const row of due.results) {

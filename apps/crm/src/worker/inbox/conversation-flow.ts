@@ -90,6 +90,7 @@ interface ConversationRow {
   bot_reply_enabled: number;
   group_agent_key: string | null;
   bot_paused_until: string | null;
+  left_at: string | null;
 }
 
 const loadConversation = (db: D1Database, id: string) => db.prepare(`SELECT c.id, c.organization_id, c.kind, c.mode,
@@ -97,7 +98,7 @@ const loadConversation = (db: D1Database, id: string) => db.prepare(`SELECT c.id
     a.channel, a.external_id AS account_external_id, a.display_name AS account_name, a.agent_key, a.bot_enabled,
     a.registration_policy, a.registration_group_url,
     (SELECT enabled FROM customer_bot_switch WHERE id = 1) AS bot_switch,
-    c.bot_reply_enabled, c.group_agent_key, c.bot_paused_until
+    c.bot_reply_enabled, c.group_agent_key, c.bot_paused_until, c.left_at
   FROM conversation c JOIN channel_account a ON a.id = c.channel_account_id WHERE c.id = ?`).bind(id).first<ConversationRow>();
 
 /** Audit row for inbox actions; `actor` null means the system acted (for example a bot handoff). Never holds message text. */
@@ -197,12 +198,12 @@ const botMayReply = (conv: ConversationRow) =>
 
 /**
  * The group bot replies when this group and its account have the bot on, the customer bot switch is off,
- * and a pause has not been set or has already ended. The conversation mode and the account agent are ignored:
- * a group stays in `ai` and uses its own agent.
+ * and a pause has not been set or has already ended. A group the company number has left never gets a reply.
+ * The conversation mode and the account agent are ignored: a group stays in `ai` and uses its own agent.
  */
 export function groupBotMayReply(conv: ConversationRow, now: Date) {
-  return conv.kind === 'group' && conv.bot_reply_enabled === 1 && conv.bot_enabled === 1 && conv.bot_switch === 0
-    && (conv.bot_paused_until === null || conv.bot_paused_until <= now.toISOString());
+  return conv.kind === 'group' && conv.left_at == null && conv.bot_reply_enabled === 1 && conv.bot_enabled === 1
+    && conv.bot_switch === 0 && (conv.bot_paused_until === null || conv.bot_paused_until <= now.toISOString());
 }
 
 /** Drops pending group replies. A send the bridge has already claimed still goes out. */
@@ -579,7 +580,8 @@ async function loadForActor(db: D1Database, actor: Actor, conversationId: string
 export type StaffSendOutcome =
   | { conflict: false; messageId: string; mode: ConversationMode; assigneeUserId: string | null; workerCommandQueued: boolean }
   | { conflict: true }
-  | { unsupported: true };
+  | { unsupported: true }
+  | { left: true };
 
 function sameStoredAttachments(raw: string | null, files: StaffMedia[] | undefined): boolean {
   let stored: unknown = [];
@@ -595,7 +597,7 @@ function sameStoredAttachments(raw: string | null, files: StaffMedia[] | undefin
  * context, and an `ai` conversation switches to `human`, assigned to the sender when nobody has it.
  * A `clientMessageId` makes the send idempotent: repeating it (a retry after a lost response) returns the
  * message already queued and changes nothing; reusing it for other text or by another person is a conflict.
- * Null when the conversation is not in the actor's organization.
+ * Null when the conversation is not in the actor's organization. A group the company number has left is refused.
  */
 export async function staffSend(
   db: D1Database, actor: Actor, conversationId: string, text: string, clientMessageId?: string, attachments?: StaffMedia[],
@@ -604,6 +606,7 @@ export async function staffSend(
   if (!conv) return null;
   const files = attachments?.length ? attachments : undefined;
   if (files && conv.channel !== 'zalo' && conv.channel !== 'zalo_oa') return { unsupported: true };
+  if (conv.kind === 'group' && conv.left_at) return { left: true };
   const trimmed = text.trim();
   const storedBody = trimmed || ATTACHMENT_ONLY_TEXT;
   // Image-only: the CRM row keeps the placeholder, and the channel is given an empty caption.

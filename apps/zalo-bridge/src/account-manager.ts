@@ -165,6 +165,13 @@ export class AccountManager {
     return { msgId: ids[0] ?? result.msgId, msgIds: ids };
   }
 
+  /** Leaves a group from this account. Throws when the account has no live session. */
+  async leaveGroup(accountId: string, threadId: string): Promise<void> {
+    const session = this.accounts.get(accountId)?.session;
+    if (!session) throw new CodedError('ACCOUNT_NOT_CONNECTED');
+    await session.leaveGroup(threadId);
+  }
+
   /**
    * Profile of a Zalo user on this account. Null when the account has no live session.
    * A found profile is cached for 24 hours and an explicit miss for 1 hour. A thrown lookup is not cached.

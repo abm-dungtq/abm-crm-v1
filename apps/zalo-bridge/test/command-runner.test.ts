@@ -1,6 +1,7 @@
 import type { BridgeCommandResult } from '@abm/contracts';
 import { describe, expect, it, vi } from 'vitest';
 import { CommandRunner, splitIntoChunks, type RunnerAccounts } from '../src/command-runner';
+import { CodedError } from '../src/config';
 import type { ZaloUserProfile } from '../src/zalo-client';
 import type { BridgeCommand, ResultDelivery } from '../src/crm-client';
 
@@ -35,6 +36,7 @@ function setup(overrides: {
     logout: vi.fn(async () => {}),
     send: vi.fn(overrides.send ?? (async () => ({ msgId: String(msgId++) }))),
     profile: vi.fn(async (): Promise<ZaloUserProfile | null> => null),
+    leaveGroup: vi.fn(async () => {}),
   };
   const sleep = vi.fn(async (_ms: number) => {});
   const runner = new CommandRunner({
@@ -346,6 +348,30 @@ describe('CommandRunner', () => {
     await runner.idle();
     expect(goclaw.complete).toHaveBeenCalledTimes(1);
     expect(results).toEqual([{ id: 'c1', result: { attempts: 2, ok: true, text: 'done' } }]);
+  });
+
+  it('leaves a Zalo group through the account manager', async () => {
+    const { runner, accounts, results } = setup();
+    runner.dispatch(command('lv1', 'leave_zalo_group', { threadId: 'g-9' }));
+    await runner.idle();
+    expect(accounts.leaveGroup).toHaveBeenCalledWith('acc-1', 'g-9');
+    expect(results).toEqual([{ id: 'lv1', result: { attempts: 1, ok: true } }]);
+  });
+
+  it('rejects a leave with a bad payload or no account and reports a coded failure', async () => {
+    const { runner, accounts, results } = setup();
+    accounts.leaveGroup.mockRejectedValueOnce(new CodedError('ACCOUNT_NOT_CONNECTED'));
+    runner.dispatch(command('lv-bad', 'leave_zalo_group', {}));
+    runner.dispatch({ ...command('lv-none', 'leave_zalo_group', { threadId: 'g-9' }), channelAccountId: null });
+    runner.dispatch(command('lv-down', 'leave_zalo_group', { threadId: 'g-9' }));
+    await runner.idle();
+    expect(accounts.leaveGroup).toHaveBeenCalledTimes(1);
+    expect(accounts.leaveGroup).toHaveBeenCalledWith('acc-1', 'g-9');
+    expect([...results].sort((a, b) => a.id.localeCompare(b.id))).toEqual([
+      { id: 'lv-bad', result: { attempts: 1, ok: false, error: 'INVALID_PAYLOAD' } },
+      { id: 'lv-down', result: { attempts: 1, ok: false, error: 'ACCOUNT_NOT_CONNECTED' } },
+      { id: 'lv-none', result: { attempts: 1, ok: false, error: 'INVALID_PAYLOAD' } },
+    ]);
   });
 
   it('hands zalo_login and zalo_logout to the account manager', async () => {

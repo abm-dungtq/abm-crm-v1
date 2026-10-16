@@ -1,4 +1,7 @@
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
+import {
+  canDeleteZaloGroupHistory, canLeaveZaloGroup, deleteGroupHistory, groupLeavePollMs, groupLeaveState, groupLeftNotice, leaveGroup,
+} from '../src/web/api';
 import {
   INTAKE_FIELD_LABEL, SUMMARY_MAX, buildClassifyPayload, clampActivityText, prefillClassifyForm, summaryBullets,
 } from '../src/web/components/note-format';
@@ -192,4 +195,90 @@ test('clampActivityText keeps short bullet summaries intact and clamps notes lon
   expect(clampedChars.preview.length).toBeLessThanOrEqual(601);
   expect(clampedChars.preview.endsWith('…')).toBe(true);
 });
+
+test('Zalo group leave helpers gate manager roles, track leaving/left state, poll every 5 s while leaving, and format the read-only notice', async () => {
+  const active = { id: 'grp-1', leftAt: null, leaveRequestedAt: null };
+  const leaving = { id: 'grp-1', leftAt: null, leaveRequestedAt: '2026-10-15T06:00:00.000Z' };
+  const left = { id: 'grp-1', leftAt: '2026-10-15T06:01:00.000Z', leaveRequestedAt: '2026-10-15T06:00:00.000Z' };
+
+  expect(groupLeaveState(null)).toBe('active');
+  expect(groupLeaveState(active)).toBe('active');
+  expect(groupLeaveState(leaving)).toBe('leaving');
+  expect(groupLeaveState(left)).toBe('left');
+
+  expect(canLeaveZaloGroup('sale', active)).toBe(false);
+  for (const role of ['leader', 'head', 'director', 'admin']) {
+    expect(canLeaveZaloGroup(role, active)).toBe(true);
+    expect(canLeaveZaloGroup(role, leaving)).toBe(true);
+    expect(canLeaveZaloGroup(role, left)).toBe(false);
+    expect(canLeaveZaloGroup(role, null)).toBe(false);
+  }
+
+  expect(groupLeavePollMs([active])).toBe(30_000);
+  expect(groupLeavePollMs([leaving])).toBe(5000);
+  expect(groupLeavePollMs([left])).toBe(30_000);
+  expect(groupLeavePollMs([active, { id: 'grp-2', leftAt: null, leaveRequestedAt: '2026-10-15T06:00:00.000Z' }], 'grp-1')).toBe(30_000);
+  expect(groupLeavePollMs([active, { id: 'grp-2', leftAt: null, leaveRequestedAt: '2026-10-15T06:00:00.000Z' }], 'grp-2')).toBe(5000);
+
+  expect(groupLeftNotice(null)).toBeNull();
+  expect(groupLeftNotice('2026-10-15T06:05:00.000Z')).toBe(
+    'Nick đã rời nhóm này lúc 15/10 13:05. Lịch sử tin nhắn vẫn được giữ.',
+  );
+
+  const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    new Response(JSON.stringify({ ok: true, data: { id: 'grp-1', leaveRequestedAt: '2026-10-15T06:00:00.000Z' } }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }),
+  );
+  try {
+    const res = await leaveGroup('grp-1');
+    expect(res).toEqual({ id: 'grp-1', leaveRequestedAt: '2026-10-15T06:00:00.000Z' });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0]?.[0]).toBe('/api/inbox/groups/grp-1/leave');
+    expect(spy.mock.calls[0]?.[1]?.method).toBe('POST');
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+test('canDeleteZaloGroupHistory truth table allows only manager roles on groups with leftAt set, and deleteGroupHistory calls DELETE', async () => {
+  const active = { leftAt: null };
+  const leaving = { leftAt: null, leaveRequestedAt: '2026-10-15T06:00:00.000Z' };
+  const left = { leftAt: '2026-10-15T06:01:00.000Z' };
+
+  for (const nonManager of ['sale', 'teacher', '']) {
+    expect(canDeleteZaloGroupHistory(nonManager, active)).toBe(false);
+    expect(canDeleteZaloGroupHistory(nonManager, leaving)).toBe(false);
+    expect(canDeleteZaloGroupHistory(nonManager, left)).toBe(false);
+    expect(canDeleteZaloGroupHistory(nonManager, null)).toBe(false);
+    expect(canDeleteZaloGroupHistory(nonManager, undefined)).toBe(false);
+  }
+
+  for (const manager of ['leader', 'head', 'director', 'admin']) {
+    expect(canDeleteZaloGroupHistory(manager, active)).toBe(false);
+    expect(canDeleteZaloGroupHistory(manager, leaving)).toBe(false);
+    expect(canDeleteZaloGroupHistory(manager, left)).toBe(true);
+    expect(canDeleteZaloGroupHistory(manager, null)).toBe(false);
+    expect(canDeleteZaloGroupHistory(manager, undefined)).toBe(false);
+  }
+
+  const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    new Response(JSON.stringify({ ok: true, data: { id: 'grp-1' } }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }),
+  );
+  try {
+    const res = await deleteGroupHistory('grp-1');
+    expect(res).toEqual({ id: 'grp-1' });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0]?.[0]).toBe('/api/inbox/groups/grp-1');
+    expect(spy.mock.calls[0]?.[1]?.method).toBe('DELETE');
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+
 
