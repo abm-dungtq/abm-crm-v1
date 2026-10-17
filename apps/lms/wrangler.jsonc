@@ -11,7 +11,7 @@
   },
   "vars": {
     // Secrets CONTENT_SIGNING_SECRET, STREAM_SIGNING_KEY_ID, STREAM_SIGNING_JWK are set in phase 08.
-    "LMS_CONTENT_ORIGIN": "",
+    "LMS_CONTENT_ORIGIN": "https://abm-lms-content.ngulongyquan.workers.dev",
     "STREAM_CUSTOMER_CODE": ""
   },
   "d1_databases": [

@@ -16,7 +16,7 @@
     // Base of links in inbox Lark notices; cron runs have no request origin to fall back on.
     "APP_URL": "https://abm-crm-eval.ngulongyquan.workers.dev",
     // Filled in phase 08 when LMS content Worker and Cloudflare Stream are provisioned.
-    "LMS_CONTENT_ORIGIN": "",
+    "LMS_CONTENT_ORIGIN": "https://abm-lms-content.ngulongyquan.workers.dev",
     "STREAM_ACCOUNT_ID": ""
   },
   "d1_databases": [
