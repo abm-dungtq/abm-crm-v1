@@ -18,6 +18,22 @@ Tên logical theo `abm-crm-<env>`; tài nguyên nhiều loại thêm suffix: `ab
 | `DEMO_MODE` | var | `1` cho phép chọn người dùng demo bằng header. Chỉ dùng cho test và local khi `AUTH_MODE` trống; không đặt cùng `AUTH_MODE=password`. |
 | `LARK_APP_ID`, `LARK_APP_SECRET` | secret | App Lark của bot GoClaw, dùng để tra `open_id` theo email. Đặt bằng `npx wrangler secret put`; không ghi vào repo hay docs. |
 
+## Worker cổng học viên (LMS)
+
+Ba Worker dùng chung D1 `abm-crm-eval` ([ADR-011](../adr/adr-011-learner-lms-portal.md)): `abm-crm-eval` (CRM), `abm-lms` (`apps/lms/wrangler.jsonc`, trang học) và `abm-lms-content` (`apps/lms/wrangler.content.jsonc`, nội dung cẩm nang, R2 `abm-lms-content`). Origin nằm trong các file wrangler.
+
+| Biến | Loại | Worker | Ý nghĩa |
+| --- | --- | --- | --- |
+| `CONTENT_SIGNING_SECRET` | secret | cả ba | Khoá HMAC ký link nội dung; ba Worker phải cùng giá trị. Bản gốc ở `~/.abm/content-signing-secret` trên máy quản trị. |
+| `LMS_CONTENT_ORIGIN` | var | CRM, LMS | Origin của `abm-lms-content`. |
+| `LMS_ORIGIN` | var | content | Origin trang học, đưa nguyên văn vào `frame-ancestors`; thiếu thì trả 500. |
+| `STREAM_API_TOKEN` | secret | CRM | Token Cloudflare Stream để chép video từ link. Chưa đặt (chờ bật Stream). |
+| `STREAM_ACCOUNT_ID` | var | CRM | Account id dùng cho Stream API. Chưa đặt. |
+| `STREAM_SIGNING_KEY_ID`, `STREAM_SIGNING_JWK` | secret | LMS | Khoá ký token phát video. Chưa đặt. |
+| `STREAM_CUSTOMER_CODE` | var | LMS | Mã `customer-<code>` của Stream. Chưa đặt. |
+
+Deploy: `pnpm --filter @abm/lms deploy:content`, `pnpm --filter @abm/lms run deploy`, `pnpm --filter @abm/crm run deploy`. Token đăng bài: `node scripts/issue-lms-publish-token.mjs --email <email>` (cwd `apps/crm`), xem [hướng dẫn đăng cẩm nang](../guides/lms-publish-handbook.md).
+
 Chạy local (`wrangler dev`) mặc định ở chế độ mật khẩu: chạy `pnpm db:migrate:local`, `pnpm db:seed:local`, rồi `node scripts/bootstrap-admin.mjs --local --email admin@demo.abm.example` (cwd `apps/crm`) để có mật khẩu tạm Admin trong `apps/crm/.admin-bootstrap.local`. Muốn màn hình chọn vai trò demo thì tạo `apps/crm/.dev.vars` (đã ignore) với hai dòng `AUTH_MODE=` và `DEMO_MODE=1`.
 
 Kiểm env/binding/destination trước deploy, migration, export/restore. Login/tạo tài nguyên remote và thay đổi GoClaw là bước user-only theo execution guide. Xem [deploy](deployment-baseline.md), [security](../security/security-baseline.md) và [backup](../operations/backup-restore-plan.md).

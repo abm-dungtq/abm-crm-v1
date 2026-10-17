@@ -1,7 +1,7 @@
 ---
 phase: 8
 title: "Release: backup, remote migration, Cloudflare resources, deploy, live check with the BSR handbook"
-status: pending
+status: in-progress
 priority: P1
 effort: "0.5d"
 dependencies: [1, 2, 3, 4, 5, 6, 7]

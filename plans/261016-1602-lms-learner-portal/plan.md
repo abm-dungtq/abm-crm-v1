@@ -41,7 +41,7 @@ Hợp đồng gốc: `plans/reports/brainstorm-261016-1503-lms-learner-portal.md
 | 05 | [CRM web: màn hình Học vụ](phase-05-crm-web-ui.md) | Agy | 02, 03, 04 | completed |
 | 06 | [App `apps/lms`: trang học + Worker nội dung](phase-06-lms-app.md) | Agy | 01, 02, 03 | completed |
 | 07 | [Công cụ đăng bài và tải video cho agent](phase-07-publish-tooling.md) | Agy | 03, 06 | completed |
-| 08 | [Phát hành: sao lưu, migration remote, secrets, deploy, thử với cẩm nang BSR](phase-08-release.md) | Opus | 01–07 | pending |
+| 08 | [Phát hành: sao lưu, migration remote, secrets, deploy, thử với cẩm nang BSR](phase-08-release.md) | Opus | 01–07 | in-progress |
 
 Các phase chạy tuần tự 01 → 08: phase 02–05 cùng sửa `commands.ts`, `index.ts` và `packages/contracts`, nên không chạy song song.
 
@@ -88,3 +88,7 @@ Các phase chạy tuần tự 01 → 08: phase 02–05 cùng sửa `commands.ts`
 ## Tiến độ (16/10 18:12)
 - Phase 01–07 xong (Agy làm, Opus soát, kongming duyệt sau mỗi phase). Typecheck, build CRM + LMS, toàn bộ test: lms-core 12, lms 17, crm 597, zalo-bridge 114, poc 16 — 0 lỗi. Cẩm nang BSR tách đúng 26 phần.
 - Phase 08 chờ user: bật Stream, tạo token/account id, đồng ý sao lưu + migration remote + deploy.
+
+## Tiến độ (17/10)
+- Phase 08 phần lớn xong: sao lưu D1, migration 0024 remote, R2, secret ký link, deploy 3 Worker, đăng cẩm nang BSR, học viên thử đăng nhập và học được trên trình duyệt. Chi tiết: [báo cáo triển khai](../reports/deploy-261017-lms-learner-portal.md).
+- Còn lại: video (chờ bật Stream), nhập thử 200 dòng trên D1 thật (bước 10b, cần user đồng ý), thử tay đổi mật khẩu / hết hạn xem lại / màn hình theo vai.
