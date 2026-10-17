@@ -79,6 +79,7 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
       { to: '/courses', label: 'Khóa & lớp', roles: ['leader', 'academic', 'admin'] },
       { to: '/my-classes', label: 'Lớp của tôi', roles: ['teacher', 'academic', 'admin'] },
       { to: '/products', label: 'Chương trình', roles: ['academic', 'admin', 'sale', 'leader'] },
+      { to: '/learner-accounts', label: 'Tài khoản học viên', roles: ['academic', 'admin', 'director'] },
     ] },
     { label: 'Học phí', icon: 'inbox', items: [
       { to: '/fees', label: 'Học phí', roles: ['accountant', 'admin', 'director'] },

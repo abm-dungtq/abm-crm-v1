@@ -4,11 +4,19 @@ import type { AddContractStepInput, ImportContractLearnersInput, ToggleContractS
 import { useActor } from '../actor-context';
 import { ApiFailure, useApi, useCommand } from '../api';
 import { Alert, Badge, Empty, ErrorState, Field, FormError, Loading, useToast } from '../components/ui';
-import type { ImportPreview, PartnerDetail } from '../types';
+import type { ImportAccountState, ImportPreview, LmsOpenClass, PartnerDetail } from '../types';
 import { canWriteLearners, useOwnerOptions } from './learners';
 import { ContractDialog, contractStatusLabel, contractTone } from './partners';
 
 const CSV_HEADER = 'Họ tên,Số điện thoại,Email,Nhu cầu';
+
+function AccountStateBadge({ state }: { state: ImportAccountState | undefined }) {
+  if (state === 'new') return <Badge tone="ok">Tạo tài khoản mới</Badge>;
+  if (state === 'existing') return <Badge tone="info">Đã có tài khoản → chỉ thêm lớp</Badge>;
+  if (state === 'no_email') return <Badge tone="warn">Thiếu email → ghi danh, chưa có tài khoản</Badge>;
+  if (state === 'email_taken') return <Badge tone="warn">Email đã dùng</Badge>;
+  return null;
+}
 
 export function PartnerDetailPage() {
   const { id } = useParams({ from: '/partners/$id' });
@@ -111,30 +119,56 @@ function ImportCard({ contractId }: { contractId: string }) {
   const actor = useActor();
   const toast = useToast();
   const owners = useOwnerOptions();
+  const openClasses = useApi<LmsOpenClass[]>('/lms/open-classes');
   const [csv, setCsv] = useState('');
   const [fileName, setFileName] = useState('');
   const [ownerUserId, setOwner] = useState('');
+  const [classId, setClassId] = useState('');
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const previewCmd = useCommand<ImportContractLearnersInput, ImportPreview>('importContractLearners');
   const commitCmd = useCommand<ImportContractLearnersInput, ImportPreview>('importContractLearners');
+
   const body = (commit: boolean): ImportContractLearnersInput => ({
-    contractId, csv, commit, ownerUserId: actor.role === 'admin' ? ownerUserId || undefined : undefined,
+    contractId,
+    csv,
+    commit,
+    ownerUserId: actor.role === 'admin' ? ownerUserId || undefined : undefined,
+    ...(classId ? { classId } : {}),
   });
+
   const failure = previewCmd.error ?? commitCmd.error;
   const needsOwner = actor.role === 'admin' && !ownerUserId;
+  const selectedClass = (openClasses.data ?? []).find((c) => c.id === classId) ?? null;
 
   const readFile = async (file: File | undefined) => {
     setPreview(null);
-    if (!file) return;
+    if (!file) {
+      setFileName('');
+      setCsv('');
+      return;
+    }
     setFileName(file.name);
     setCsv(await file.text());
   };
+
+  const fileLevelErrors = preview ? preview.errors.filter((e) => e.line === null) : [];
+  const rowLevelErrors = preview ? preview.errors.filter((e): e is { line: number; message: string } => e.line !== null) : [];
 
   return (
     <section className="card" aria-labelledby="pc-import">
       <div className="card-head"><h2 id="pc-import">Nhập học viên từ CSV</h2></div>
       <div className="card-body stack">
         <p className="text-2">Cột bắt buộc: <span className="mono">{CSV_HEADER}</span>. Mỗi dòng cần số điện thoại hoặc email. Khách đang do sale khác giữ hoặc đang ở hồ chung sẽ bị báo lỗi ở dòng đó.</p>
+        <Field label="Ghi danh vào lớp" htmlFor="pc-class">
+          <select id="pc-class" value={classId} onChange={(e) => { setClassId(e.target.value); setPreview(null); }}>
+            <option value="">Không ghi danh (chỉ tạo lead như trước)</option>
+            {(openClasses.data ?? []).map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name} — {c.courseName}{c.hasProgram ? ' · có chương trình online' : ''}
+              </option>
+            ))}
+          </select>
+        </Field>
         <Field label="File CSV" htmlFor="pc-csv" hint={fileName || 'Tối đa 200 dòng, 500 KB'}>
           <input id="pc-csv" type="file" accept=".csv,text/csv" onChange={(e) => void readFile(e.target.files?.[0])} />
         </Field>
@@ -153,19 +187,67 @@ function ImportCard({ contractId }: { contractId: string }) {
         {failure instanceof ApiFailure ? <FormError error={failure} /> : null}
         {preview && (
           <div className="stack-sm">
+            {fileLevelErrors.map((e, i) => (
+              <Alert key={i} tone="danger">{e.message}</Alert>
+            ))}
             <Alert tone={preview.errors.length ? 'warn' : 'ok'}>
               {preview.create.length} học viên sẽ được tạo, {preview.errors.length} lỗi{preview.errors.length ? ' (các dòng lỗi sẽ bị bỏ qua)' : ''}.
             </Alert>
-            {preview.errors.length > 0 && (
+            {Boolean(classId && preview.summary) && (
+              <div className="row-wrap">
+                <Badge tone="ok">{preview.summary!.newAccounts} tạo tài khoản mới</Badge>
+                <Badge tone="info">{preview.summary!.existingAccounts} đã có tài khoản → chỉ thêm lớp</Badge>
+                <Badge tone="warn">{preview.summary!.noEmail} thiếu email → ghi danh, chưa có tài khoản</Badge>
+                <Badge tone="warn">{preview.summary!.emailTaken} email đã dùng</Badge>
+              </div>
+            )}
+            {Boolean(classId && preview.summary) && preview.create.length > 0 && (
+              <div className="table-wrap">
+                <table className="table responsive">
+                  <thead>
+                    <tr>
+                      <th>Dòng</th>
+                      <th>Họ tên</th>
+                      <th>Điện thoại</th>
+                      <th>Email</th>
+                      <th>Tài khoản</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {preview.create.map((row) => (
+                      <tr key={`create-${row.line}`}>
+                        <td data-label="Dòng" className="num">{row.line}</td>
+                        <td data-label="Họ tên" className="cell-title">{row.name}</td>
+                        <td data-label="Điện thoại" className="nowrap">{row.phone ?? '—'}</td>
+                        <td data-label="Email">{row.email ?? '—'}</td>
+                        <td data-label="Tài khoản"><AccountStateBadge state={row.account} /></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {rowLevelErrors.length > 0 && (
               <ul className="small" style={{ margin: 0, paddingLeft: 18 }}>
-                {preview.errors.map((e, i) => <li key={i}>{e.line ? `Dòng ${e.line}: ` : ''}{e.message}</li>)}
+                {rowLevelErrors.map((e, i) => <li key={i}>Dòng {e.line}: {e.message}</li>)}
               </ul>
             )}
             <div className="row-wrap">
               <button className="btn btn-primary" disabled={preview.create.length === 0 || commitCmd.isPending}
                 onClick={() => commitCmd.mutate(body(true), {
-                  onSuccess: (r) => { toast(`Đã tạo ${r.create.length} học viên`); setPreview(null); setCsv(''); setFileName(''); },
-                })}>{commitCmd.isPending ? 'Đang nhập…' : `Xác nhận nhập ${preview.create.length} học viên`}</button>
+                  onSuccess: (r) => {
+                    toast(`Đã tạo ${r.create.length} học viên`);
+                    setPreview(null);
+                    setCsv('');
+                    setFileName('');
+                  },
+                })}>
+                {commitCmd.isPending
+                  ? 'Đang nhập…'
+                  : selectedClass
+                    ? `Xác nhận nhập ${preview.create.length} học viên vào lớp ${selectedClass.name}`
+                    : `Xác nhận nhập ${preview.create.length} học viên`}
+              </button>
             </div>
           </div>
         )}

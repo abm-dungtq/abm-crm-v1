@@ -16,11 +16,13 @@ import { LeadDetailPage } from './pages/lead-detail';
 import { LeadNewPage } from './pages/lead-new';
 import { LeadsPage } from './pages/leads';
 import { LearnerDetailPage } from './pages/learner-detail';
+import { LearnerAccountsPage } from './pages/learner-accounts';
 import { LearnerReportsPage } from './pages/learner-reports';
 import { PrivacyRequestsPage } from './pages/privacy-requests';
 import { LearnerNewPage } from './pages/learner-new';
 import { LearnersPage } from './pages/learners';
 import { ClassDetailPage } from './pages/class-detail';
+import { ClassOnlinePage } from './pages/class-online';
 import { CoursesPage } from './pages/courses';
 import { FeeGuidePage } from './pages/fee-guide';
 import { FeesLedgerPage } from './pages/fees-ledger';
@@ -135,7 +137,9 @@ const routes = [
   createRoute({ getParentRoute: () => rootRoute, path: '/products', component: ProductsPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/courses', component: CoursesPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/classes/$classId', component: ClassDetailPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/classes/$classId/online', component: ClassOnlinePage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/my-classes', component: MyClassesPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/learner-accounts', component: LearnerAccountsPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/fees', component: FeesPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/fees/queue', component: FeesQueuePage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/fees/ledger/$contactId', component: FeesLedgerPage }),

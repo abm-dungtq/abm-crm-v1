@@ -284,10 +284,17 @@ export interface PartnerDetail {
   steps: { id: string; name: string; position: number; doneAt: string | null; version: number }[];
   learners: { leadId: string; code: string; contactId: string; name: string; phone: string | null; ownerName: string | null; stage: string; stageLabel: string; createdAt: string }[];
 }
+export type ImportAccountState = 'existing' | 'no_email' | 'email_taken' | 'new';
 export interface ImportPreview {
   committed: boolean;
-  create: { line: number; name: string; phone: string | null; email: string | null }[];
+  create: { line: number; name: string; phone: string | null; email: string | null; account?: ImportAccountState }[];
   errors: { line: number | null; message: string }[];
+  summary?: {
+    newAccounts: number;
+    existingAccounts: number;
+    noEmail: number;
+    emailTaken: number;
+  };
 }
 
 // ---------- omnichannel inbox (src/worker/inbox/inbox-routes.ts) ----------
@@ -537,3 +544,104 @@ export interface GroupSchedule extends GroupScheduleInput {
   createdAt: string;
   updatedAt: string;
 }
+
+// ---------- LMS (src/worker/lms-programs.ts, src/worker/lms-accounts.ts) ----------
+export interface LmsLessonVideo {
+  id: string;
+  version: number;
+  title: string;
+  streamUid: string;
+  position: number;
+}
+
+export interface LmsLessonItem {
+  id: string;
+  version: number;
+  sectionId: string;
+  title: string;
+  groupTitle: string | null;
+  position: number;
+  hidden: boolean;
+  videos: LmsLessonVideo[];
+}
+
+export interface LmsLearnerWithoutAccount {
+  contactId: string;
+  displayName: string;
+  email: string | null;
+}
+
+export interface LmsProgramInfo {
+  id: string;
+  version: number;
+  title: string;
+  contentVersion: number;
+  publishedAt: string | null;
+  reviewDays: number | null;
+  clonedFromProgramId: string | null;
+}
+
+export type ClassLmsDetail =
+  | { program: null }
+  | {
+    program: LmsProgramInfo;
+    lessons: LmsLessonItem[];
+    counts: {
+      enrolled: number;
+      withAccount: number;
+      withoutEmail: number;
+    };
+    learnersWithoutAccount: LmsLearnerWithoutAccount[];
+    hasDefaultPassword: boolean;
+  };
+
+export interface LmsProgramOption {
+  programId: string;
+  classId: string | null;
+  className: string | null;
+  courseName: string | null;
+  title: string;
+  lessonCount: number;
+}
+
+export interface LmsOpenClass {
+  id: string;
+  name: string;
+  courseName: string;
+  scheduleText: string | null;
+  hasProgram: boolean;
+}
+
+export interface CreateClassLearnerAccountsResult {
+  created: number;
+  skippedNoEmail: string[];
+  skippedEmailTaken: string[];
+}
+
+export interface LearnerAccountProgramItem {
+  programId: string;
+  title: string;
+  className: string | null;
+  via: 'enrollment' | 'grant';
+  accessId?: string;
+  accessVersion?: number;
+  mode?: 'grant' | 'block';
+}
+
+export interface LearnerAccountRow {
+  id: string;
+  version: number;
+  contactId: string;
+  displayName: string;
+  email: string;
+  status: 'active' | 'disabled';
+  usesDefaultPassword: boolean;
+  lastLoginAt: string | null;
+  lockedUntil: string | null;
+  programs: LearnerAccountProgramItem[];
+}
+
+export interface LearnerAccountSettings {
+  hasDefaultPassword: boolean;
+}
+

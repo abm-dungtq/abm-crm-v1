@@ -6,6 +6,7 @@ import {
   type ResumeEnrollmentInput, type SetClassTeachersInput, type TransferEnrollmentInput, type UpdateSessionInput, type UpsertClassInput,
 } from '@abm/contracts';
 import { useApi, useCommand } from '../api';
+import { ClassOnlineProgram } from '../components/class-online-program';
 import { Badge, Empty, ErrorState, Field, FormError, Loading, useToast, type Tone } from '../components/ui';
 import { fmtDate, fmtDateTime, fromLocalInput } from '../format';
 import type { Member } from '../types';
@@ -53,6 +54,9 @@ export function ClassDetailPage() {
           <Enrollments data={data} />
         </div>
         <Trials trials={data.trials} />
+      </div>
+      <div style={{ marginTop: 16 }}>
+        <ClassOnlineProgram classId={classId} />
       </div>
     </>
   );

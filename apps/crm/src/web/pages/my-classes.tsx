@@ -56,6 +56,7 @@ function ClassCard({ klass }: { klass: ClassRow }) {
         <h2>{klass.name}</h2>
         <span className="spacer" />
         <span className="small muted">{klass.courseName}{klass.scheduleText ? ` · ${klass.scheduleText}` : ''}</span>
+        <Link to="/classes/$classId/online" params={{ classId: klass.id }} className="btn btn-sm">Chương trình online</Link>
       </div>
       <SessionList title="Sắp tới" sessions={klass.upcoming} />
       <SessionList title="Đã qua" sessions={klass.past} />
