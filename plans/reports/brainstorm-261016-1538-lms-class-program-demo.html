@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ABM LMS — Brainstorm & khung giao diện demo</title>
+<style>
+:root{
+  --font:'Be Vietnam Pro',system-ui,-apple-system,'Segoe UI',sans-serif;
+  --rail-bg:#0b1120;--rail-ink:#e2e8f0;--rail-muted:#94a3b8;--rail-active:#1e293b;
+  --bg:#f4f6f9;--surface:#fff;--surface-2:#f8fafc;--surface-3:#f1f5f9;--line:#e2e8f0;--line-2:#cbd5e1;
+  --ink:#0f172a;--ink-2:#334155;--muted:#64748b;
+  --brand:#2563eb;--brand-soft:#eff6ff;--accent:#0d6b67;--accent-weak:#e2f1ef;
+  --danger:#b42318;--danger-weak:#fdecea;--warn:#9a4a06;--warn-weak:#fdf1e3;--ok:#0b6b3a;--ok-weak:#e4f4ea;
+  --ai:#7c3aed;--ai-soft:#f3e8ff;--radius:8px;--shadow:0 1px 2px rgba(15,23,42,.05),0 1px 3px rgba(15,23,42,.06);
+}
+*{box-sizing:border-box}
+body{margin:0;font-family:var(--font);background:var(--bg);color:var(--ink);line-height:1.55;font-size:15px}
+a{color:var(--brand)}
+.wrap{max-width:1180px;margin:0 auto;padding:28px 20px 80px}
+header.top h1{font-size:26px;margin:0 0 4px}
+header.top p{margin:0;color:var(--muted)}
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin:22px 0 16px;position:sticky;top:0;background:var(--bg);padding:8px 0;z-index:5}
+.tabs button{border:1px solid var(--line-2);background:var(--surface);border-radius:999px;padding:7px 14px;font:inherit;font-size:14px;cursor:pointer;color:var(--ink-2)}
+.tabs button[aria-selected=true]{background:var(--ink);color:#fff;border-color:var(--ink)}
+.tabs button:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+.panel{display:none}.panel.on{display:block}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:18px 20px;margin-bottom:16px}
+.card h2{font-size:18px;margin:0 0 10px}.card h3{font-size:15px;margin:14px 0 6px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media (max-width:820px){.grid2{grid-template-columns:1fr}}
+.pill{display:inline-block;border-radius:999px;padding:1px 9px;font-size:12px;font-weight:600}
+.p-ok{background:var(--ok-weak);color:var(--ok)}.p-warn{background:var(--warn-weak);color:var(--warn)}.p-bad{background:var(--danger-weak);color:var(--danger)}.p-info{background:var(--brand-soft);color:var(--brand)}.p-ai{background:var(--ai-soft);color:var(--ai)}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+.note{font-size:13px;color:var(--muted)}
+.callout{border-left:3px solid var(--ai);background:var(--ai-soft);padding:8px 12px;border-radius:0 6px 6px 0;font-size:13px;margin:8px 0}
+.callout.warn{border-color:var(--warn);background:var(--warn-weak)}
+/* demo frame */
+.device{border:1px solid var(--line-2);border-radius:12px;overflow:hidden;background:var(--surface);box-shadow:0 12px 32px rgba(15,23,42,.12)}
+.device .bar{background:var(--surface-3);padding:7px 12px;font-size:12px;color:var(--muted);display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--line)}
+.device .bar i{width:10px;height:10px;border-radius:50%;background:var(--line-2);display:inline-block}
+.device .url{background:var(--surface);border-radius:6px;padding:2px 10px;margin-left:8px;flex:1;font-family:ui-monospace,Consolas,monospace}
+.anno{position:relative}
+.tag{position:absolute;background:var(--ai);color:#fff;border-radius:50%;width:22px;height:22px;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 3px #fff;z-index:2}
+ol.legend{font-size:13px;padding-left:20px;margin:10px 0 0}ol.legend li{margin:3px 0}
+.btn{border:1px solid var(--line-2);background:var(--surface);border-radius:6px;padding:7px 12px;font:inherit;font-size:14px;cursor:pointer}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.sm{padding:3px 9px;font-size:13px}
+input,select,textarea{font:inherit;font-size:14px;border:1px solid var(--line-2);border-radius:6px;padding:7px 10px;width:100%;background:var(--surface)}
+label{font-size:13px;color:var(--ink-2);font-weight:600;display:block;margin:10px 0 4px}
+/* learner portal */
+.lp-head{display:flex;justify-content:space-between;align-items:center;padding:12px 18px;border-bottom:1px solid var(--line)}
+.lp-logo{font-weight:800;color:var(--accent)}
+.banner{background:var(--warn-weak);color:var(--warn);padding:9px 18px;font-size:13px;display:flex;justify-content:space-between;gap:10px;align-items:center}
+.prog{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:14px;padding:18px}
+.pcard{border:1px solid var(--line);border-radius:10px;padding:14px;cursor:pointer;background:var(--surface)}
+.pcard:hover{border-color:var(--accent)}
+.bar-p{height:6px;background:var(--surface-3);border-radius:4px;overflow:hidden;margin:8px 0 4px}.bar-p b{display:block;height:100%;background:var(--accent)}
+.lesson{display:grid;grid-template-columns:240px 1fr 300px;min-height:520px}
+@media (max-width:980px){.lesson{grid-template-columns:1fr}.lesson nav{max-height:220px}}
+.lesson nav{background:var(--rail-bg);color:var(--rail-ink);overflow:auto;font-size:13px}
+.lesson nav h4{margin:12px 14px 4px;font-size:11px;text-transform:uppercase;color:var(--rail-muted);letter-spacing:.06em}
+.lesson nav button{display:flex;gap:6px;width:100%;text-align:left;background:none;border:0;color:var(--rail-ink);padding:6px 14px;font:inherit;font-size:13px;cursor:pointer;align-items:flex-start}
+.lesson nav button[aria-current=true]{background:var(--rail-active);box-shadow:inset 3px 0 0 #2fa39c}
+.lesson nav .dn{color:#4cc27f;margin-left:auto}
+.content{padding:20px;border-right:1px solid var(--line);background:var(--surface-2)}
+.iframe-mock{border:1px dashed var(--line-2);border-radius:8px;background:#fff;padding:18px;min-height:380px}
+.iframe-mock .lbl{font-size:11px;color:var(--muted);font-family:ui-monospace,Consolas,monospace;margin-bottom:10px}
+.vid{padding:16px}
+.player{aspect-ratio:16/9;background:#0b1120;border-radius:8px;color:#94a3b8;display:flex;align-items:center;justify-content:center;font-size:13px;text-align:center;padding:10px}
+.vlist button{display:block;width:100%;text-align:left;border:1px solid var(--line);background:var(--surface);border-radius:6px;padding:8px 10px;margin-top:8px;font:inherit;font-size:13px;cursor:pointer}
+.vlist button[aria-pressed=true]{border-color:var(--accent);background:var(--accent-weak)}
+/* crm */
+.crm{display:grid;grid-template-columns:190px 1fr;min-height:480px}
+.crm aside{background:var(--rail-bg);color:var(--rail-ink);padding:12px 0;font-size:13px}
+.crm aside div{padding:7px 16px;color:var(--rail-muted)}.crm aside div.on{color:#fff;background:var(--rail-active);box-shadow:inset 3px 0 0 var(--brand)}
+.crm main{padding:18px 20px}
+.subtabs{display:flex;gap:16px;border-bottom:1px solid var(--line);margin:8px 0 14px;font-size:14px}
+.subtabs span{padding:6px 0;color:var(--muted)}.subtabs span.on{color:var(--ink);border-bottom:2px solid var(--brand);font-weight:600}
+svg text{font-family:var(--font)}
+@media (prefers-reduced-motion:no-preference){.pcard,.btn{transition:border-color .15s,background .15s}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="top">
+  <h1>ABM LMS — Brainstorm vòng 2 & khung giao diện demo</h1>
+  <p>16/10/2026 · Nối tiếp <code>brainstorm-261016-1503-lms-learner-portal.md</code> · Dữ liệu mẫu, chưa có code thật.</p>
+</header>
+
+<div class="tabs" role="tablist" aria-label="Các mục">
+  <button role="tab" aria-selected="true" data-p="contract">Hợp đồng</button>
+  <button role="tab" aria-selected="false" data-p="flow">Luồng triển khai</button>
+  <button role="tab" aria-selected="false" data-p="login">Demo: Đăng nhập</button>
+  <button role="tab" aria-selected="false" data-p="home">Demo: Trang học viên</button>
+  <button role="tab" aria-selected="false" data-p="lesson">Demo: Bài học + Video</button>
+  <button role="tab" aria-selected="false" data-p="crmclass">Demo CRM: Chương trình lớp</button>
+  <button role="tab" aria-selected="false" data-p="crmimport">Demo CRM: Nhập nhân viên</button>
+  <button role="tab" aria-selected="false" data-p="crmacc">Demo CRM: Tài khoản học viên</button>
+</div>
+
+<!-- ============ CONTRACT ============ -->
+<section class="panel on" id="contract" role="tabpanel">
+  <div class="card">
+    <h2>Kết quả mong muốn</h2>
+    <p>Mỗi lớp trong CRM có <b>một chương trình học online riêng</b>. Học viên được ghi danh vào lớp thì đăng nhập trang học (email + mật khẩu mặc định chung) và vào được từng phần bài học, mỗi phần có ô <b>Video bài học</b> (gồm record Zoom). Với khách doanh nghiệp, Học vụ nhận danh sách nhân viên từ khách hàng, nhập file vào lớp; hệ thống tự ghi danh và tạo tài khoản.</p>
+  </div>
+  <div class="grid2">
+    <div class="card">
+      <h2>Quyết định đã chốt</h2>
+      <table>
+        <tr><td>Kiến trúc</td><td>Worker riêng <code>abm-lms</code>, chung D1 với CRM; chỉ CRM chạy migration</td></tr>
+        <tr><td>Chương trình</td><td><span class="pill p-info">Mới</span> 1 lớp ↔ 1 chương trình riêng (<code>lms_program.class_id</code> duy nhất)</td></tr>
+        <tr><td>Quyền xem</td><td>Ghi danh lớp (confirmed/studying/completed) + cấp tay − thu hồi</td></tr>
+        <tr><td>Khối doanh nghiệp</td><td><span class="pill p-info">Mới</span> Nhập file nhân viên từ khách hàng vào lớp, dựa trên chức năng nhập học viên đối tác đã có</td></tr>
+        <tr><td>Video</td><td>Cloudflare Stream, link ký có hạn; gắn ở từng phần/mục</td></tr>
+        <tr><td>Mật khẩu</td><td>Mặc định chung, nhắc đổi, không bắt buộc; Học vụ đặt lại</td></tr>
+        <tr><td>Tên miền</td><td>Tạm <code>*.workers.dev</code></td></tr>
+        <tr><td>Đăng bài</td><td>Claude Code trên máy gọi API có khóa</td></tr>
+      </table>
+    </div>
+    <div class="card">
+      <h2>Ràng buộc</h2>
+      <ul>
+        <li>Cloudflare gói miễn phí cho Worker/D1; Stream trả phí riêng.</li>
+        <li>Học viên dùng bảng/cookie riêng, không chạm tài khoản nhân viên.</li>
+        <li>Nội dung HTML chạy ở origin riêng không cookie, iframe sandbox, CSP chặn gọi mạng.</li>
+        <li><code>enrollment.lead_id</code> bắt buộc → ghi danh phải gắn với một lead (xem câu hỏi mở).</li>
+        <li>Nhập tối đa 200 dòng/lần như chức năng nhập hiện có.</li>
+        <li>Sao lưu D1 trước migration.</li>
+      </ul>
+      <h2>Ngoài phạm vi</h2>
+      <p class="note">Bài kiểm tra chấm điểm, chứng chỉ, app di động, thanh toán trong LMS, bot Lark đăng bài, email đặt lại mật khẩu, khách doanh nghiệp tự tải danh sách lên.</p>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Trade-offs: ghi danh nhân viên doanh nghiệp</h2>
+    <table>
+      <tr><th>Cách</th><th>Giả định chính</th><th>Hỏng đầu tiên khi</th></tr>
+      <tr><td><b>A. Mở rộng "Nhập học viên đối tác": chọn thêm lớp → tạo lead đã chốt + ghi danh + tài khoản</b> (khuyến nghị)</td><td>Lead "partner" đã chốt không làm sai số liệu bán hàng</td><td>Báo cáo phễu Sale đếm cả hàng trăm lead đối tác như "chốt thành công" → cần lọc theo nguồn <code>partner</code></td></tr>
+      <tr><td>B. Ghi danh thẳng không qua lead (đổi <code>lead_id</code> thành tuỳ chọn)</td><td>Không màn hình nào cần lead của học viên đối tác</td><td>Học phí, điểm danh, báo cáo học viên đang JOIN qua lead → phải sửa nhiều chỗ, migration dựng lại bảng</td></tr>
+      <tr><td>C. Nhập tài khoản LMS riêng, không ghi danh CRM</td><td>Doanh nghiệp không cần điểm danh/học phí trong CRM</td><td>Quyền xem không còn đi theo lớp → mất "một nguồn sự thật" đã chốt</td></tr>
+    </table>
+    <p class="note">Better approaches: none — hướng A chính là hướng user nêu ("lấy list nhân viên rồi add vào"), tận dụng <code>importContractLearners</code> trong <code>apps/crm/src/worker/learner-commands.ts</code>.</p>
+    <div class="callout" id="kongming-note"><b>Kongming: GO hướng A, kèm 4 điều chỉnh.</b> (1) Tạo lead "partner" ở trạng thái chốt bằng cách ghi thẳng, không qua lệnh chốt lead thường (lệnh đó đòi đủ bước/học thử); kèm bản ghi đồng ý "ghi danh" để điểm danh/học phí sau này không lỗi. (2) Tìm trùng theo cả SĐT và email; người đã có tài khoản thì không bao giờ đặt lại mật khẩu, chỉ thêm lớp; khách đang do Sale khác giữ không chặn việc nhập theo hợp đồng. (3) Không băm mật khẩu cho từng người khi nhập (200 lần băm ≈ 2 giây, vượt giới hạn gói miễn phí): tài khoản chưa đổi mật khẩu dùng chung một mật khẩu mặc định đã băm sẵn; "đặt lại" = quay về mặc định. (4) Thêm lệnh "Nhân bản chương trình từ lớp cũ" (copy phần, không copy video) cho khóa sau.</div>
+  </div>
+  <div class="card">
+    <h2>Tiêu chí nghiệm thu (bổ sung vòng 2)</h2>
+    <ol>
+      <li>Mỗi lớp có tối đa một chương trình; mở lớp trong CRM thấy tab "Chương trình học online" với danh sách phần và video.</li>
+      <li>Nhập file 200 nhân viên vào một lớp: xem trước báo đúng số tạo mới/trùng/thiếu email; xác nhận xong, mỗi người có ghi danh và (nếu có email) tài khoản đăng nhập được.</li>
+      <li>Người đã có tài khoản (trùng email) không bị tạo tài khoản thứ hai; chỉ được thêm lớp mới.</li>
+      <li>Các tiêu chí 1–6 của vòng 1 giữ nguyên.</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ============ FLOW ============ -->
+<section class="panel" id="flow" role="tabpanel">
+  <div class="card">
+    <h2>Luồng triển khai</h2>
+    <svg viewBox="0 0 1100 430" width="100%" role="img" aria-labelledby="fT fD">
+      <title id="fT">Luồng dữ liệu LMS</title>
+      <desc id="fD">Giảng viên làm cẩm nang, agent đăng lên LMS vào chương trình của lớp; Học vụ nhập nhân viên vào lớp trong CRM; học viên đăng nhập trang học, xem nội dung từ origin riêng và video từ Stream.</desc>
+      <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#64748b"/></marker></defs>
+      <g font-size="13">
+        <rect x="20" y="30" width="190" height="64" rx="8" fill="#f3e8ff" stroke="#7c3aed"/><text x="115" y="56" text-anchor="middle" font-weight="700">Giảng viên</text><text x="115" y="76" text-anchor="middle">Cẩm nang HTML + MP4 Zoom</text>
+        <rect x="270" y="30" width="200" height="64" rx="8" fill="#f3e8ff" stroke="#7c3aed"/><text x="370" y="56" text-anchor="middle" font-weight="700">Claude Code (agent)</text><text x="370" y="76" text-anchor="middle">tách phần · chèn bridge · up Stream</text>
+        <rect x="20" y="170" width="190" height="64" rx="8" fill="#eff6ff" stroke="#2563eb"/><text x="115" y="196" text-anchor="middle" font-weight="700">Khách doanh nghiệp</text><text x="115" y="216" text-anchor="middle">gửi danh sách nhân viên</text>
+        <rect x="270" y="170" width="200" height="64" rx="8" fill="#eff6ff" stroke="#2563eb"/><text x="370" y="196" text-anchor="middle" font-weight="700">CRM · Học vụ</text><text x="370" y="216" text-anchor="middle">nhập file vào lớp · đặt lại MK</text>
+        <rect x="540" y="100" width="230" height="200" rx="10" fill="#e2f1ef" stroke="#0d6b67"/><text x="655" y="126" text-anchor="middle" font-weight="700">D1 chung (CRM sở hữu schema)</text>
+        <text x="560" y="152">class_group ── lms_program (1:1)</text><text x="560" y="174">lms_lesson · lms_lesson_video</text><text x="560" y="196">contact · lead · enrollment</text><text x="560" y="218">learner_account · learner_session</text><text x="560" y="240">lms_access · lms_progress</text><text x="560" y="262">R2: HTML theo phiên bản</text>
+        <rect x="840" y="40" width="230" height="64" rx="8" fill="#fff" stroke="#0f172a"/><text x="955" y="66" text-anchor="middle" font-weight="700">abm-lms (trang học)</text><text x="955" y="86" text-anchor="middle">đăng nhập · danh sách · tiến độ</text>
+        <rect x="840" y="160" width="230" height="64" rx="8" fill="#fff" stroke="#b42318" stroke-dasharray="5 3"/><text x="955" y="186" text-anchor="middle" font-weight="700">Origin nội dung riêng</text><text x="955" y="206" text-anchor="middle">HTML sandbox · link ký · không cookie</text>
+        <rect x="840" y="280" width="230" height="64" rx="8" fill="#fff" stroke="#0f172a"/><text x="955" y="306" text-anchor="middle" font-weight="700">Cloudflare Stream</text><text x="955" y="326" text-anchor="middle">video record · token xem</text>
+        <rect x="540" y="350" width="230" height="56" rx="8" fill="#fdf1e3" stroke="#9a4a06"/><text x="655" y="374" text-anchor="middle" font-weight="700">Học viên</text><text x="655" y="394" text-anchor="middle">email + mật khẩu mặc định</text>
+      </g>
+      <g stroke="#64748b" stroke-width="1.6" fill="none" marker-end="url(#ar)">
+        <path d="M210 62H268"/><path d="M470 62Q520 62 545 120"/><path d="M210 202H268"/><path d="M470 202H538"/>
+        <path d="M770 150Q810 100 838 76"/><path d="M770 200H838"/><path d="M470 80Q700 20 955 278" stroke-dasharray="4 3"/>
+        <path d="M770 378Q900 378 955 346"/><path d="M700 350Q760 250 900 106"/>
+      </g>
+    </svg>
+    <h3>Thứ tự làm (đề xuất cho /ak:plan)</h3>
+    <ol>
+      <li>Migration: bảng LMS + <code>lms_program.class_id UNIQUE</code> (sao lưu D1 trước).</li>
+      <li>CRM: tab "Chương trình học online" ở trang lớp; tài khoản học viên; đặt lại MK; cấp tay/thu hồi.</li>
+      <li>CRM: mở rộng nhập học viên đối tác → chọn lớp → ghi danh + tạo tài khoản.</li>
+      <li>Worker <code>abm-lms</code>: đăng nhập, trang học viên, trang bài học, tiến độ, token Stream.</li>
+      <li>Origin nội dung + API đăng bài có khóa; skill Claude Code "đăng cẩm nang".</li>
+      <li>Thử bằng cẩm nang BSR (27 phần) + 1 record Zoom; kiểm bảo mật iframe.</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ============ LOGIN ============ -->
+<section class="panel" id="login" role="tabpanel">
+  <div class="card">
+    <h2>Trang đăng nhập học viên</h2>
+    <div class="device anno" style="max-width:560px;margin:auto">
+      <div class="bar"><i></i><i></i><i></i><span class="url">abm-lms.….workers.dev/dang-nhap</span></div>
+      <div style="padding:34px 40px 40px;position:relative">
+        <span class="tag" style="left:12px;top:30px">1</span>
+        <div class="lp-logo" style="font-size:20px">ABM · Học tập</div>
+        <p class="note">Đăng nhập bằng email ABM đã gửi cho Anh/Chị.</p>
+        <label for="em">Email</label><input id="em" value="nguyenvana@bsr.com.vn">
+        <label for="pw">Mật khẩu</label><input id="pw" type="password" value="12345678">
+        <span class="tag" style="right:10px;top:205px">2</span>
+        <div style="margin-top:14px;display:flex;justify-content:space-between;align-items:center">
+          <span class="note">Quên mật khẩu? Liên hệ Học vụ ABM qua Zalo.</span>
+          <button class="btn pri" data-go="home">Đăng nhập</button>
+        </div>
+      </div>
+    </div>
+    <ol class="legend">
+      <li>Không có đăng ký tự do: tài khoản chỉ do CRM tạo (nghiệm thu: không có quyền thì không vào được).</li>
+      <li>Sai nhiều lần → khóa tạm 5 phút; giới hạn số lần thử theo email/IP. Quên mật khẩu đi qua Học vụ, không có email tự đặt lại.</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ============ HOME ============ -->
+<section class="panel" id="home" role="tabpanel">
+  <div class="card">
+    <h2>Trang học viên — các chương trình của tôi</h2>
+    <div class="device">
+      <div class="bar"><i></i><i></i><i></i><span class="url">abm-lms.….workers.dev/</span></div>
+      <div class="lp-head"><span class="lp-logo">ABM · Học tập</span><span class="note">Nguyễn Văn A · <a href="#" data-go="login">Đăng xuất</a></span></div>
+      <div class="banner anno"><span class="tag" style="left:-8px;top:6px">1</span><span>Anh/Chị đang dùng mật khẩu mặc định. Nên đổi mật khẩu để bảo vệ tài khoản.</span><button class="btn sm">Đổi mật khẩu</button></div>
+      <div class="prog">
+        <div class="pcard anno" data-go="lesson" tabindex="0">
+          <span class="tag" style="right:-8px;top:-8px">2</span>
+          <span class="pill p-info">Lớp BSR-AI-K1</span>
+          <h3 style="margin:8px 0 2px">Cẩm Nang A.I Toàn Diện Cho CBNV BSR</h3>
+          <div class="note">3 buổi · 27 phần · 9 video</div>
+          <div class="bar-p"><b style="width:30%"></b></div><div class="note">Đã học 8/27 phần · Tiếp tục: 2.2 Giao việc theo cấu trúc</div>
+        </div>
+        <div class="pcard" tabindex="0">
+          <span class="pill p-ok">Đã hoàn thành</span>
+          <h3 style="margin:8px 0 2px">AI cho Văn phòng — Lớp VP-K3</h3>
+          <div class="note">4 buổi · 18 phần · 4 video</div>
+          <div class="bar-p"><b style="width:100%"></b></div><div class="note">Vẫn xem lại được (ghi danh "completed")</div>
+        </div>
+      </div>
+    </div>
+    <ol class="legend">
+      <li>Nhắc đổi mật khẩu, không chặn. Ẩn sau khi đổi.</li>
+      <li>Mỗi thẻ = một lớp học viên được ghi danh, mỗi lớp một chương trình riêng. Tiến độ lấy từ <code>lms_progress</code>.</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ============ LESSON ============ -->
+<section class="panel" id="lesson" role="tabpanel">
+  <div class="card">
+    <h2>Trang bài học — nội dung cẩm nang + Video bài học từng phần</h2>
+    <div class="device">
+      <div class="bar"><i></i><i></i><i></i><span class="url">abm-lms.….workers.dev/hoc/bsr-ai-k1#b2m2</span></div>
+      <div class="lesson">
+        <nav aria-label="Các phần" id="nav"></nav>
+        <div class="content anno">
+          <span class="tag" style="left:6px;top:6px">2</span>
+          <div class="iframe-mock">
+            <div class="lbl">&lt;iframe sandbox src="https://abm-lms-content.….workers.dev/p/…/v3?sig=…#<span id="sid">b2m2</span>"&gt;</div>
+            <h2 id="ltitle" style="margin:0 0 6px"></h2>
+            <p class="note">Nội dung lấy nguyên từ cẩm nang của giảng viên (câu lệnh mẫu, nút sao chép, quiz…). Trang học chỉ điều khiển chuyển phần qua postMessage.</p>
+            <div style="height:12px;background:var(--surface-3);border-radius:4px;margin:12px 0;width:90%"></div>
+            <div style="height:12px;background:var(--surface-3);border-radius:4px;margin:12px 0;width:75%"></div>
+            <div style="height:12px;background:var(--surface-3);border-radius:4px;margin:12px 0;width:82%"></div>
+            <div style="height:70px;background:var(--surface-3);border-radius:6px;margin:12px 0"></div>
+          </div>
+          <div style="margin-top:12px;display:flex;justify-content:space-between">
+            <button class="btn" id="prev">← Phần trước</button>
+            <button class="btn pri" id="done">✓ Đánh dấu đã học</button>
+            <button class="btn" id="next">Phần sau →</button>
+          </div>
+        </div>
+        <aside class="vid anno">
+          <span class="tag" style="right:6px;top:6px">3</span>
+          <h3 style="margin-top:0">🎬 Video bài học</h3>
+          <div class="player" id="player"></div>
+          <div class="vlist" id="vlist"></div>
+        </aside>
+      </div>
+    </div>
+    <ol class="legend">
+      <li>Menu trái lấy từ <code>lms_lesson</code> (agent tách theo <code>section id</code> của cẩm nang, nhóm theo buổi). Dấu ✓ = đã học.</li>
+      <li>Nội dung chạy trong iframe ở origin riêng (không cookie, CSP <code>connect-src 'none'</code>) — script trong cẩm nang không đọc được phiên đăng nhập.</li>
+      <li>Ô video theo từng phần, nhiều video/phần (<code>lms_lesson_video</code>). Phần không có video thì hiện "Chưa có video". Player Stream dùng token ký có hạn.</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ============ CRM CLASS ============ -->
+<section class="panel" id="crmclass" role="tabpanel">
+  <div class="card">
+    <h2>CRM · Lớp học → tab "Chương trình học online"</h2>
+    <div class="device">
+      <div class="bar"><i></i><i></i><i></i><span class="url">abm-crm-eval.….workers.dev/lop/bsr-ai-k1</span></div>
+      <div class="crm">
+        <aside><div>Tổng quan</div><div>Học viên</div><div class="on">Lớp học</div><div>Đối tác</div><div>Học phí</div><div>Tài khoản học viên</div></aside>
+        <main>
+          <div class="note">Khóa: AI cho Doanh nghiệp › Lớp</div>
+          <h2 style="margin:2px 0">BSR-AI-K1 <span class="pill p-ok">open</span></h2>
+          <div class="subtabs"><span>Buổi học</span><span>Học viên (42)</span><span>Điểm danh</span><span class="on">Chương trình học online</span></div>
+          <div class="anno" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+            <span class="tag" style="left:-14px;top:-4px">1</span>
+            <b>Cẩm Nang A.I Toàn Diện Cho CBNV BSR</b><span class="pill p-ai">Agent đăng · phiên bản 3 · 16/10 14:52</span>
+            <span class="note">39/42 học viên có quyền · 3 chưa có email · Xem lại sau khi lớp kết thúc: <b>90 ngày</b> <button class="btn sm">Sửa</button></span>
+            <span style="margin-left:auto"></span><button class="btn sm">Xem như học viên</button><button class="btn sm">Cấp tay</button>
+          </div>
+          <table class="anno">
+            <thead><tr><th>Phần</th><th>Tiêu đề</th><th>Video</th><th></th></tr></thead>
+            <tbody id="crmLessons"></tbody>
+          </table>
+          <span class="tag" style="position:relative;display:inline-flex;margin-top:8px">2</span>
+          <div class="card" style="margin-top:8px;background:var(--surface-2)">
+            <b>Thêm video cho phần 2.2</b>
+            <div class="grid2"><div><label for="vt">Tiêu đề</label><input id="vt" value="Record Zoom buổi 2 — từ 00:35:10"></div>
+            <div><label for="vs">Nguồn</label><select id="vs"><option>Cloudflare Stream (ID video)</option><option>Tải MP4 lên Stream</option></select></div></div>
+            <div style="margin-top:10px;text-align:right"><button class="btn pri sm">Lưu video</button></div>
+          </div>
+        </main>
+      </div>
+    </div>
+    <ol class="legend">
+      <li>Mỗi lớp đúng một chương trình (nghiệm thu 1). Nội dung HTML chỉ agent đăng; nhân viên không sửa HTML trên web.</li>
+      <li>Học vụ/Admin/Giáo viên của lớp thêm, sửa, sắp xếp video từng phần. Record Zoom cả buổi có thể gắn vào nhiều phần với mốc thời gian trong tiêu đề.</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ============ CRM IMPORT ============ -->
+<section class="panel" id="crmimport" role="tabpanel">
+  <div class="card">
+    <h2>CRM · Đối tác → "Nhập nhân viên vào lớp"</h2>
+    <div class="device">
+      <div class="bar"><i></i><i></i><i></i><span class="url">abm-crm-eval.….workers.dev/doi-tac/bsr</span></div>
+      <div class="crm">
+        <aside><div>Tổng quan</div><div>Học viên</div><div>Lớp học</div><div class="on">Đối tác</div><div>Học phí</div><div>Tài khoản học viên</div></aside>
+        <main>
+          <h2 style="margin:0">Hợp đồng BSR × ABM — Đào tạo AI 2026 <span class="pill p-ok">active</span></h2>
+          <div class="grid2 anno" style="margin-top:6px">
+            <span class="tag" style="left:-14px;top:8px">1</span>
+            <div><label for="cl">Ghi danh vào lớp</label><select id="cl"><option>BSR-AI-K1 (Cẩm Nang A.I Toàn Diện)</option><option>BSR-AI-K2</option></select></div>
+            <div><label>File danh sách (Họ tên, Số điện thoại, Email, Nhu cầu)</label><input type="file" aria-label="Chọn file CSV"></div>
+          </div>
+          <label style="display:flex;gap:8px;align-items:center;font-weight:400"><input type="checkbox" checked style="width:auto"> Tạo tài khoản học tập với mật khẩu mặc định cho người có email</label>
+          <h3>Xem trước — 200 dòng</h3>
+          <div class="anno" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+            <span class="tag" style="left:-14px;top:-2px">2</span>
+            <span class="pill p-ok">185 tạo mới + tài khoản</span><span class="pill p-info">9 đã có tài khoản → chỉ thêm lớp</span><span class="pill p-warn">4 thiếu email → ghi danh, chưa có tài khoản</span><span class="pill p-bad">2 lỗi</span>
+          </div>
+          <table>
+            <thead><tr><th>Dòng</th><th>Họ tên</th><th>Email</th><th>Kết quả</th></tr></thead>
+            <tbody>
+              <tr><td>2</td><td>Nguyễn Văn A</td><td>nguyenvana@bsr.com.vn</td><td><span class="pill p-ok">Tạo mới</span></td></tr>
+              <tr><td>3</td><td>Trần Thị B</td><td>tranthib@bsr.com.vn</td><td><span class="pill p-info">Đã có tài khoản (lớp VP-K3)</span></td></tr>
+              <tr><td>7</td><td>Lê Văn C</td><td>—</td><td><span class="pill p-warn">Thiếu email</span></td></tr>
+              <tr><td>41</td><td>Phạm D</td><td>pham.d@bsr</td><td><span class="pill p-bad">Email không hợp lệ</span></td></tr>
+            </tbody>
+          </table>
+          <div style="margin-top:12px;display:flex;justify-content:flex-end;gap:8px"><button class="btn">Tải lại file</button><button class="btn pri">Xác nhận nhập 198 người</button></div>
+        </main>
+      </div>
+    </div>
+    <ol class="legend">
+      <li>Dùng lại mẫu cột và trình đọc file của chức năng "Nhập học viên đối tác" hiện có; chỉ thêm chọn lớp và tạo tài khoản.</li>
+      <li>Xem trước trước khi ghi (như hiện nay). Trùng email → không tạo tài khoản thứ hai (nghiệm thu 3). Thiếu email → vẫn ghi danh, Học vụ bổ sung email sau.</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ============ CRM ACCOUNTS ============ -->
+<section class="panel" id="crmacc" role="tabpanel">
+  <div class="card">
+    <h2>CRM · Tài khoản học viên</h2>
+    <div class="device">
+      <div class="bar"><i></i><i></i><i></i><span class="url">abm-crm-eval.….workers.dev/tai-khoan-hoc-vien</span></div>
+      <div class="crm">
+        <aside><div>Tổng quan</div><div>Học viên</div><div>Lớp học</div><div>Đối tác</div><div>Học phí</div><div class="on">Tài khoản học viên</div></aside>
+        <main>
+          <div style="display:flex;gap:8px;margin-bottom:10px"><input placeholder="Tìm email, tên…" style="max-width:260px"><select style="max-width:200px"><option>Tất cả lớp</option><option>BSR-AI-K1</option></select><select style="max-width:220px"><option>Mọi trạng thái mật khẩu</option><option>Chưa đổi mật khẩu</option></select></div>
+          <table class="anno">
+            <thead><tr><th>Học viên</th><th>Lớp được xem</th><th>Mật khẩu</th><th>Đăng nhập gần nhất</th><th></th></tr></thead>
+            <tbody>
+              <tr><td>Nguyễn Văn A<br><span class="note">nguyenvana@bsr.com.vn</span></td><td>BSR-AI-K1</td><td><span class="pill p-warn">Mặc định</span></td><td>16/10 15:02</td><td><button class="btn sm">Đặt lại MK</button></td></tr>
+              <tr><td>Trần Thị B<br><span class="note">tranthib@bsr.com.vn</span></td><td>BSR-AI-K1, VP-K3</td><td><span class="pill p-ok">Đã đổi</span></td><td>15/10 20:11</td><td><button class="btn sm">Đặt lại MK</button></td></tr>
+              <tr><td>Hoàng E<br><span class="note">hoange@gmail.com</span></td><td>AI-CN-K5 <span class="pill p-ai">cấp tay</span></td><td><span class="pill p-ok">Đã đổi</span></td><td>—</td><td><button class="btn sm">Thu hồi</button></td></tr>
+              <tr><td>Vũ F<br><span class="note">vuf@bsr.com.vn</span></td><td><s>BSR-AI-K1</s> <span class="pill p-bad">tạm khóa</span></td><td><span class="pill p-warn">Mặc định</span></td><td>—</td><td><button class="btn sm">Mở khóa</button></td></tr>
+            </tbody>
+          </table>
+          <p class="note" style="margin-top:10px">Mật khẩu mặc định chung đặt một lần trong Cài đặt (chỉ Admin thấy). "Đặt lại MK" đưa tài khoản về mật khẩu mặc định và bật lại lời nhắc đổi.</p>
+        </main>
+      </div>
+    </div>
+    <div class="callout warn">Rủi ro đã chấp nhận: mật khẩu chung + không bắt đổi → ai biết email học viên có thể vào. Bộ lọc "Chưa đổi mật khẩu" giúp Học vụ nhắc từng người.</div>
+  </div>
+</section>
+
+<div class="card" style="margin-top:24px">
+  <h2>Câu hỏi đã trả lời (16/10 15:57)</h2>
+  <ol>
+    <li>Nhân bản chương trình sang lớp mới: <b>không</b> chép video.</li>
+    <li>Học viên đối tác: <b>lọc khỏi báo cáo Sale</b> theo nguồn <code>partner</code>.</li>
+    <li>Thời gian xem lại sau khi lớp kết thúc: <b>đặt trong CRM theo từng chương trình</b> (số ngày, để trống = không giới hạn), tính từ buổi học cuối của lớp. Hết hạn thì thẻ chương trình hiện "Đã hết hạn xem lại". Cấp tay vẫn gia hạn riêng được.</li>
+  </ol>
+</div>
+</div>
+
+<script>
+const tabs=[...document.querySelectorAll('.tabs button')];
+function show(id){tabs.forEach(b=>b.setAttribute('aria-selected',b.dataset.p===id));document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('on',p.id===id));window.scrollTo({top:0})}
+tabs.forEach(b=>b.addEventListener('click',()=>show(b.dataset.p)));
+document.addEventListener('click',e=>{const g=e.target.closest('[data-go]');if(g){e.preventDefault();show(g.dataset.go)}});
+document.addEventListener('keydown',e=>{const g=e.target.closest&&e.target.closest('.pcard[data-go]');if(g&&e.key==='Enter')show(g.dataset.go)});
+const L=[
+ ['Buổi 1 · Nền tảng',[['b1p1','🔥','1. Khơi Mở "Năng Lượng Mới"'],['b1p2','🧰','2. "Bản Đồ Vũ Khí" — 06 Trợ Lý Số'],['b1p3','🛡️','3. Kỷ Luật Sắt — Bảo Vệ Thông Tin'],['b1p4','🎯','4. Thao Trường Tình Huống']]],
+ ['Buổi 2 · Prompt',[['b2m1','💡','2.1 Hiểu Đúng Bản Chất Của Prompt'],['b2m2','🧱','2.2 Giao Việc Theo Cấu Trúc 06 Thành Phần'],['b2m3','📂','2.3 Cung Cấp Dữ Liệu Nguồn'],['b2m4','🔄','2.4 A.I Phỏng Vấn Ngược'],['b2m5','🔍','2.5 Tự Kiểm Tra, Phản Biện'],['b2m6','⚠️','2.6 Lỗi Thường Gặp'],['b2m7','🏭','2.7 Prompt Cho Công Việc Thực Tế']]],
+ ['Buổi 3 · Quy trình',[['b3m1','⏱️','3.1 Công Việc Ngốn Thời Gian'],['b3m2','⚖️','3.2 A.I Làm Gì, Người Giữ Gì'],['b3m3','📥','3.3 Đúng Nguồn · Đúng Năng Lực'],['b3m4','🔗','3.4 Quy Trình Người – A.I – Duyệt'],['b3m5','🧪','3.5 Kiểm Chéo · Bảo Mật'],['b3m6','📈','3.6 Cải Tiến Quy Trình Cá Nhân'],['b3m7','🏁','3.7 Quick Win Đầu – Cuối'],['b3data','🗂️','Hồ Sơ Giả Lập Quý IV/2026']]],
+ ['Thư viện & Ôn tập',[['lib1','⚙️','Kỹ Thuật · Vận Hành · HSE'],['lib2','🏛️','Văn Phòng · Tài Chính · Pháp Chế'],['lib3','🤝','Nhân Sự · Đào Tạo · Thương Mại'],['security','🚦','Mã Màu An Toàn Dữ Liệu'],['tools','🔗','Công Cụ & Link Truy Cập'],['checklist','✅','Checklist & Cam Kết'],['quiz','📝','Bài Ôn Tập 15 Câu']]]
+];
+const V={b1p1:[['Record Zoom buổi 1 (24/09) — toàn buổi','2:58:10'],['Đoạn 00:00–00:35 — Mở đầu','35:00']],b1p2:[['Record Zoom buổi 1 — từ 00:35','2:58:10']],b1p3:[['Record Zoom buổi 1 — từ 01:25','2:58:10']],b2m1:[['Record Zoom buổi 2 (01/10) — toàn buổi','3:02:44']],b2m2:[['Record Zoom buổi 2 — từ 00:35:10','3:02:44'],['Demo: Master Template 06 thành phần','08:12']],b3m1:[['Record Zoom buổi 3 — toàn buổi','2:55:03']]};
+const flat=L.flatMap(g=>g[1]);const done=new Set(['b1p1','b1p2','b1p3','b1p4','b2m1']);let cur='b2m2',vi=0;
+const nav=document.getElementById('nav');
+function renderNav(){nav.innerHTML=L.map(([g,items])=>`<h4>${g}</h4>`+items.map(([id,ic,t])=>`<button data-l="${id}" aria-current="${id===cur}"><span>${ic}</span><span>${t}</span>${done.has(id)?'<span class="dn" aria-label="đã học">✓</span>':''}</button>`).join('')).join('')}
+function renderLesson(){const it=flat.find(x=>x[0]===cur);document.getElementById('ltitle').textContent=it[2];document.getElementById('sid').textContent=cur;
+ const vs=V[cur]||[];const pl=document.getElementById('player'),vl=document.getElementById('vlist');
+ if(!vs.length){pl.textContent='Chưa có video cho phần này';vl.innerHTML='<p class="note">Học vụ/giáo viên sẽ gắn video sau.</p>'}
+ else{if(vi>=vs.length)vi=0;pl.innerHTML='▶ Cloudflare Stream<br>'+vs[vi][0]+' · '+vs[vi][1];vl.innerHTML=vs.map((v,i)=>`<button data-v="${i}" aria-pressed="${i===vi}">▶ ${v[0]} <span class="note">· ${v[1]}</span></button>`).join('')}
+ document.getElementById('done').textContent=done.has(cur)?'✓ Đã học':'✓ Đánh dấu đã học';renderNav()}
+nav.addEventListener('click',e=>{const b=e.target.closest('[data-l]');if(b){cur=b.dataset.l;vi=0;renderLesson()}});
+document.getElementById('vlist').addEventListener('click',e=>{const b=e.target.closest('[data-v]');if(b){vi=+b.dataset.v;renderLesson()}});
+document.getElementById('done').onclick=()=>{done.has(cur)?done.delete(cur):done.add(cur);renderLesson()};
+function step(d){const i=flat.findIndex(x=>x[0]===cur);const n=flat[i+d];if(n){cur=n[0];vi=0;renderLesson()}}
+document.getElementById('prev').onclick=()=>step(-1);document.getElementById('next').onclick=()=>step(1);
+renderLesson();
+document.getElementById('crmLessons').innerHTML=flat.slice(0,9).map(([id,,t])=>`<tr><td><code>${id}</code></td><td>${t}</td><td>${(V[id]||[]).length?`<span class="pill p-ok">${V[id].length} video</span>`:'<span class="pill p-warn">Chưa có</span>'}</td><td><button class="btn sm">+ Video</button></td></tr>`).join('')+`<tr><td colspan="4" class="note">… và 18 phần khác</td></tr>`;
+</script>
+</body>
+</html>
