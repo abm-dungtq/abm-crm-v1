@@ -7,6 +7,7 @@ export const TABLES = [
   'customer_bot_switch', 'inbox_setting',
   'privacy_request',
   'payment_allocation', 'payment', 'charge',
+  'lms_progress', 'learner_session', 'lms_lesson_video', 'lms_access', 'lms_lesson', 'lms_program', 'learner_account',
   'attendance', 'trial_booking', 'enrollment', 'class_session', 'class_teacher', 'class_group',
   '_guard', 'idempotency_key', 'outbox', 'audit_log', 'approval', 'activity', 'task', 'lead_step', 'lead', 'lead_counter',
   'course',

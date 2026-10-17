@@ -31,6 +31,12 @@ export interface Env {
   ZALO_OA_TOKEN_KEY?: string;
   /** Public base URL of the CRM used in links sent outside the web app; defaults to the request origin. */
   APP_URL?: string;
+  /** R2 bucket storing published LMS handbook HTML versions (`programs/<programId>/v<version>.html`). */
+  LMS_CONTENT: R2Bucket;
+  LMS_CONTENT_ORIGIN: string;
+  STREAM_ACCOUNT_ID: string;
+  STREAM_API_TOKEN?: string;
+  CONTENT_SIGNING_SECRET?: string;
 }
 
 /** Authenticated principal. Always resolved server-side; never taken from a request body. */

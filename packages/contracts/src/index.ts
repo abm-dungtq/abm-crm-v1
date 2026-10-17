@@ -464,6 +464,7 @@ export const importContractLearnersInput = z.object({
   commit: z.boolean(),
   /** Admin only: the Sale or Leader who will hold the imported customers. */
   ownerUserId: id.optional(),
+  classId: id.optional(),
 });
 export type ImportContractLearnersInput = z.infer<typeof importContractLearnersInput>;
 
@@ -645,6 +646,74 @@ export const anonymizeContactInput = z.object({
 });
 export type AnonymizeContactInput = z.infer<typeof anonymizeContactInput>;
 
+export const setLearnerDefaultPasswordInput = z.object({
+  password: z.string().min(8, 'Tối thiểu 8 ký tự').max(128),
+});
+export type SetLearnerDefaultPasswordInput = z.infer<typeof setLearnerDefaultPasswordInput>;
+
+export const createLearnerAccountInput = z.object({
+  contactId: id,
+  email: z.string().trim().email('Email không hợp lệ').max(160).optional(),
+});
+export type CreateLearnerAccountInput = z.infer<typeof createLearnerAccountInput>;
+
+export const createClassLearnerAccountsInput = z.object({ classId: id });
+export type CreateClassLearnerAccountsInput = z.infer<typeof createClassLearnerAccountsInput>;
+
+export const resetLearnerPasswordInput = z.object({ accountId: id, version });
+export type ResetLearnerPasswordInput = z.infer<typeof resetLearnerPasswordInput>;
+
+export const setLearnerAccountStatusInput = z.object({
+  accountId: id,
+  version,
+  status: z.enum(['active', 'disabled']),
+});
+export type SetLearnerAccountStatusInput = z.infer<typeof setLearnerAccountStatusInput>;
+
+export const grantProgramAccessInput = z.object({
+  contactId: id,
+  programId: id,
+  mode: z.enum(['grant', 'block']),
+  expiresAt: isoDate.optional(),
+  note: z.string().trim().max(500).optional(),
+});
+export type GrantProgramAccessInput = z.infer<typeof grantProgramAccessInput>;
+
+export const revokeProgramAccessInput = z.object({ accessId: id, version });
+export type RevokeProgramAccessInput = z.infer<typeof revokeProgramAccessInput>;
+
+export const updateLmsProgramInput = z.object({
+  programId: id,
+  version,
+  title: text(200).optional(),
+  reviewDays: z.number().int().min(0).max(3650).nullable(),
+});
+export type UpdateLmsProgramInput = z.infer<typeof updateLmsProgramInput>;
+
+export const addLessonVideoInput = z.object({
+  lessonId: id,
+  title: text(200),
+  streamUid: z.string().trim().regex(/^[a-f0-9]{32}$/, 'Stream UID gồm 32 ký tự hex').optional(),
+  sourceUrl: z.string().trim().url('URL không hợp lệ').startsWith('https://', 'Chỉ nhận URL https').max(2000).optional(),
+}).refine((v) => Boolean(v.streamUid) !== Boolean(v.sourceUrl), {
+  message: 'Chọn đúng một trong Stream UID hoặc link video',
+});
+export type AddLessonVideoInput = z.infer<typeof addLessonVideoInput>;
+
+export const updateLessonVideoInput = z.object({
+  videoId: id,
+  version,
+  title: text(200).optional(),
+  position: z.number().int().min(0).max(999).optional(),
+});
+export type UpdateLessonVideoInput = z.infer<typeof updateLessonVideoInput>;
+
+export const deleteLessonVideoInput = z.object({ videoId: id, version });
+export type DeleteLessonVideoInput = z.infer<typeof deleteLessonVideoInput>;
+
+export const cloneLmsProgramInput = z.object({ fromClassId: id, toClassId: id });
+export type CloneLmsProgramInput = z.infer<typeof cloneLmsProgramInput>;
+
 type RiskLevel = 'low' | 'medium' | 'high';
 interface CommandDefinition {
   schema: z.ZodType;
@@ -708,6 +777,18 @@ export const COMMANDS = {
   createPrivacyRequest: { schema: createPrivacyRequestInput, roles: ['sale', 'leader', 'academic', 'accountant', 'admin'], riskLevel: 'low', idempotent: true, expectedVersion: false, agentNeedsApproval: false },
   resolvePrivacyRequest: { schema: resolvePrivacyRequestInput, roles: ['admin'], riskLevel: 'medium', idempotent: true, expectedVersion: true, agentNeedsApproval: false },
   anonymizeContact: { schema: anonymizeContactInput, roles: ['admin'], riskLevel: 'high', idempotent: true, expectedVersion: true, agentNeedsApproval: false },
+  setLearnerDefaultPassword: { schema: setLearnerDefaultPasswordInput, roles: ['admin'], riskLevel: 'medium', idempotent: true, expectedVersion: false, agentNeedsApproval: false },
+  createLearnerAccount: { schema: createLearnerAccountInput, roles: ['academic', 'admin'], riskLevel: 'medium', idempotent: true, expectedVersion: false, agentNeedsApproval: false },
+  createClassLearnerAccounts: { schema: createClassLearnerAccountsInput, roles: ['academic', 'admin'], riskLevel: 'medium', idempotent: true, expectedVersion: false, agentNeedsApproval: false },
+  resetLearnerPassword: { schema: resetLearnerPasswordInput, roles: ['academic', 'admin'], riskLevel: 'medium', idempotent: true, expectedVersion: true, agentNeedsApproval: false },
+  setLearnerAccountStatus: { schema: setLearnerAccountStatusInput, roles: ['academic', 'admin'], riskLevel: 'medium', idempotent: true, expectedVersion: true, agentNeedsApproval: false },
+  grantProgramAccess: { schema: grantProgramAccessInput, roles: ['academic', 'admin'], riskLevel: 'medium', idempotent: true, expectedVersion: false, agentNeedsApproval: false },
+  revokeProgramAccess: { schema: revokeProgramAccessInput, roles: ['academic', 'admin'], riskLevel: 'medium', idempotent: true, expectedVersion: true, agentNeedsApproval: false },
+  updateLmsProgram: { schema: updateLmsProgramInput, roles: ['academic', 'admin'], riskLevel: 'medium', idempotent: true, expectedVersion: true, agentNeedsApproval: false },
+  cloneLmsProgram: { schema: cloneLmsProgramInput, roles: ['academic', 'admin'], riskLevel: 'medium', idempotent: true, expectedVersion: false, agentNeedsApproval: false },
+  addLessonVideo: { schema: addLessonVideoInput, roles: ['academic', 'admin', 'teacher'], riskLevel: 'medium', idempotent: true, expectedVersion: false, agentNeedsApproval: false },
+  updateLessonVideo: { schema: updateLessonVideoInput, roles: ['academic', 'admin', 'teacher'], riskLevel: 'medium', idempotent: true, expectedVersion: true, agentNeedsApproval: false },
+  deleteLessonVideo: { schema: deleteLessonVideoInput, roles: ['academic', 'admin', 'teacher'], riskLevel: 'medium', idempotent: true, expectedVersion: true, agentNeedsApproval: false },
 } as const satisfies Record<string, CommandDefinition>;
 export type CommandName = keyof typeof COMMANDS;
 

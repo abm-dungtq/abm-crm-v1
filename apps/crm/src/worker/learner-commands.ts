@@ -194,11 +194,13 @@ interface LeadPlan {
   email: string | null;
   attachProductIds: string[];
   skippedNotes?: string[];
+  outcome?: 'won';
 }
 
 /** Stages one learner lead: customer (new, reused or taken over), lead, Next Action, journey steps and products. */
 function writeLearnerLead(db: D1Database, tx: GuardedTx, actor: Actor, plan: LeadPlan, touched: Set<string>): { leadId: string; contactId: string } {
   const { draft, owner, contact, phone, email } = plan;
+  const isWon = plan.outcome === 'won';
   const now = tx.now;
   const expiry = holdExpiry(now);
   let contactId: string;
@@ -245,13 +247,14 @@ function writeLearnerLead(db: D1Database, tx: GuardedTx, actor: Actor, plan: Lea
   }
 
   const leadId = crypto.randomUUID();
-  const taskId = crypto.randomUUID();
+  const taskId = isWon ? null : crypto.randomUUID();
   const needSummary = draft.sourceNote ? `${draft.needSummary} — Nguồn: ${draft.sourceNote}` : draft.needSummary;
   tx.raw(db.prepare('INSERT INTO lead_counter (organization_id, next_value) VALUES (?, 1) ON CONFLICT DO NOTHING').bind(actor.organizationId));
   tx.insertVersioned('lead', {
     id: leadId, organization_id: actor.organizationId, department_id: owner.department_id, team_id: owner.team_id,
     contact_id: contactId, source: draft.source, need_summary: needSummary, owner_user_id: owner.id,
-    stage: 'new', status: 'active', next_action_task_id: taskId, assigned_at: now, stage_entered_at: now,
+    stage: isWon ? 'won' : 'new', status: isWon ? 'won' : 'active', next_action_task_id: taskId, assigned_at: now, stage_entered_at: now,
+    ...(isWon ? { closed_at: now, won_note: 'Nhập từ danh sách nhân viên doanh nghiệp' } : {}),
     created_by_user_id: actor.id, pipeline: 'learner',
     partner_contract_id: draft.source === 'partner' ? draft.partnerContractId ?? null : null,
     product_id: draft.productId ?? null,
@@ -261,14 +264,18 @@ function writeLearnerLead(db: D1Database, tx: GuardedTx, actor: Actor, plan: Lea
     exprs: [`(SELECT printf('L-%04d', next_value) FROM lead_counter WHERE organization_id = ?)`],
     binds: [actor.organizationId],
   });
-  // Guard against two concurrent requests both creating an active learner lead for the same customer.
-  tx.assert(`SELECT COUNT(*) = 1 FROM lead WHERE contact_id = ? AND pipeline = 'learner' AND status = 'active'`, [contactId]);
+  if (!isWon) {
+    // Guard against two concurrent requests both creating an active learner lead for the same customer.
+    tx.assert(`SELECT COUNT(*) = 1 FROM lead WHERE contact_id = ? AND pipeline = 'learner' AND status = 'active'`, [contactId]);
+  }
   tx.raw(db.prepare('UPDATE lead_counter SET next_value = next_value + 1 WHERE organization_id = ?').bind(actor.organizationId));
-  tx.insertVersioned('task', {
-    id: taskId, lead_id: leadId, title: draft.nextAction.title, due_at: new Date(draft.nextAction.dueAt).toISOString(),
-    assignee_user_id: owner.id, status: 'open', created_by_user_id: actor.id,
-  });
-  insertJourneySteps(db, tx, leadId, actor.id);
+  if (!isWon && taskId) {
+    tx.insertVersioned('task', {
+      id: taskId, lead_id: leadId, title: draft.nextAction.title, due_at: new Date(draft.nextAction.dueAt).toISOString(),
+      assignee_user_id: owner.id, status: 'open', created_by_user_id: actor.id,
+    });
+  }
+  insertJourneySteps(db, tx, leadId, actor.id, isWon);
   for (const productId of plan.attachProductIds) {
     tx.insertVersioned('customer_product', {
       id: crypto.randomUUID(), contact_id: contactId, product_id: productId, attached_by_user_id: actor.id, attached_at: now,
@@ -287,10 +294,10 @@ function writeLearnerLead(db: D1Database, tx: GuardedTx, actor: Actor, plan: Lea
 }
 
 /** Copies the journey template into one row per step. The first step is recorded by the system. */
-function insertJourneySteps(db: D1Database, tx: GuardedTx, leadId: string, actorId: string) {
+function insertJourneySteps(db: D1Database, tx: GuardedTx, leadId: string, actorId: string, allDone = false) {
   const rows = LEARNER_JOURNEY.map((s, i) => ({
     id: crypto.randomUUID(), code: s.code, label: s.label, required: s.required ? 1 : 0, position: i + 1,
-    status: s.code === 'recorded' ? 'done' : 'open',
+    status: allDone || s.code === 'recorded' ? 'done' : 'open',
   }));
   tx.raw(db.prepare(`INSERT INTO lead_step (id, lead_id, step_code, label, required, position, template_version, status, done_at,
       done_by_user_id, created_at, updated_at, version, last_txn_id)
@@ -673,12 +680,31 @@ function parseLearnerCsv(input: string): { rows: ImportRow[]; errors: RowIssue[]
   return { rows, errors };
 }
 
+function decidePartnerContact(candidates: ContactCandidate[]): { error: ApiFail } | { contact: ContactPlan } {
+  if (candidates.some((c) => c.has_active_learner_lead)) {
+    return { error: fail('DUPLICATE_SUSPECTED', activeLearnerLeadMessage) };
+  }
+  const first = candidates[0];
+  return { contact: first ? { kind: 'own', state: first } : { kind: 'new' } };
+}
+
 async function importContractLearners({ db, actor, input, tx }: Ctx<ImportContractLearnersInput>) {
   const contract = await loadActiveContract(db, actor.organizationId, input.contractId);
   if ('error' in contract) return contract.error;
   const resolved = await resolveOwner(db, actor, input.ownerUserId);
   if ('error' in resolved) return resolved.error;
   const { owner } = resolved;
+
+  let klass: { id: string; name: string; status: string; course_id: string; product_id: string } | null = null;
+  if (input.classId) {
+    klass = await db.prepare(`SELECT cg.id, cg.name, cg.status, co.id AS course_id, co.product_id
+      FROM class_group cg JOIN course co ON co.id = cg.course_id
+      WHERE cg.id = ? AND co.organization_id = ?`)
+      .bind(input.classId, actor.organizationId)
+      .first<{ id: string; name: string; status: string; course_id: string; product_id: string }>();
+    if (!klass) return fail('NOT_FOUND', 'Không tìm thấy lớp');
+    if (klass.status !== 'open') return fail('VALIDATION_FAILED', 'Lớp không còn mở');
+  }
 
   const parsed = parseLearnerCsv(input.csv);
   const errors = [...parsed.errors];
@@ -688,32 +714,190 @@ async function importContractLearners({ db, actor, input, tx }: Ctx<ImportContra
   const index = await loadPhoneIndex(db, actor.organizationId, phones.slice(0, MAX_PHONE_LOOKUP));
   const nextAction = { title: 'Liên hệ học viên đối tác', dueAt: new Date(now.getTime() + 86_400_000).toISOString() };
 
-  const accepted: { row: ImportRow; plan: LeadPlan }[] = [];
+  type AccountStatus = 'existing' | 'no_email' | 'email_taken' | 'new';
+  const accountByEmail = new Map<string, string>();
+  const accountByContactId = new Map<string, string>();
+  const accountContacts = new Map<string, ContactCandidate>();
+
+  if (klass) {
+    const fileEmails = [...new Set(parsed.rows.flatMap((r) => (r.email ? [r.email.trim().toLowerCase()] : [])))];
+    const phoneContactIds = [...new Set([...index.values()].flatMap((list) => list.map((c) => c.id)))];
+    if (fileEmails.length || phoneContactIds.length) {
+      const accountRows = await db.prepare(`SELECT la.email, la.contact_id FROM learner_account la
+        WHERE la.organization_id = ?
+          AND (la.email IN (SELECT value FROM json_each(?)) OR la.contact_id IN (SELECT value FROM json_each(?)))`)
+        .bind(actor.organizationId, JSON.stringify(fileEmails), JSON.stringify(phoneContactIds))
+        .all<{ email: string; contact_id: string }>();
+      for (const acc of accountRows.results) {
+        const norm = acc.email.trim().toLowerCase();
+        accountByEmail.set(norm, acc.contact_id);
+        accountByContactId.set(acc.contact_id, norm);
+      }
+      const contactIds = [...new Set(accountRows.results.map((r) => r.contact_id))];
+      if (contactIds.length) {
+        const stateRows = await db.prepare(`SELECT ${CONTACT_STATE_COLUMNS}, ${ACTIVE_LEARNER_LEAD_SQL}
+          FROM contact c
+          WHERE c.organization_id = ? AND c.archived_at IS NULL AND c.id IN (SELECT value FROM json_each(?))`)
+          .bind(actor.organizationId, JSON.stringify(contactIds))
+          .all<ContactCandidate>();
+        for (const st of stateRows.results) accountContacts.set(st.id, st);
+      }
+    }
+  }
+
+  const accepted: { row: ImportRow; plan: LeadPlan; account?: AccountStatus; normalizedEmail: string | null }[] = [];
+  const seenEmails = new Set<string>();
+  const seenContactIds = new Set<string>();
+  const enrolledInClass = new Set<string>();
+  if (klass) {
+    const rows = await db.prepare(`SELECT contact_id FROM enrollment
+      WHERE class_id = ? AND status IN ('pending','confirmed','studying','deferred')`)
+      .bind(klass.id).all<{ contact_id: string }>();
+    for (const r of rows.results) enrolledInClass.add(r.contact_id);
+  }
+
   for (const row of parsed.rows) {
-    const decided = decideContact(row.phone ? index.get(row.phone) ?? [] : [], owner, now, false);
+    const normalizedEmail = row.email ? row.email.trim().toLowerCase() : null;
+    if (!klass) {
+      const decided = decideContact(row.phone ? index.get(row.phone) ?? [] : [], owner, now, false);
+      if ('error' in decided) {
+        errors.push({ line: row.line, message: decided.error.error.message });
+        continue;
+      }
+      accepted.push({
+        row,
+        normalizedEmail,
+        plan: {
+          draft: {
+            contactName: row.name, phone: row.phoneRaw || undefined, email: row.emailRaw || undefined, source: 'partner',
+            partnerContractId: contract.contract.id, needSummary: row.need || `Học viên từ hợp đồng ${contract.contract.name}`, nextAction,
+          },
+          owner, contact: decided.contact, phone: row.phone, email: normalizedEmail, attachProductIds: [],
+        },
+      });
+      continue;
+    }
+
+    const phoneCandidates = row.phone ? index.get(row.phone) ?? [] : [];
+    const emailAccountContactId = normalizedEmail ? accountByEmail.get(normalizedEmail) : undefined;
+    let candidates: ContactCandidate[];
+    if (emailAccountContactId && !seenEmails.has(normalizedEmail!)) {
+      if (phoneCandidates.length > 0 && !phoneCandidates.some((c) => c.id === emailAccountContactId)) {
+        errors.push({ line: row.line, message: 'SĐT và email thuộc hai học viên khác nhau' });
+        continue;
+      }
+      const state = phoneCandidates.find((c) => c.id === emailAccountContactId) ?? accountContacts.get(emailAccountContactId);
+      candidates = state ? [state] : [];
+    } else {
+      candidates = phoneCandidates;
+    }
+
+    const decided = decidePartnerContact(candidates);
     if ('error' in decided) {
       errors.push({ line: row.line, message: decided.error.error.message });
       continue;
     }
+
+    const resolvedContactId = decided.contact.kind !== 'new' ? decided.contact.state.id : null;
+    if (resolvedContactId && enrolledInClass.has(resolvedContactId)) {
+      errors.push({ line: row.line, message: 'Học viên đã có trong lớp' });
+      continue;
+    }
+    if (resolvedContactId && seenContactIds.has(resolvedContactId)) {
+      errors.push({ line: row.line, message: 'Trùng học viên với dòng khác trong file' });
+      continue;
+    }
+    if (resolvedContactId) seenContactIds.add(resolvedContactId);
+    let account: AccountStatus;
+    if (resolvedContactId && accountByContactId.has(resolvedContactId)) {
+      account = 'existing';
+      if (normalizedEmail) seenEmails.add(normalizedEmail);
+    } else if (!normalizedEmail) {
+      account = 'no_email';
+    } else if (seenEmails.has(normalizedEmail) || (emailAccountContactId && emailAccountContactId !== resolvedContactId)) {
+      account = 'email_taken';
+    } else {
+      account = 'new';
+      seenEmails.add(normalizedEmail);
+      if (resolvedContactId) accountByContactId.set(resolvedContactId, normalizedEmail);
+    }
+
     accepted.push({
       row,
+      account,
+      normalizedEmail,
       plan: {
         draft: {
           contactName: row.name, phone: row.phoneRaw || undefined, email: row.emailRaw || undefined, source: 'partner',
           partnerContractId: contract.contract.id, needSummary: row.need || `Học viên từ hợp đồng ${contract.contract.name}`, nextAction,
+          productId: klass.product_id, courseId: klass.course_id,
         },
-        owner, contact: decided.contact, phone: row.phone, email: row.email, attachProductIds: [],
+        owner, contact: decided.contact, phone: row.phone,
+        email: account === 'email_taken' ? null : normalizedEmail,
+        attachProductIds: [],
+        outcome: 'won',
       },
     });
   }
+
   errors.sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
-  const create = accepted.map(({ row }) => ({ line: row.line, name: row.name, phone: row.phoneRaw || null, email: row.emailRaw || null }));
-  if (!input.commit || !accepted.length) return ok({ committed: false, create, errors });
+  if (!klass) {
+    const create = accepted.map(({ row }) => ({ line: row.line, name: row.name, phone: row.phoneRaw || null, email: row.emailRaw || null }));
+    if (!input.commit || !accepted.length) return ok({ committed: false, create, errors });
+
+    assertContractActive(tx, contract.contract.id);
+    const touched = new Set<string>();
+    for (const { plan } of accepted) writeLearnerLead(db, tx, actor, plan, touched);
+    return ok({ committed: true, create, errors });
+  }
+
+  const create = accepted.map(({ row, account }) => ({
+    line: row.line, name: row.name, phone: row.phoneRaw || null, email: row.emailRaw || null, account: account!,
+  }));
+  const summary = {
+    newAccounts: accepted.filter((a) => a.account === 'new').length,
+    existingAccounts: accepted.filter((a) => a.account === 'existing').length,
+    noEmail: accepted.filter((a) => a.account === 'no_email').length,
+    emailTaken: accepted.filter((a) => a.account === 'email_taken').length,
+  };
+  if (!input.commit || !accepted.length) return ok({ committed: false, create, errors, summary });
 
   assertContractActive(tx, contract.contract.id);
   const touched = new Set<string>();
-  for (const { plan } of accepted) writeLearnerLead(db, tx, actor, plan, touched);
-  return ok({ committed: true, create, errors });
+  for (const { plan, account, normalizedEmail } of accepted) {
+    const { leadId, contactId } = writeLearnerLead(db, tx, actor, plan, touched);
+    tx.assert(
+      `SELECT COUNT(*) = 0 FROM enrollment WHERE contact_id = ? AND class_id = ? AND status IN ('pending','confirmed','studying','deferred')`,
+      [contactId, klass.id],
+    );
+    tx.insertVersioned('enrollment', {
+      id: crypto.randomUUID(),
+      organization_id: actor.organizationId,
+      lead_id: leadId,
+      contact_id: contactId,
+      class_id: klass.id,
+      status: 'confirmed',
+      deferred_until: null,
+      status_before_defer: null,
+      transferred_from_enrollment_id: null,
+      confirmed_at: tx.now,
+      ended_at: null,
+    });
+    tx.raw(db.prepare(`INSERT INTO consent (id, contact_id, purpose, granted, note, recorded_by_user_id, recorded_at)
+      VALUES (?, ?, 'enrollment', 1, 'Theo hợp đồng doanh nghiệp', ?, ?)`).bind(crypto.randomUUID(), contactId, actor.id, tx.now));
+    if (account === 'new' && normalizedEmail) {
+      tx.insertVersioned('learner_account', {
+        id: crypto.randomUUID(),
+        organization_id: actor.organizationId,
+        contact_id: contactId,
+        email: normalizedEmail,
+        status: 'active',
+        created_by_user_id: actor.id,
+      });
+    }
+    tx.activity(leadId, 'note', `Ghi danh lớp ${klass.name} theo hợp đồng ${contract.contract.name}`);
+  }
+  return ok({ committed: true, create, errors, summary });
 }
 
 export const learnerHandlers = {

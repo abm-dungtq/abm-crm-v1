@@ -238,7 +238,8 @@ export async function dashboard(db: D1Database, actor: Actor) {
       COALESCE(SUM(CASE WHEN l.closed_at >= ? THEN l.expected_value ELSE 0 END), 0) AS month_v,
       SUM(CASE WHEN l.status = 'active' AND na.due_at < ? THEN 1 ELSE 0 END) AS overdue
       FROM lead l LEFT JOIN app_user u ON u.id = l.owner_user_id LEFT JOIN task na ON na.id = l.next_action_task_id
-      WHERE ${scope.sql} GROUP BY l.pipeline, l.status, l.stage, l.owner_user_id, l.lost_reason`)
+      WHERE ${scope.sql} AND NOT (l.pipeline = 'learner' AND l.status = 'won' AND l.source = 'partner')
+      GROUP BY l.pipeline, l.status, l.stage, l.owner_user_id, l.lost_reason`)
       .bind(since, since, now.toISOString(), ...scope.binds)
       .all<{ pipeline: string; status: string; stage: string; owner_user_id: string | null; owner_name: string | null; lost_reason: string | null;
         n: number; v: number; month_n: number; month_v: number; overdue: number }>(),

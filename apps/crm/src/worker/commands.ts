@@ -7,7 +7,7 @@ import {
   type SetLeadProgramInput, type StageCode, type UpsertProductInput,
 } from '@abm/contracts';
 import type { z } from 'zod';
-import type { Actor } from './env';
+import type { Actor, Env } from './env';
 import { GuardedTx, isGuardFailure } from './guarded-tx';
 import { fail, ok, type Ctx, type Handler } from './command-result';
 import { academicHandlers } from './academic-commands';
@@ -17,6 +17,8 @@ import {
   filterExistingContactPoints, heldByOtherMessage, learnerHandlers, loadContactState, validateLeadProgram, type ContactCandidate,
 } from './learner-commands';
 import { heldNow } from './learner-hold';
+import { lmsAccountHandlers } from './lms-accounts';
+import { lmsProgramHandlers } from './lms-programs';
 import { privacyHandlers } from './privacy';
 import { canSeeLead, customerScope, leaderOnly, leadScope, mayDecideApproval } from './scope';
 
@@ -64,6 +66,7 @@ interface ApprovalRow {
 const handlers: { [K in CommandName]: Handler<z.infer<(typeof COMMANDS)[K]['schema']>> } = {
   createLead, setLeadProgram, assignLead, releaseLead, logActivity, completeTask, changeStage, requestOwnerChange, decideApproval,
   upsertProduct, recordConsent, ...learnerHandlers, ...academicHandlers, ...attendanceHandlers, ...feeHandlers, ...privacyHandlers,
+  ...lmsAccountHandlers, ...lmsProgramHandlers,
 };
 
 export async function sha256(text: string) {
@@ -93,7 +96,7 @@ const killSwitchOn = () => fail('KILL_SWITCH_ON', 'Bot đang bị tạm khóa gh
 
 /** ADR-005 command pipeline: role → schema → idempotency → handler → one guarded batch. */
 export async function runCommand(db: D1Database, actor: Actor, name: CommandName, raw: unknown, idempotencyKey: string | undefined,
-  onCommitted?: (tx: GuardedTx) => Promise<void>): Promise<ApiResult<unknown>> {
+  onCommitted?: (tx: GuardedTx) => Promise<void>, env?: Env): Promise<ApiResult<unknown>> {
   const definition = COMMANDS[name];
   if (!(definition.roles as readonly string[]).includes(actor.role)) {
     return fail('FORBIDDEN', 'Vai trò hiện tại không được thực hiện thao tác này');
@@ -116,7 +119,7 @@ export async function runCommand(db: D1Database, actor: Actor, name: CommandName
   // A chat agent acting for anyone but Admin only proposes risky changes; a person confirms on the web.
   const proposes = actor.kind === 'agent' && actor.role !== 'admin' && (name === 'changeStage' || name === 'assignLead');
   const handler = (proposes ? proposals[name as keyof typeof proposals] : handlers[name]) as Handler<unknown>;
-  const result = await handler({ db, actor, input: parsed.data, tx });
+  const result = await handler({ db, actor, input: parsed.data, tx, env });
   if (!result.ok) return result;
   // A dry run (an import preview) stages nothing, so there is nothing to commit or replay.
   if (!tx.hasAnchor) return result;

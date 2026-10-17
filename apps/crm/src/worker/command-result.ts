@@ -1,5 +1,5 @@
 import type { ApiError, ApiResult } from '@abm/contracts';
-import type { Actor } from './env';
+import type { Actor, Env } from './env';
 import type { GuardedTx } from './guarded-tx';
 
 export type ApiFail = Extract<ApiResult<never>, { ok: false }>;
@@ -14,5 +14,5 @@ export function isoUtc(value: string) {
   return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
 }
 
-export type Ctx<I> = { db: D1Database; actor: Actor; input: I; tx: GuardedTx };
+export type Ctx<I> = { db: D1Database; actor: Actor; input: I; tx: GuardedTx; env?: Env };
 export type Handler<I> = (ctx: Ctx<I>) => Promise<ApiResult<unknown>>;

@@ -18,12 +18,17 @@ import { myClasses, sessionAttendance } from './attendance';
 import { chargeGuide, contactLedger, listCharges, listUnallocatedPayments, orgBank, searchFeeContacts } from './fees';
 import { canReadLearners, learnerDetail, listLearners, listPartners, partnerDetail } from './learner-queries';
 import { learnerReports } from './learner-reports';
+import { LMS_STAFF, learnerAccountSettings, listLearnerAccounts } from './lms-accounts';
+import { classProgram, listPrograms, openClasses, previewUrl } from './lms-programs';
+import { lmsPublishRoutes } from './lms-publish-routes';
 import { listPrivacyRequests } from './privacy';
 import type { AppBindings, Env } from './env';
 import {
   accountDetail, adminOverview, canReadAudit, dashboard, leadDetail, listAccounts, listApprovals,
   listAudit, listLeads, leadPage, accountPage, listProducts, listTasks, search, teamMembers, canReadProducts,
 } from './queries';
+
+const OPEN_CLASS_READERS = ['sale', 'leader', 'admin', 'academic', 'director'];
 
 const STATUS: Record<string, 200 | 400 | 401 | 403 | 404 | 409 | 422> = {
   FORBIDDEN: 403, NOT_FOUND: 404, STALE_VERSION: 409, IDEMPOTENCY_CONFLICT: 409, DUPLICATE_SUSPECTED: 409,
@@ -40,6 +45,7 @@ app.onError((error, c) => {
 app.get('/health', (c) => c.json({ ok: true }));
 // The chat agent authenticates with its own Bearer token, so it is mounted before the browser origin and session checks.
 app.route('/mcp', mcpRoutes);
+app.route('/lms-publish', lmsPublishRoutes);
 // The Zalo bridge sidecar signs each request with HMAC, so it is mounted before the browser origin and session checks.
 app.route('/bridge', bridgeRoutes);
 // Meta signs Messenger webhooks with the app secret, so they are mounted before the browser origin and session checks.
@@ -207,11 +213,53 @@ app.get('/fees/payments', async (c) => {
   return c.json(data(rows));
 });
 
+app.get('/lms/accounts', async (c) => {
+  const actor = c.get('actor');
+  if (!LMS_STAFF.includes(actor.role)) return c.json(forbidden, 403);
+  const limitParam = c.req.query('limit');
+  return c.json(data(await listLearnerAccounts(c.env.DB, actor, {
+    q: c.req.query('q') || undefined,
+    classId: c.req.query('classId') || undefined,
+    passwordState: c.req.query('passwordState') || undefined,
+    limit: limitParam ? Number(limitParam) : undefined,
+  })));
+});
+app.get('/lms/settings', async (c) => {
+  const actor = c.get('actor');
+  if (!LMS_STAFF.includes(actor.role)) return c.json(forbidden, 403);
+  return c.json(data(await learnerAccountSettings(c.env.DB, actor)));
+});
+
+app.get('/classes/:id/lms', async (c) => {
+  const detail = await classProgram(c.env.DB, c.env, c.get('actor'), c.req.param('id'));
+  if (detail === 'forbidden') return c.json(forbidden, 403);
+  return detail ? c.json(data(detail)) : c.json(notFound, 404);
+});
+app.get('/classes/:id/lms/preview-url', async (c) => {
+  const res = await previewUrl(c.env, c.get('actor'), c.req.param('id'));
+  if (res === 'forbidden') return c.json(forbidden, 403);
+  if (res === 'not_found') return c.json(notFound, 404);
+  if (res === 'not_configured') {
+    return c.json({ ok: false, error: { code: 'INTERNAL', message: 'Chưa cấu hình xem trước' } }, 503);
+  }
+  return c.json(data(res));
+});
+app.get('/lms/programs', async (c) => {
+  const actor = c.get('actor');
+  if (!LMS_STAFF.includes(actor.role)) return c.json(forbidden, 403);
+  return c.json(data(await listPrograms(c.env.DB, actor)));
+});
+app.get('/lms/open-classes', async (c) => {
+  const actor = c.get('actor');
+  if (!OPEN_CLASS_READERS.includes(actor.role)) return c.json(forbidden, 403);
+  return c.json(data(await openClasses(c.env.DB, actor)));
+});
+
 app.post('/commands/:name', async (c) => {
   const name = c.req.param('name');
   if (!Object.hasOwn(COMMANDS, name)) return c.json(notFound, 404);
   const body = await c.req.json().catch(() => null);
-  const result: ApiResult<unknown> = await runCommand(c.env.DB, c.get('actor'), name as CommandName, body, c.req.header('Idempotency-Key'), notifyCommitted(c));
+  const result: ApiResult<unknown> = await runCommand(c.env.DB, c.get('actor'), name as CommandName, body, c.req.header('Idempotency-Key'), notifyCommitted(c), c.env);
   return c.json(result, result.ok ? 200 : STATUS[result.error.code] ?? 400);
 });
 
