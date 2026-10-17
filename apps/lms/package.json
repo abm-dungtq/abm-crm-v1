@@ -1,0 +1,33 @@
+{
+  "name": "@abm/lms",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.worker.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "deploy": "vite build && wrangler deploy",
+    "deploy:content": "wrangler deploy -c wrangler.content.jsonc"
+  },
+  "dependencies": {
+    "@abm/lms-core": "workspace:*",
+    "@tanstack/react-query": "^5.90.0",
+    "@tanstack/react-router": "^1.130.0",
+    "hono": "^4.13.12",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.3.6",
+    "@cloudflare/workers-types": "5.20261003.1",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "typescript": "7.0.2",
+    "vite": "^7.1.0",
+    "vitest": "4.1.11",
+    "wrangler": "4.147.0"
+  }
+}

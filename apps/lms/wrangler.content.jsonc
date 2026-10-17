@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "abm-lms-content",
+  "main": "src/content/index.ts",
+  "compatibility_date": "2026-10-03",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    // Secret CONTENT_SIGNING_SECRET is set in phase 08.
+    "LMS_ORIGIN": ""
+  },
+  "r2_buckets": [
+    { "binding": "LMS_CONTENT", "bucket_name": "abm-lms-content" }
+  ],
+  "observability": { "enabled": true }
+}
