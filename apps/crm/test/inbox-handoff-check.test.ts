@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import seedSql from '../seed/demo.sql?raw';
 import { applyCompletionResult, asCompletionPayload } from '../src/worker/inbox/conversation-flow';
 import {
-  JEV_URL, classifyWithJev, maskPersonalData, matchHandoffRule, resetJevBreaker,
+  JEV_URL, classifyWithJev, maskPersonalData, matchHandoffRule, mentions199k, resetJevBreaker,
 } from '../src/worker/inbox/decision-layer';
 import { ingestEvents } from '../src/worker/inbox/ingest';
 import { resetDb } from './helpers/reset-db';
@@ -65,6 +65,9 @@ test('rules recognise clear handoff turns with or without Vietnamese marks and l
   expect(matchHandoffRule('Tôi muốn hoàn tiền')).toBe('complaint');
   expect(matchHandoffRule('Em không vào được nhóm học')).toBe('access_problem');
   expect(matchHandoffRule('Em gửi ảnh bill ạ')).toBe('payment_done');
+  expect(matchHandoffRule('ck 199k rồi nhé')).toBe('payment_done');
+  expect(matchHandoffRule('Em đã chuyển 500.000đ')).toBe('payment_done');
+  expect(matchHandoffRule('Em đã chuyển sang lớp tối')).toBeNull();
   expect(matchHandoffRule('Tôi muốn hoàn lại tiền')).toBe('complaint');
   for (const question of [
     'Chuyển khoản như thế nào ạ?', 'Cho em hỏi học phí khoá 199k', 'Khoá này học online hay offline?',
@@ -102,6 +105,17 @@ test('in active mode a rule hit hands off after the bot reply when the bot wrote
     before: { botHandedOff: false },
     after: { mode: 'active', jevMode: 'off', rule: 'payment_done', jev: null, decided: { layer: 'rule', category: 'payment_done' }, applied: true },
   }]);
+});
+
+test('a 199k payment is left to the bot and its own rules, while its HANDOFF line still applies', async () => {
+  expect(['199k', 'đã ck 199K', '199.000đ', '199,000', '199 nghìn', '199 ngàn'].every(mentions199k)).toBe(true);
+  expect(['1199k', '199', '199 người', '2199.000'].some(mentions199k)).toBe(false);
+  const conv = await turn('Em chuyển khoản 199k rồi nhé', 'Dạ em ghi nhận, Anh/Chị gửi giúp em ảnh biên lai ạ', active);
+  expect(conv.mode).toBe('ai');
+  expect((await checks())[0]!.after).toMatchObject({ decided: { layer: 'rule', category: 'payment_done' }, held: 'payment_199k', applied: false });
+
+  const second = await turn('Đây ạ, em đã chuyển 199.000đ', 'Dạ em đối soát rồi báo lại ạ\n[HANDOFF: Khách đã CK 199k]', active);
+  expect(second).toMatchObject({ mode: 'human', handoff_reason: 'Khách đã CK 199k' });
 });
 
 test('in shadow mode the check is only logged and the conversation stays with the bot', async () => {

@@ -2,7 +2,7 @@ import type { ChannelKind, CommandKind, ConversationMode } from '@abm/contracts'
 import type { Actor, Env } from '../env';
 import { autoAssignOnHandoff, linkBase, slaDueSql } from './assignment';
 import { commandInsertStatement, enqueueCommand, type CommandTarget } from './dispatcher';
-import { HANDOFF_CATEGORIES, decideHandoff, decisionMode } from './decision-layer';
+import { HANDOFF_CATEGORIES, decideHandoff, decisionMode, mentions199k } from './decision-layer';
 import { enqueueExtraction } from './intake';
 import type { StaffMedia } from './media';
 import { filenameForKey } from './media';
@@ -557,9 +557,10 @@ export async function applyCompletionResult(db: D1Database, env: HandoffCheckEnv
     }
     return { workerCommandQueued: false };
   }
+  let registrationConfirmed = false;
   if (conv.channel === 'zalo_oa' && text) {
     try {
-      assertRegistrationPolicyOutput(
+      registrationConfirmed = assertRegistrationPolicyOutput(
         { reply: text, handoff: Boolean(marker) },
         conv.registration_policy === 1,
         conv.registration_group_url ? `- Link nhóm Zalo chính xác: ${conv.registration_group_url}` : '',
@@ -585,7 +586,10 @@ export async function applyCompletionResult(db: D1Database, env: HandoffCheckEnv
   const customerText = payload?.customerText;
   // A turn of attachments only has no words to check.
   if (customerText && customerText.split('\n').some((line) => line !== ATTACHMENT_ONLY_TEXT)) {
-    return { workerCommandQueued, handoffCheck: () => checkHandoff(db, env, conv, customerText, Boolean(marker), origin) };
+    return {
+      workerCommandQueued,
+      handoffCheck: () => checkHandoff(db, env, conv, customerText, { botHandedOff: Boolean(marker), registrationConfirmed }, origin),
+    };
   }
   return { workerCommandQueued };
 }
@@ -596,17 +600,25 @@ type HandoffCheckEnv = Pick<Env, 'APP_URL' | 'HANDOFF_NET_MODE' | 'JEV_INTENT_MO
  * Checks the customer's turn on its own after the bot replied (decision-layer.ts) and logs each check to the audit
  * log without message text. In `active` mode a turn that needs a person is handed off when the bot did not hand off.
  * A failure is logged and never touches the reply already queued.
+ *
+ * A 199k payment keeps its own rules: the bot confirms the registration with the program name and group link, and
+ * that confirmation never goes with a handoff (zalo-oa-registration-guard.ts). So the check holds back when the reply
+ * confirmed a registration, and leaves a payment turn to the bot when it names 199k or the account runs the 199k policy.
  */
-async function checkHandoff(db: D1Database, env: HandoffCheckEnv, conv: ConversationRow, customerText: string, botHandedOff: boolean,
-  origin: string | undefined): Promise<FlowOutcome> {
+async function checkHandoff(db: D1Database, env: HandoffCheckEnv, conv: ConversationRow, customerText: string,
+  reply: { botHandedOff: boolean; registrationConfirmed: boolean }, origin: string | undefined): Promise<FlowOutcome> {
   const mode = decisionMode(env.HANDOFF_NET_MODE);
   if (mode === 'off') return { workerCommandQueued: false };
+  const { botHandedOff } = reply;
   let outcome: FlowOutcome = { workerCommandQueued: false };
   try {
     // Once the bot has handed off in active mode, Jev's answer could change nothing; shadow still asks, for comparison.
     const decision = await decideHandoff(env, customerText, !(botHandedOff && mode === 'active'));
+    const held = reply.registrationConfirmed ? 'registration_confirmed'
+      : decision.decided?.category === 'payment_done' && (conv.registration_policy === 1 || mentions199k(customerText)) ? 'payment_199k'
+        : null;
     let handoffError: string | null = null;
-    if (mode === 'active' && !botHandedOff && decision.decided) {
+    if (mode === 'active' && !botHandedOff && !held && decision.decided) {
       try {
         outcome = await handoff(db, env, conv.id, HANDOFF_CATEGORIES[decision.decided.category].reason, origin, { onlyFromAi: true });
       } catch (error) {
@@ -616,7 +628,7 @@ async function checkHandoff(db: D1Database, env: HandoffCheckEnv, conv: Conversa
     // `applied` is what happened: false when staff had already taken the conversation or the handoff failed.
     await auditStatement(db, null, 'inbox.handoffCheck', conv.id, { botHandedOff }, {
       mode, jevMode: decisionMode(env.JEV_INTENT_MODE), rule: decision.rule, jev: decision.jev ?? null, decided: decision.decided,
-      applied: outcome.workerCommandQueued, ...(handoffError ? { handoffError } : {}),
+      applied: outcome.workerCommandQueued, ...(held ? { held } : {}), ...(handoffError ? { handoffError } : {}),
     }, new Date().toISOString()).run();
   } catch (error) {
     console.error('handoff_check_error', error instanceof Error ? error.message : 'unknown');

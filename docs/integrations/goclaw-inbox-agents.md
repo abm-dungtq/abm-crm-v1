@@ -61,6 +61,7 @@ Các trường hợp bot nhường cho người:
 - **Dữ liệu ra ngoài.** Lời khách được gửi sang TypeSafe sau khi thay email, số điện thoại và dãy số dài (số tài khoản, mã) bằng `[email]`, `[phone]`, `[number]`. Tên và nội dung khác vẫn đi qua. TypeSafe chỉ cam kết không lưu dữ liệu với gói enterprise.
 - Không bao giờ chặn câu trả lời của bot. Jev lỗi, quá giờ, thiếu key hay lỗi 5 lần liên tiếp (ngắt 30 giây) đều nghĩa là "không quyết định".
 - Khi bot đã tự HANDOFF, lý do của bot được giữ; lớp này chỉ ghi nhật ký.
+- **Chuyển 199k vẫn theo quy tắc cũ.** Lớp này không tự chuyển người, và nhật ký ghi `held`, trong hai trường hợp. Thứ nhất, bot vừa gửi câu xác nhận đăng ký hợp lệ (`registration_confirmed`), vì xác nhận đăng ký không bao giờ đi kèm chuyển người. Thứ hai, lượt "đã chuyển khoản" có nhắc 199k (199k, 199.000đ, 199 nghìn) hoặc tài khoản đang bật chính sách 199k (`payment_199k`). Khi đó bot tự quyết: xác nhận, xin biên lai, hoặc tự viết HANDOFF như trước.
 
 Chế độ (biến trong `apps/crm/wrangler.jsonc`), mỗi biến là `off`, `shadow` hoặc `active`. Từ 19/10/2026 cả hai biến để `active` theo quyết định của chủ dự án, không qua giai đoạn `shadow`:
 

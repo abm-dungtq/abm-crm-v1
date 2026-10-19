@@ -51,7 +51,9 @@ const NONE_CRITERIA = 'Anything else: questions about programs and their content
  */
 const RULES: ReadonlyArray<{ category: HandoffCategory; re: RegExp; unless?: RegExp }> = [
   { category: 'payment_done', re: /\b(da|vua|moi) (chuyen khoan|ck|thanh toan|chuyen tien|dong tien|nop tien)\b/, unless: /\b(neu|chua)\b/ },
-  { category: 'payment_done', re: /\b(chuyen khoan|ck|chuyen tien) (roi|xong)\b/, unless: /\b(neu|chua)\b/ },
+  // An amount or a short object may sit in between: "ck 199k rồi", "chuyển khoản cho em rồi".
+  { category: 'payment_done', re: /\b(chuyen khoan|ck|chuyen tien)( [\w.,]+){0,3} (roi|xong)\b/, unless: /\b(neu|chua)\b/ },
+  { category: 'payment_done', re: /\b(da|vua|moi) chuyen (khoan )?\d/, unless: /\b(neu|chua)\b/ },
   { category: 'payment_done', re: /\b(gui|anh|chup|day la) (bill|bien lai|uy nhiem chi)\b/ },
   { category: 'wants_human', re: /\b(gap|noi chuyen voi|ket noi voi) (nguoi that|nhan vien|tu van vien|nguoi tu van|quan ly|admin)\b/ },
   { category: 'complaint', re: /\bkhieu nai\b/ },
@@ -68,6 +70,11 @@ export function foldVietnamese(text: string): string {
 export function matchHandoffRule(text: string): HandoffCategory | null {
   const folded = foldVietnamese(text);
   return RULES.find((rule) => rule.re.test(folded) && !rule.unless?.test(folded))?.category ?? null;
+}
+
+/** True when the text names the 199k program price: "199k", "199.000đ", "199 nghìn". */
+export function mentions199k(text: string): boolean {
+  return /(^|[^\d])199\s*(k|nghin|ngan|[.,]?000\s*(d|dong|vnd)?)(?![\p{L}\d])/u.test(foldVietnamese(text));
 }
 
 /**

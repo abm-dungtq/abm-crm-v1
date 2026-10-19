@@ -2,7 +2,7 @@ import { env } from 'cloudflare:test';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import seedSql from '../seed/demo.sql?raw';
 import app from '../src/worker/index';
-import { applyCompletionResult } from '../src/worker/inbox/conversation-flow';
+import { applyCompletionResult, asCompletionPayload } from '../src/worker/inbox/conversation-flow';
 import { claimCommands } from '../src/worker/inbox/dispatcher';
 import { runScheduled } from '../src/worker/inbox/scheduled';
 import { processWorkerCommands } from '../src/worker/inbox/worker-commands';
@@ -970,6 +970,32 @@ test('a registration confirmation with the wrong group link is not sent and hand
   expect(system.body.startsWith('Chưa gửi (kiểm tra 199k):')).toBe(true);
   expect(system.body).toContain(reply);
   expect(await commands('send_lark')).toHaveLength(1);
+});
+
+test('a 199k payment keeps the registration rules: the handoff check never hands off a confirmed or 199k-policy turn', async () => {
+  const activeEnv = { ...testEnv, HANDOFF_NET_MODE: 'active' };
+  const handoffChecks = () => db.prepare("SELECT after_json FROM audit_log WHERE command = 'inbox.handoffCheck' ORDER BY created_at")
+    .all<{ after_json: string }>().then((r) => r.results.map((row) => JSON.parse(row.after_json)));
+  await db.prepare('UPDATE channel_account SET registration_policy = 1, registration_group_url = ? WHERE id = ?')
+    .bind('https://zalo.me/g/abc123', 'ca-oa').run();
+  const conv = await customerTurn('Em gửi bill chuyển khoản rồi ạ');
+  const [pending] = await commands('run_completion');
+  const reply = 'Anh/chị đã đăng ký thành công chương trình Xây dựng Bộ não thứ hai & Đội quân Trợ lý AI cá nhân hóa. Mời vào nhóm: https://zalo.me/g/abc123';
+  const confirmed = await applyCompletionResult(db, activeEnv, conv.id, reply, undefined, asCompletionPayload(pending.payload));
+  await confirmed.handoffCheck?.();
+  expect(await commands('send_zalo_oa')).toHaveLength(1);
+  expect((await conversation()).mode).toBe('ai');
+
+  // The bot asks for the receipt instead of confirming: on a 199k-policy account the payment turn is still left to the bot.
+  const asking = await applyCompletionResult(db, activeEnv, conv.id, 'Dạ Anh/Chị gửi giúp em ảnh biên lai nhé', undefined,
+    asCompletionPayload(pending.payload));
+  await asking.handoffCheck?.();
+  expect((await conversation()).mode).toBe('ai');
+  expect(await commands('send_lark')).toHaveLength(0);
+  expect((await handoffChecks()).map((after) => [after.decided?.category, after.held, after.applied])).toEqual([
+    ['payment_done', 'registration_confirmed', false],
+    ['payment_done', 'payment_199k', false],
+  ]);
 });
 
 test('a processing error answers 503 and the same event twice stores one message', async () => {
