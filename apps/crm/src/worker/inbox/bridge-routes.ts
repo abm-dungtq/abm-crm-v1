@@ -224,6 +224,8 @@ bridgeRoutes.post('/commands/:id/result', async (c) => {
     const outcome = await applyCompletionResult(db, c.env, row.conversation_id, result.text ?? '', new URL(c.req.url).origin,
       { ...payload, commandId: row.id });
     if (outcome.workerCommandQueued) await background(c, processWorkerCommands(c.env));
+    const check = outcome.handoffCheck;
+    if (check) await background(c, check().then((after) => (after.workerCommandQueued ? processWorkerCommands(c.env) : undefined)));
   } else if (SEND_KINDS.has(row.kind)) {
     const messageId = (command.payload as { messageId?: unknown } | null)?.messageId;
     if (typeof messageId === 'string') await markMessageSent(db, messageId, result.externalMsgId ?? null);

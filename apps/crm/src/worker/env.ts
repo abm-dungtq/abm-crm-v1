@@ -37,6 +37,16 @@ export interface Env {
   STREAM_ACCOUNT_ID: string;
   STREAM_API_TOKEN?: string;
   CONTENT_SIGNING_SECRET?: string;
+  /** Whether the handoff check on customer turns is `off`, logged only (`shadow`) or acted on (`active`). */
+  HANDOFF_NET_MODE?: string;
+  /** Whether TypeSafe Jev's answer is not asked (`off`), logged only (`shadow`) or used (`active`) by that check. */
+  JEV_INTENT_MODE?: string;
+  /** Minimum Jev confidence, 0 to 1, for its answer to count. */
+  JEV_CONFIDENCE?: string;
+  /** Pinned Jev model version. */
+  JEV_MODEL?: string;
+  /** TypeSafe API key. Customer text is masked for emails, phones and long numbers before it is sent. */
+  TYPESAFE_API_KEY?: string;
 }
 
 /** Authenticated principal. Always resolved server-side; never taken from a request body. */

@@ -2,6 +2,7 @@ import type { ChannelKind, CommandKind, ConversationMode } from '@abm/contracts'
 import type { Actor, Env } from '../env';
 import { autoAssignOnHandoff, linkBase, slaDueSql } from './assignment';
 import { commandInsertStatement, enqueueCommand, type CommandTarget } from './dispatcher';
+import { HANDOFF_CATEGORIES, decideHandoff, decisionMode } from './decision-layer';
 import { enqueueExtraction } from './intake';
 import type { StaffMedia } from './media';
 import { filenameForKey } from './media';
@@ -45,6 +46,8 @@ export interface CompletionResultPayload {
   triggerMessageId?: string;
   replyTo?: GroupReplyTarget;
   commandId?: string;
+  /** The customer's own lines of a direct reply turn, without staff context or profile prefixes. */
+  customerText?: string;
 }
 
 /** Reads the group-reply fields of a command payload. A missing or odd payload yields an empty object. */
@@ -63,6 +66,7 @@ export function asCompletionPayload(value: unknown): CompletionResultPayload {
     triggerMessageId: typeof raw.triggerMessageId === 'string' ? raw.triggerMessageId : undefined,
     replyTo,
     commandId: typeof raw.commandId === 'string' ? raw.commandId : undefined,
+    customerText: typeof raw.customerText === 'string' ? raw.customerText : undefined,
   };
 }
 
@@ -212,6 +216,9 @@ export const cancelPendingGroupReplies = (db: D1Database, conversationId: string
     WHERE conversation_id=? AND kind='run_completion' AND status='pending' AND json_extract(payload_json,'$.purpose')='reply'`)
     .bind(now, conversationId);
 
+/** SQL that appends the bound customer line to a pending reply's `customerText`; a reply queued without one starts it. */
+const APPEND_CUSTOMER_TEXT = "COALESCE(json_extract(payload_json, '$.customerText') || char(10), '') || ?";
+
 /**
  * Queues the bot's reply to a customer message: extends the pending reply of the conversation with this
  * text and pushes its run time back 8 seconds, or queues a new one. Pending staff context is prefixed once
@@ -221,7 +228,8 @@ export async function scheduleCompletion(db: D1Database, conversationId: string,
   const conv = await loadConversation(db, conversationId);
   if (!conv || !botMayReply(conv)) return false;
   const context = conv.staff_context_pending ?? '';
-  const turn = (context ? `[Nhân viên đã trao đổi: ${context}]\n` : '') + (text || ATTACHMENT_ONLY_TEXT);
+  const customerText = text || ATTACHMENT_ONLY_TEXT;
+  const turn = (context ? `[Nhân viên đã trao đổi: ${context}]\n` : '') + customerText;
   const runAt = new Date(now.getTime() + COMPLETION_DELAY_MS);
   const nowIso = now.toISOString();
   let extended;
@@ -231,22 +239,23 @@ export async function scheduleCompletion(db: D1Database, conversationId: string,
       .bind(conversationId).first<{ images: unknown }>();
     const images = mergeOaImages(pending?.images, await messageImages(db, messageId));
     extended = await db.prepare(`UPDATE channel_command
-        SET payload_json = json_set(payload_json, '$.text', json_extract(payload_json, '$.text') || char(10) || ?, '$.images', json(?)),
-          next_run_at = ?, updated_at = ?
+        SET payload_json = json_set(payload_json, '$.text', json_extract(payload_json, '$.text') || char(10) || ?, '$.images', json(?),
+            '$.customerText', ${APPEND_CUSTOMER_TEXT}), next_run_at = ?, updated_at = ?
       WHERE conversation_id = ? AND kind = 'run_completion' AND status = 'pending' AND json_extract(payload_json, '$.purpose') = 'reply'`)
-      .bind(turn, JSON.stringify(images), runAt.toISOString(), nowIso, conversationId).run();
+      .bind(turn, JSON.stringify(images), customerText, runAt.toISOString(), nowIso, conversationId).run();
   } else {
     extended = await db.prepare(`UPDATE channel_command
-        SET payload_json = json_set(payload_json, '$.text', json_extract(payload_json, '$.text') || char(10) || ?), next_run_at = ?, updated_at = ?
+        SET payload_json = json_set(payload_json, '$.text', json_extract(payload_json, '$.text') || char(10) || ?,
+            '$.customerText', ${APPEND_CUSTOMER_TEXT}), next_run_at = ?, updated_at = ?
       WHERE conversation_id = ? AND kind = 'run_completion' AND status = 'pending' AND json_extract(payload_json, '$.purpose') = 'reply'`)
-      .bind(turn, runAt.toISOString(), nowIso, conversationId).run();
+      .bind(turn, customerText, runAt.toISOString(), nowIso, conversationId).run();
   }
   if (extended.meta.changes === 0) {
     const images = conv.channel === 'zalo_oa' ? await messageImages(db, messageId) : undefined;
     await enqueueCommand(db, {
       kind: 'run_completion', target: 'bridge', channelAccountId: conv.channel_account_id, conversationId,
       payload: {
-        agentKey: conv.agent_key, userId: goclawUserId(conv), text: oaProfilePrefix(conv) + turn, conversationId, purpose: 'reply',
+        agentKey: conv.agent_key, userId: goclawUserId(conv), text: oaProfilePrefix(conv) + turn, customerText, conversationId, purpose: 'reply',
         // Only a personal Zalo 1-1 thread has a user id the bridge can resolve to a profile name and gender.
         ...(conv.channel === 'zalo' && conv.kind === 'direct' && conv.external_thread_id
           ? { zaloUserId: conv.external_thread_id }
@@ -345,6 +354,11 @@ async function queueOutgoing(db: D1Database, conv: ConversationRow, message: Out
 export interface FlowOutcome {
   /** True when a command for the Worker itself was queued; the caller runs processWorkerCommands. */
   workerCommandQueued: boolean;
+  /**
+   * The check of the customer's turn after a bot reply. The caller runs it after sending, so the reply never waits
+   * for it, and runs processWorkerCommands again when its outcome queued a Worker command. It never throws.
+   */
+  handoffCheck?: () => Promise<FlowOutcome>;
 }
 
 /**
@@ -525,8 +539,9 @@ async function applyGroupCompletion(db: D1Database, env: Pick<Env, 'APP_URL'>, c
  * Applies GoClaw's reply: strips handoff marker lines and sends the remaining text while the bot may still reply
  * (rule 1, re-checked now because the switch or the mode can change while GoClaw thinks). Otherwise the text is
  * kept as a cancelled system note and nothing is sent. A marker hands off only after a reply that was allowed.
+ * After an allowed reply the customer's own turn is checked as well, so a missing marker can still hand off.
  */
-export async function applyCompletionResult(db: D1Database, env: Pick<Env, 'APP_URL'>, conversationId: string, replyText: string,
+export async function applyCompletionResult(db: D1Database, env: HandoffCheckEnv, conversationId: string, replyText: string,
   origin?: string, payload?: CompletionResultPayload): Promise<FlowOutcome> {
   const conv = await loadConversation(db, conversationId);
   if (!conv) return { workerCommandQueued: false };
@@ -567,7 +582,46 @@ export async function applyCompletionResult(db: D1Database, env: Pick<Env, 'APP_
     const outcome = await handoff(db, env, conv.id, marker[1]!.trim(), origin);
     workerCommandQueued ||= outcome.workerCommandQueued;
   }
+  const customerText = payload?.customerText;
+  // A turn of attachments only has no words to check.
+  if (customerText && customerText.split('\n').some((line) => line !== ATTACHMENT_ONLY_TEXT)) {
+    return { workerCommandQueued, handoffCheck: () => checkHandoff(db, env, conv, customerText, Boolean(marker), origin) };
+  }
   return { workerCommandQueued };
+}
+
+type HandoffCheckEnv = Pick<Env, 'APP_URL' | 'HANDOFF_NET_MODE' | 'JEV_INTENT_MODE' | 'JEV_CONFIDENCE' | 'JEV_MODEL' | 'TYPESAFE_API_KEY'>;
+
+/**
+ * Checks the customer's turn on its own after the bot replied (decision-layer.ts) and logs each check to the audit
+ * log without message text. In `active` mode a turn that needs a person is handed off when the bot did not hand off.
+ * A failure is logged and never touches the reply already queued.
+ */
+async function checkHandoff(db: D1Database, env: HandoffCheckEnv, conv: ConversationRow, customerText: string, botHandedOff: boolean,
+  origin: string | undefined): Promise<FlowOutcome> {
+  const mode = decisionMode(env.HANDOFF_NET_MODE);
+  if (mode === 'off') return { workerCommandQueued: false };
+  let outcome: FlowOutcome = { workerCommandQueued: false };
+  try {
+    // Once the bot has handed off in active mode, Jev's answer could change nothing; shadow still asks, for comparison.
+    const decision = await decideHandoff(env, customerText, !(botHandedOff && mode === 'active'));
+    let handoffError: string | null = null;
+    if (mode === 'active' && !botHandedOff && decision.decided) {
+      try {
+        outcome = await handoff(db, env, conv.id, HANDOFF_CATEGORIES[decision.decided.category].reason, origin, { onlyFromAi: true });
+      } catch (error) {
+        handoffError = error instanceof Error ? error.message : 'unknown';
+      }
+    }
+    // `applied` is what happened: false when staff had already taken the conversation or the handoff failed.
+    await auditStatement(db, null, 'inbox.handoffCheck', conv.id, { botHandedOff }, {
+      mode, jevMode: decisionMode(env.JEV_INTENT_MODE), rule: decision.rule, jev: decision.jev ?? null, decided: decision.decided,
+      applied: outcome.workerCommandQueued, ...(handoffError ? { handoffError } : {}),
+    }, new Date().toISOString()).run();
+  } catch (error) {
+    console.error('handoff_check_error', error instanceof Error ? error.message : 'unknown');
+  }
+  return outcome;
 }
 
 /** Looks up a conversation of the actor's organization. */

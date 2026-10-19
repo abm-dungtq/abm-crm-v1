@@ -17,7 +17,13 @@
     "APP_URL": "https://abm-crm-eval.ngulongyquan.workers.dev",
     // Filled in phase 08 when LMS content Worker and Cloudflare Stream are provisioned.
     "LMS_CONTENT_ORIGIN": "https://abm-lms-content.ngulongyquan.workers.dev",
-    "STREAM_ACCOUNT_ID": ""
+    "STREAM_ACCOUNT_ID": "",
+    // Handoff check on customer turns (src/worker/inbox/decision-layer.ts): off | shadow | active.
+    // Every check is logged to audit_log ('inbox.handoffCheck'); shadow only logs. TYPESAFE_API_KEY is a secret.
+    "HANDOFF_NET_MODE": "active",
+    "JEV_INTENT_MODE": "active",
+    "JEV_CONFIDENCE": "0.75",
+    "JEV_MODEL": "jev-1.13.0"
   },
   "d1_databases": [
     {

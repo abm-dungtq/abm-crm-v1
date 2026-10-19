@@ -7,7 +7,11 @@ export default defineConfig(async () => ({
     remoteBindings: false,
     miniflare: {
       // Tests default to the evaluation identity path; password-mode tests opt in per request.
-      bindings: { TEST_MIGRATIONS: await readD1Migrations('./migrations'), AUTH_MODE: '', DEMO_EXPORT: process.env.DEMO_EXPORT ?? '' },
+      // The handoff check is off and has no TypeSafe key, so no test reaches the network; its tests opt in per call.
+      bindings: {
+        TEST_MIGRATIONS: await readD1Migrations('./migrations'), AUTH_MODE: '', DEMO_EXPORT: process.env.DEMO_EXPORT ?? '',
+        HANDOFF_NET_MODE: '', JEV_INTENT_MODE: '', TYPESAFE_API_KEY: '',
+      },
     },
   })],
   test: { include: ['test/**/*.test.ts'] },

@@ -53,6 +53,26 @@ Các trường hợp bot nhường cho người:
 - Các dữ kiện bộ v8 ghi "cần cập nhật" (quà tặng, đầu mối, SLA, case theo ngành).
 - Khách muốn gặp người thật.
 
+**Lớp kiểm tra chuyển người (hội thoại 1-1).** Bot có thể quên dòng HANDOFF, nên sau khi áp dụng câu trả lời của bot, Worker tự đọc lời khách của lượt đó (`customerText` trong payload `run_completion`, không gồm ngữ cảnh nhân viên) và quyết định riêng. Mã ở `apps/crm/src/worker/inbox/decision-layer.ts`.
+
+- Lượt kiểm tra chạy sau khi tin trả lời của bot đã được đẩy đi, nên không làm tin trả lời chậm lại. Lượt chỉ có tệp đính kèm thì bỏ qua.
+- Luật cứng quyết định trước, và chỉ bắt câu khẳng định: báo đã chuyển khoản hoặc gửi bill, đòi gặp người thật hoặc quản lý, khiếu nại hoặc đòi hoàn tiền, không vào được. Câu hỏi về chính sách ("hoàn tiền thế nào") và câu điều kiện ("nếu em đã chuyển khoản") để Jev xét. Luật so trên chữ đã bỏ dấu.
+- Câu luật không bắt được thì hỏi TypeSafe Jev (`POST https://api.typesafe.ai/v1/systemone`, model ghim `jev-1.13.0`, chờ tối đa 1,5 giây). Jev chọn một trong các loại: `payment_done`, `wants_human`, `complaint`, `access_problem`, `schedule_or_link`, `special_pricing`, `none`. Câu trả lời chỉ được tính khi độ tự tin đạt `JEV_CONFIDENCE` (mặc định 0,75).
+- **Dữ liệu ra ngoài.** Lời khách được gửi sang TypeSafe sau khi thay email, số điện thoại và dãy số dài (số tài khoản, mã) bằng `[email]`, `[phone]`, `[number]`. Tên và nội dung khác vẫn đi qua. TypeSafe chỉ cam kết không lưu dữ liệu với gói enterprise.
+- Không bao giờ chặn câu trả lời của bot. Jev lỗi, quá giờ, thiếu key hay lỗi 5 lần liên tiếp (ngắt 30 giây) đều nghĩa là "không quyết định".
+- Khi bot đã tự HANDOFF, lý do của bot được giữ; lớp này chỉ ghi nhật ký.
+
+Chế độ (biến trong `apps/crm/wrangler.jsonc`), mỗi biến là `off`, `shadow` hoặc `active`. Từ 19/10/2026 cả hai biến để `active` theo quyết định của chủ dự án, không qua giai đoạn `shadow`:
+
+| Biến | Ý nghĩa |
+| --- | --- |
+| `HANDOFF_NET_MODE` | `shadow`: chỉ ghi nhật ký. `active`: chuyển người thật khi bot không tự chuyển |
+| `JEV_INTENT_MODE` | `off`: không hỏi Jev. `shadow`: hỏi và ghi lại, không tính. `active`: tính câu trả lời của Jev |
+
+Key nằm trong secret `TYPESAFE_API_KEY` (`wrangler secret put TYPESAFE_API_KEY`; máy local dùng `apps/crm/.dev.vars`). Mỗi lần kiểm tra ghi một dòng `audit_log` với `command = 'inbox.handoffCheck'`: luật nào khớp, Jev chọn gì và độ tự tin, kết quả, có áp dụng không. Dòng này không chứa lời khách. So sánh với lý do HANDOFF của bot trước khi chuyển sang `active`.
+
+Trước khi đổi ngưỡng hay chuyển chế độ, chạy `node --env-file=.dev.vars scripts/eval-handoff-check.mjs` trong `apps/crm`. Script chấm luật và Jev trên các câu mẫu ở `scripts/fixtures/handoff-labels.jsonl`. File này chỉ chứa câu tự viết, không đưa dữ liệu khách vào.
+
 **Dựng, áp dụng và thử.** Các script nằm ở `D:\Goclaw\plans\261013-sale-tu-van-kb\`:
 
 - Chạy `node apply-kb-v8.mjs` để xem bản dựng trong `out/`.

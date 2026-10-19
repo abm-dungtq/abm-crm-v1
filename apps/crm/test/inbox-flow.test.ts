@@ -74,7 +74,7 @@ test('a customer message in ai mode queues one delayed reply that later messages
   const [first] = await messages(conv.id);
   const [command] = await commands('run_completion');
   expect(command).toMatchObject({ target: 'bridge', status: 'pending', channel_account_id: 'ca-1', conversation_id: conv.id, dedupe_key: `completion:${first.id}` });
-  expect(command.payload).toEqual({ agentKey: 'sales-bot', userId: 'zalo:zalo-acc-1:cust-1', text: 'Cho em hỏi lịch học', conversationId: conv.id, purpose: 'reply', zaloUserId: 'cust-1' });
+  expect(command.payload).toEqual({ agentKey: 'sales-bot', userId: 'zalo:zalo-acc-1:cust-1', text: 'Cho em hỏi lịch học', customerText: 'Cho em hỏi lịch học', conversationId: conv.id, purpose: 'reply', zaloUserId: 'cust-1' });
   const runAt = Date.parse(command.next_run_at);
   expect(runAt).toBeGreaterThanOrEqual(before + 8000);
   expect(runAt).toBeLessThanOrEqual(after + 8000);

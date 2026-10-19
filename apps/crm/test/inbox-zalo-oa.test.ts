@@ -392,6 +392,8 @@ test('a profile name is prefixed once, and a burst keeps at most three zdn image
   expect(merged.payload.images).toEqual([ZDN_A, ZDN_B]);
   expect(merged.payload.text.match(/Hồ sơ Zalo của khách/g)).toHaveLength(1);
   expect(merged.payload.text).toContain('Xin chào');
+  // The handoff check reads only the customer's lines: no profile prefix, the image-only message as its placeholder.
+  expect(merged.payload.customerText).toBe('Xin chào\n[Tệp đính kèm]');
   expect(merged.payload.text).toContain('[Tệp đính kèm]');
   expect((await conversation()).display_name).toBe('Mai Trần');
 });

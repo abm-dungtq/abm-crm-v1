@@ -1,0 +1,42 @@
+{"text":"Em đã chuyển khoản 199k rồi nhé, anh kiểm tra giúp em","label":"payment_done"}
+{"text":"ck xong roi a","label":"payment_done"}
+{"text":"Em gửi ảnh bill chuyển tiền ạ","label":"payment_done"}
+{"text":"Ok em chốt đăng ký khoá này, làm thủ tục giúp em","label":"payment_done"}
+{"text":"Mình thanh toán xong rồi, khi nào được vào học","label":"payment_done"}
+{"text":"Cho em nói chuyện với người thật được không","label":"wants_human"}
+{"text":"Bạn là bot à? Mình muốn gặp tư vấn viên","label":"wants_human"}
+{"text":"Gọi lại cho chị số này nhé, chị bận không nhắn được","label":"wants_human"}
+{"text":"có ai trực ở đó không, cần nói chuyện trực tiếp","label":"wants_human"}
+{"text":"Tôi muốn khiếu nại, đóng tiền mà chưa ai liên hệ","label":"complaint"}
+{"text":"Làm ăn kiểu gì vậy, 3 ngày không ai trả lời","label":"complaint"}
+{"text":"Trả lại tiền cho tôi, khoá học không như quảng cáo","label":"complaint"}
+{"text":"lừa đảo à","label":"complaint"}
+{"text":"Em không đăng nhập được vào trang học","label":"access_problem"}
+{"text":"Link video bị lỗi, bấm vào không xem được","label":"access_problem"}
+{"text":"Mật khẩu anh gửi không dùng được","label":"access_problem"}
+{"text":"em chua duoc add vao nhom zalo lop hoc","label":"access_problem"}
+{"text":"Khi nào khai giảng lớp tiếp theo ạ","label":"schedule_or_link"}
+{"text":"Cho em xin link zoom buổi tối nay","label":"schedule_or_link"}
+{"text":"Lớp offline học ở địa chỉ nào vậy","label":"schedule_or_link"}
+{"text":"Đặt lịch tư vấn 1-1 với chuyên gia được không","label":"schedule_or_link"}
+{"text":"lich hoc thu may vay em","label":"schedule_or_link"}
+{"text":"Có giảm giá cho nhóm 5 người không","label":"special_pricing"}
+{"text":"Trả góp được không em","label":"special_pricing"}
+{"text":"Công ty anh muốn đào tạo inhouse cho 30 nhân sự, báo giá giúp anh","label":"special_pricing"}
+{"text":"Có mã ưu đãi nào không","label":"special_pricing"}
+{"text":"Khoá học này dạy những gì vậy?","label":"none"}
+{"text":"Học phí khoá 199k gồm những gì","label":"none"}
+{"text":"Chuyển khoản như thế nào ạ","label":"none"}
+{"text":"Cảm ơn em nhiều nhé","label":"none"}
+{"text":"Mình làm kế toán thì có học được không","label":"none"}
+{"text":"AI có thay thế được nhân viên không","label":"none"}
+{"text":"Xin chào","label":"none"}
+{"text":"Khoá này khác gì khoá chuyên sâu","label":"none"}
+{"text":"ok em","label":"none"}
+{"text":"Cho mình xin tài liệu tham khảo trước","label":"none"}
+{"text":"Chính sách hoàn tiền thế nào ạ","label":"none"}
+{"text":"Có cam kết hoàn lại tiền không","label":"none"}
+{"text":"Bên mình có lừa đảo không vậy","label":"none"}
+{"text":"Có xuất hoá đơn không, cần bill cho công ty","label":"none"}
+{"text":"Nếu em đã chuyển khoản thì bao lâu có link","label":"none"}
+{"text":"Có phải người thật không hay bot","label":"none"}
