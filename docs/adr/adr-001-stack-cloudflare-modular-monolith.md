@@ -26,7 +26,7 @@ GoClaw chỉ gọi tool/API theo credential; không truy cập DB, không là ng
 
 Đội sở hữu RBAC, migration, guarded write, restore và queue dedupe. Batch D1 chưa đủ chứng minh pattern nghiệp vụ; [ADR-003](adr-003-d1-guarded-write-pattern.md) còn proposed. Cloudflare dependency được chấp nhận, phải test remote trước pilot. Không triển khai production hoặc xây feature MVP1 trong phase này.
 
-Cập nhật: ADR-008 (sidecar Zalo), ADR-010 (dispatcher lệnh lease D1).
+Cập nhật: ADR-008 (sidecar Zalo), ADR-010 (dispatcher lệnh lease D1), ADR-012 (Durable Object `ChatHub` cho chat nội bộ, ngoài phạm vi MVP3).
 
 ## Bằng chứng/PoC
 

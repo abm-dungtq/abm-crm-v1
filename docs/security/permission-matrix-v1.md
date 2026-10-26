@@ -57,6 +57,18 @@ Nguồn: [ADR-007](../adr/adr-007-learner-pipeline-and-fees.md), [PRD học viê
 
 Quy tắc đi kèm: hết 3 tháng giữ mà khách chưa có lead thắng thì về hồ chung; khách đã thắng không nhả. Duyệt qua bot (Won/Lost của agent) giữ như B2B. Đồng ý `enrollment` là điều kiện xác nhận chỗ; các mục khác chỉ để ghi lại và xem. BGĐ đọc học phí, không ghi khoản phải thu hay tiền vào. Chỉ Admin sửa tài khoản ngân hàng nhận tiền.
 
+## Token MCP
+
+Nguồn: [ADR-012](../adr/adr-012-internal-chat-in-crm.md), [hướng dẫn kết nối agent](../guides/connect-ai-agents.md). Mọi token chạy với đúng quyền của người sở hữu (scope lead và việc như trên); vai trò vẫn lọc công cụ trước, rồi mức token lọc tiếp. Danh sách công cụ là `tools` trong `apps/crm/src/worker/mcp-tools.ts`.
+
+| Mức (`agent_token.scope`) | Ai cấp | Công cụ |
+| --- | --- | --- |
+| `legacy` | Script (`goclaw`, `lms-publish`, `crm-user:<id>`), không hết hạn | Mọi công cụ vai trò cho phép, kể cả công cụ ghi lead và các công cụ chat/việc |
+| `read` | Người dùng tự tạo, mặc định 90 ngày | `whoami`, `search_leads`, `get_lead`, `my_tasks`, `dashboard_summary`, `list_conversations`, `read_messages`, `search_messages`, `get_task` |
+| `read_tasks` | Người dùng tự tạo, mặc định 90 ngày | Như `read`, thêm `create_task`, `update_task`, `complete_task`, `comment_task` |
+
+Không mức nào gửi được tin vào chat nhóm hoặc chat riêng; `comment_task` chỉ ghi vào luồng của việc người đó xem được. Token tự tạo không sửa lead. Chat riêng có `agent_readable = 0` không bao giờ trả về. Công tắc tạm khóa bot chặn cả đọc chat lẫn ghi. Tối đa 5 token tự tạo đang dùng mỗi người; tài khoản bị khóa không tạo được token, tài khoản bị vô hiệu thì mọi token bị 401.
+
 ## Gate triển khai
 
 Ma trận này cần user review riêng ở phase 08; không ghi [APPROVED] khi chưa có trả lời thật. Sinh allow/deny tests cho từng ô đã cấp; test cross-user/team/department, critical capability, agent projection và REST/MCP parity theo [test strategy](../engineering/test-strategy.md). Danh sách phòng ban/nhóm/Leader bổ sung trước plan MVP1; các role/capability tương lai chốt trước plan tương ứng.

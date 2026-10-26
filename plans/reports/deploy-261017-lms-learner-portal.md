@@ -17,9 +17,13 @@ Kết quả: CRM, trang học và Worker nội dung đã chạy trên Cloudflare
 - Token đăng bài cấp cho `dungtq.ceo@gmail.com` (lưu `~/.abm/lms-publish-token`). Đăng cẩm nang BSR → chương trình `4f9dea8d-5f0c-4934-bb90-bc309fb49800`, phiên bản 1, 26 phần.
 - Trình duyệt: đăng nhập bằng mật khẩu mặc định → banner nhắc đổi, thẻ chương trình 0/26; trang bài học mở đúng phần `b2m1`, chuyển phần qua menu, ô "Video bài học" hiện "Chưa có video". Nội dung trả CSP `connect-src 'none'`, không có `Set-Cookie`. Ảnh: `assets/lms-release/`.
 
+## Nhập thử 200 dòng (17/10 14:01, user đồng ý)
+- Sao lưu trước: `exports/abm-crm-eval-before-import200-20261017.sql`, bookmark `000000c2-000000ee-00005107-4360a81ab6d4b96c4e5955fc2516b5b4`.
+- Lớp "LMS-200 (thử nhập)", file `apps/crm/seed/import-200-learners-sample.csv`: xem trước 238 ms, ghi 1.042 ms, 200 tài khoản mới, 0 lỗi. Không chạm giới hạn 50 truy vấn của gói Free, không cần chia nhỏ.
+- Đã xoá hết dữ liệu thử theo mã giao dịch: 200 contact, 400 contact_point, 200 lead, 1.600 lead_step, 200 enrollment, 200 consent, 200 learner_account, 400 activity, audit, idempotency, lớp, hợp đồng, khách hàng. Kiểm lại còn 0 dòng; `PRAGMA foreign_key_check` rỗng. Bộ đếm mã lead đã tăng 200 (mã lead mới sẽ nhảy số).
+
 ## Chưa làm
 - Video: chờ bật Stream, token Stream, account id, signing key, customer code.
-- Nhập thử 200 dòng giả trên D1 thật (giới hạn 50 truy vấn mỗi lần gọi ở gói Free): cần user đồng ý.
 - Đổi mật khẩu, hết hạn xem lại, màn hình CRM theo từng vai: đã có test tự động; chưa thử tay trên hệ thống thật.
 - Tuỳ chọn: luật WAF giới hạn đăng nhập theo IP.
 

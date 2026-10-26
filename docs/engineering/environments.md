@@ -16,7 +16,10 @@ Tên logical theo `abm-crm-<env>`; tài nguyên nhiều loại thêm suffix: `ab
 | --- | --- | --- |
 | `AUTH_MODE` | var | `password` bật đăng nhập mật khẩu ([ADR-006](../adr/adr-006-password-login.md)). Có giá trị bất kỳ thì mọi đường demo tắt. |
 | `DEMO_MODE` | var | `1` cho phép chọn người dùng demo bằng header. Chỉ dùng cho test và local khi `AUTH_MODE` trống; không đặt cùng `AUTH_MODE=password`. |
-| `LARK_APP_ID`, `LARK_APP_SECRET` | secret | App Lark của bot GoClaw, dùng để tra `open_id` theo email. Đặt bằng `npx wrangler secret put`; không ghi vào repo hay docs. |
+| `LARK_APP_ID`, `LARK_APP_SECRET` | secret | Không còn dùng từ 2026-10-26 ([ADR-012](../adr/adr-012-internal-chat-in-crm.md)); code không đọc nữa. Xóa khỏi Worker khi kiểm xong thông báo CRM (phase 07 bước 7.8). |
+| `CHAT_HUB` | Durable Object | Lớp `ChatHub` (SQLite, gói Free) chuyển tiếp sự kiện chat qua WebSocket; một hub cho mỗi tổ chức, không lưu tin. Migration DO `v1-chat-hub` trong `wrangler.jsonc`. |
+| `VAPID_PUBLIC_KEY` | var | Khóa công khai Web Push, nằm trong `wrangler.jsonc`. |
+| `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` | secret | Khóa riêng Web Push và `mailto:` email Admin. Bản gốc ở `~/.abm/vapid-private.txt` và `~/.abm/vapid-subject.txt` trên máy quản trị; không ghi vào repo hay docs. Đổi khóa thì mọi thiết bị phải bật lại thông báo. |
 
 ## Worker cổng học viên (LMS)
 

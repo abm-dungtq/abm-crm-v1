@@ -126,7 +126,7 @@ Nguồn: [PRD 22](../source-package/sources/PRD-ABM-CRM-Revenue-Customer-Operati
 | Program/CS | Notion/hệ cũ trước từng cutover; ABM sau verified migration |
 | Message nguồn | Kênh hoặc archive chuẩn theo retention; core giữ timeline/reference theo quyền |
 | Session/memory/trace agent | GoClaw; không phải nguồn nghiệp vụ chuẩn |
-| Chat nội bộ | Lark là nguồn, CRM giữ timeline/reference; GoClaw giữ session/memory, không phải nguồn nghiệp vụ |
+| Chat nội bộ | CRM là nguồn (ADR-012, 2026-10-25); GoClaw giữ session/memory, không phải nguồn nghiệp vụ |
 
 Retention và quyền xóa/ẩn danh/export áp theo QĐ5; không ingest toàn bộ hội thoại chỉ vì có thể. User xác nhận bảng SoR và không có nguồn nghiệp vụ bổ sung.
 

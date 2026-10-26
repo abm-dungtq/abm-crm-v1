@@ -1,3 +1,5 @@
+> Không còn dùng từ 2026-10-25, xem ADR-012.
+
 # Quy trình test Lark → CRM → báo cáo trên Lark
 
 Mục đích: kiểm tra một nhân viên nhắn bot trên Lark thì bot (GoClaw) ghi đúng dữ liệu vào CRM, **đúng tên người nhắn**, rồi trả kết quả lại trên Lark. Sau buổi test, người phụ trách đăng báo cáo tổng hợp vào nhóm Lark.

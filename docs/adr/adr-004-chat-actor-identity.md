@@ -3,6 +3,8 @@
 Trạng thái: proposed [ADR-PROPOSED]
 Ngày: 2026-10-03
 
+Cập nhật 2026-10-25: kênh Lark bỏ; bot nhân viên chạy trong chat CRM, khóa GoClaw `crm-user:<id>` (ADR-012).
+
 ## Bối cảnh
 
 Nhân viên liên kết một lần qua DM bot; mỗi nhóm Lark là một phòng ban theo [QĐ5](../decisions/business-decisions-v1.md). Build GoClaw thật đã patch nên mô tả upstream chưa đủ chứng minh sender identity. Link Lark docx tự fetch có thể đưa prompt injection vào tool context.
