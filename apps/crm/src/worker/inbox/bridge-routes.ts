@@ -1,8 +1,9 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { bridgeCommandResultSchema, bridgeEventsBodySchema } from '@abm/contracts';
 import type { z } from 'zod';
-import { background } from '../env';
+import { background, type Sink } from '../env';
+import { applyChatAgentFailure, applyChatAgentReply } from '../chat-agents';
 import { bridgeAuth, type BridgeBindings } from './bridge-auth';
 import {
   BOT_OFF, BOT_SEND_BLOCKED_SQL, BOT_SILENT_REASON, applyCompletionResult, asCompletionPayload, handOffSilentBot,
@@ -131,13 +132,18 @@ async function claimDeliverable(db: D1Database): Promise<ClaimedCommand[]> {
   return deliverable;
 }
 
+const bridgeSink = (c: Context<BridgeBindings>): Sink => ({
+  env: c.env,
+  waitUntil: (w) => { void background(c, w); },
+});
+
 bridgeRoutes.use('*', bodyLimit({ maxSize: MAX_BODY_BYTES }));
 bridgeRoutes.use('*', bridgeAuth);
 
 bridgeRoutes.post('/events', async (c) => {
   const input = parseBody(c.get('bridgeBody'), bridgeEventsBodySchema);
   if ('fields' in input) return c.json(invalid(input.fields), 422);
-  return c.json(ok(await ingestEvents(c.env.DB, input.data.events)));
+  return c.json(ok(await ingestEvents(c.env.DB, input.data.events, bridgeSink(c))));
 });
 
 bridgeRoutes.get('/media', async (c) => {
@@ -184,20 +190,24 @@ bridgeRoutes.post('/commands/:id/result', async (c) => {
 
   const payload = asCompletionPayload(command.payload);
   const purpose = row.kind === 'run_completion' ? (command.payload as { purpose?: unknown } | null)?.purpose : undefined;
+  const sink = bridgeSink(c);
   if (!result.ok) {
     const moved = await failSend(db, command, result.attempts, result.error || 'BRIDGE_ERROR');
     if (moved && row.kind === 'leave_zalo_group' && row.conversation_id) {
       await noteLeaveFailed(db, row.conversation_id, result.error || 'BRIDGE_ERROR');
     }
-    // The bot's reply failed for good. A direct chat is handed to people; a group only notifies Lark.
+    // The bot's reply failed for good. A direct chat is handed to people; a group only notifies the CRM inbox group.
     if (moved && result.attempts >= MAX_COMMAND_ATTEMPTS && purpose === 'reply' && row.conversation_id) {
       const kind = await db.prepare('SELECT kind FROM conversation WHERE id = ?').bind(row.conversation_id).first<{ kind: string }>();
       const origin = new URL(c.req.url).origin;
       const outcome = kind?.kind === 'group'
         ? await notifyGroupHelp(db, c.env, row.conversation_id, BOT_SILENT_REASON, payload.triggerMessageId, origin,
-            { commandId: row.id, replyTo: payload.replyTo })
-        : await handOffSilentBot(db, c.env, row.conversation_id, origin);
-      if (outcome.workerCommandQueued) await background(c, processWorkerCommands(c.env));
+            { commandId: row.id, replyTo: payload.replyTo }, sink)
+        : await handOffSilentBot(db, c.env, row.conversation_id, origin, sink);
+      if (outcome.workerCommandQueued) await background(c, processWorkerCommands(c.env, sink));
+    }
+    if (moved && result.attempts >= MAX_COMMAND_ATTEMPTS && purpose === 'chat') {
+      await applyChatAgentFailure(sink, db, row.id, command.payload);
     }
     return c.json(ok({ ignored: !moved }));
   }
@@ -206,11 +216,17 @@ bridgeRoutes.post('/commands/:id/result', async (c) => {
     const owned = await applyExtractionResult(db, { id: row.id, attempts: result.attempts, conversationId: row.conversation_id }, result.text ?? '');
     return c.json(ok({ ignored: !owned }));
   }
-  // A group summary goes to the Lark inbox group; it is never sent into the Zalo group.
+  // A group summary goes to the CRM inbox group; it is never sent into the Zalo group.
   if (purpose === 'group_summary') {
-    const owned = await applyGroupSummaryResult(db, { id: row.id, attempts: result.attempts, conversationId: row.conversation_id }, result.text ?? '');
-    if (owned) await background(c, processWorkerCommands(c.env));
+    const owned = await applyGroupSummaryResult(db, { id: row.id, attempts: result.attempts, conversationId: row.conversation_id }, result.text ?? '', sink);
     return c.json(ok({ ignored: !owned }));
+  }
+  if (purpose === 'chat') {
+    const completed = await completeCommand(db, row.id, result.attempts,
+      { externalMsgId: result.externalMsgId ?? null, text: result.text ?? null });
+    if (!completed) return c.json(ok({ ignored: true }));
+    await applyChatAgentReply(sink, db, command.payload, result.text ?? '', row.id);
+    return c.json(ok({ ignored: false }));
   }
   const completed = await completeCommand(db, row.id, result.attempts,
     { externalMsgId: result.externalMsgId ?? null, text: result.text ?? null });
@@ -222,10 +238,10 @@ bridgeRoutes.post('/commands/:id/result', async (c) => {
   }
   if (row.kind === 'run_completion' && row.conversation_id) {
     const outcome = await applyCompletionResult(db, c.env, row.conversation_id, result.text ?? '', new URL(c.req.url).origin,
-      { ...payload, commandId: row.id });
-    if (outcome.workerCommandQueued) await background(c, processWorkerCommands(c.env));
+      { ...payload, commandId: row.id }, sink);
+    if (outcome.workerCommandQueued) await background(c, processWorkerCommands(c.env, sink));
     const check = outcome.handoffCheck;
-    if (check) await background(c, check().then((after) => (after.workerCommandQueued ? processWorkerCommands(c.env) : undefined)));
+    if (check) await background(c, check().then((after) => (after.workerCommandQueued ? processWorkerCommands(c.env, sink) : undefined)));
   } else if (SEND_KINDS.has(row.kind)) {
     const messageId = (command.payload as { messageId?: unknown } | null)?.messageId;
     if (typeof messageId === 'string') await markMessageSent(db, messageId, result.externalMsgId ?? null);

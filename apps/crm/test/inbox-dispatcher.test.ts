@@ -130,7 +130,7 @@ test('daily sends count waiting, claimed and done sends of one account since the
   const failed = await enqueueSend('failed');
   await enqueueSend('pending');
   await enqueueSend('other-account', 'ca-2');
-  await enqueueCommand(db, { kind: 'send_lark', target: 'bridge', channelAccountId: 'ca-1', payload: {}, dedupeKey: 'lark', runAt: T0 });
+  await enqueueCommand(db, { kind: 'zalo_login', target: 'bridge', channelAccountId: 'ca-1', payload: {}, dedupeKey: 'login', runAt: T0 });
   await enqueueCommand(db, { kind: 'send_messenger', target: 'worker', channelAccountId: 'ca-1', payload: {}, dedupeKey: 'fb', runAt: T0 });
 
   expect(await claimCommands(db, 'bridge', 100, 300, T0)).toHaveLength(6);
@@ -141,7 +141,7 @@ test('daily sends count waiting, claimed and done sends of one account since the
   await db.prepare("UPDATE channel_command SET status = 'pending', claimed_at = NULL, created_at = ? WHERE dedupe_key = 'pending'").bind(STAMP).run();
 
   expect((await row(claimed)).status).toBe('claimed');
-  // done + claimed + pending + messenger; excludes yesterday, failed, the other account and Lark.
+  // done + claimed + pending + messenger; excludes yesterday, failed, the other account and the login.
   expect(await accountSendsToday(db, 'ca-1', dayStart)).toBe(4);
   expect(await accountSendsToday(db, 'ca-2', dayStart)).toBe(1);
 });

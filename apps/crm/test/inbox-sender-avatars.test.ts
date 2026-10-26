@@ -4,6 +4,7 @@ import seedSql from '../seed/demo.sql?raw';
 import app from '../src/worker/index';
 import { ingestEvents } from '../src/worker/inbox/ingest';
 import { resetDb } from './helpers/reset-db';
+import { testSink } from './helpers/test-sink';
 
 const db = env.DB;
 const ORIGIN = 'http://crm.test';
@@ -36,21 +37,21 @@ async function web(path: string) {
 }
 
 test('a direct customer avatar is stored and a non-https value is dropped without losing the message', async () => {
-  expect(await ingestEvents(db, [message({ senderAvatar: AVATAR })])).toEqual({ accepted: 1, rejected: 0 });
+  expect(await ingestEvents(db, [message({ senderAvatar: AVATAR })], testSink())).toEqual({ accepted: 1, rejected: 0 });
   const conv = await conversation();
   expect(conv).toMatchObject({ display_name: 'Chị Hoa', avatar_url: AVATAR, avatar_checked_at: null, kind: 'direct' });
 
-  expect(await ingestEvents(db, [message({ senderAvatar: 'http://photo.zalo.me/hoa.jpg', text: 'link thường' })])).toEqual({ accepted: 1, rejected: 0 });
+  expect(await ingestEvents(db, [message({ senderAvatar: 'http://photo.zalo.me/hoa.jpg', text: 'link thường' })], testSink())).toEqual({ accepted: 1, rejected: 0 });
   expect((await conversation()).avatar_url).toBe(AVATAR);
-  expect(await ingestEvents(db, [message({ senderAvatar: '', text: 'trống' })])).toEqual({ accepted: 1, rejected: 0 });
+  expect(await ingestEvents(db, [message({ senderAvatar: '', text: 'trống' })], testSink())).toEqual({ accepted: 1, rejected: 0 });
   expect((await conversation()).avatar_url).toBe(AVATAR);
 
   expect(await ingestEvents(db, [message({
     fromSelf: true, senderExternalId: 'zalo-acc-1', senderName: 'Shop', senderAvatar: 'https://photo.zalo.me/shop.jpg', text: 'Shop trả lời',
-  })])).toEqual({ accepted: 1, rejected: 0 });
+  })], testSink())).toEqual({ accepted: 1, rejected: 0 });
   expect(await conversation()).toMatchObject({ display_name: 'Chị Hoa', avatar_url: AVATAR, avatar_checked_at: null });
 
-  const fresh = await ingestEvents(db, [message({ threadId: 'cust-http', senderExternalId: 'cust-http', senderAvatar: 'http://photo.zalo.me/nope.jpg', text: 'chỉ http' })]);
+  const fresh = await ingestEvents(db, [message({ threadId: 'cust-http', senderExternalId: 'cust-http', senderAvatar: 'http://photo.zalo.me/nope.jpg', text: 'chỉ http' })], testSink());
   expect(fresh).toEqual({ accepted: 1, rejected: 0 });
   expect(await conversation('cust-http')).toMatchObject({ avatar_url: null, avatar_checked_at: null });
   const stored = await db.prepare("SELECT COUNT(*) AS n FROM message WHERE external_msg_id IS NOT NULL AND body = 'chỉ http'").first<{ n: number }>();
@@ -61,7 +62,7 @@ test('a group sender avatar is stored on the member and returned by the inbox AP
   const avatar = 'https://photo.zalo.me/an.jpg';
   expect(await ingestEvents(db, [message({
     threadId: 'grp-1', threadKind: 'group', senderExternalId: 'member-1', senderName: 'An', senderAvatar: avatar, text: 'chào nhóm',
-  })])).toEqual({ accepted: 1, rejected: 0 });
+  })], testSink())).toEqual({ accepted: 1, rejected: 0 });
   const conv = await conversation('grp-1');
   expect(conv).toMatchObject({ kind: 'group', avatar_url: null, avatar_checked_at: null });
   const group = await db.prepare("SELECT id FROM conversation WHERE external_thread_id = 'grp-1'").first<{ id: string }>();
@@ -69,7 +70,7 @@ test('a group sender avatar is stored on the member and returned by the inbox AP
 
   expect(await ingestEvents(db, [message({
     threadId: 'grp-1', threadKind: 'group', senderExternalId: 'member-1', senderName: 'An', senderAvatar: 'http://photo.zalo.me/an.jpg', text: 'không đổi ảnh',
-  })])).toEqual({ accepted: 1, rejected: 0 });
+  })], testSink())).toEqual({ accepted: 1, rejected: 0 });
   expect(await member(group!.id, 'member-1')).toEqual({ display_name: 'An', avatar_url: avatar });
 
   expect(await ingestEvents(db, [{
@@ -78,20 +79,20 @@ test('a group sender avatar is stored on the member and returned by the inbox AP
       { id: 'member-1', name: 'An mới', avatar: 'https://photo.zalo.me/an-2.jpg' },
       { id: 'member-2', name: 'Bình' },
     ],
-  }])).toEqual({ accepted: 1, rejected: 0 });
+  }], testSink())).toEqual({ accepted: 1, rejected: 0 });
   expect(await member(group!.id, 'member-1')).toEqual({ display_name: 'An mới', avatar_url: 'https://photo.zalo.me/an-2.jpg' });
   expect(await member(group!.id, 'member-2')).toEqual({ display_name: 'Bình', avatar_url: null });
 
   expect(await ingestEvents(db, [{
     type: 'group_members', accountExternalId: 'zalo-acc-1', threadId: 'grp-1',
     members: [{ id: 'member-1', name: '', avatar: '' }],
-  }])).toEqual({ accepted: 1, rejected: 0 });
+  }], testSink())).toEqual({ accepted: 1, rejected: 0 });
   expect(await member(group!.id, 'member-1')).toEqual({ display_name: 'An mới', avatar_url: 'https://photo.zalo.me/an-2.jpg' });
 
   const list = await web('/inbox/conversations?kind=direct');
   expect(list.status).toBe(200);
   expect(list.json.data.find((row: { displayName: string }) => row.displayName === 'Chị Hoa')).toBeUndefined();
-  const direct = await ingestEvents(db, [message({ senderAvatar: AVATAR })]);
+  const direct = await ingestEvents(db, [message({ senderAvatar: AVATAR })], testSink());
   expect(direct).toEqual({ accepted: 1, rejected: 0 });
   const listed = await web('/inbox/conversations');
   const directRow = listed.json.data.find((row: { externalThreadId: string }) => row.externalThreadId === 'cust-1');

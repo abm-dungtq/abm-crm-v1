@@ -83,6 +83,7 @@ export interface ProgramSummary {
   lessonCount: number;
   completedCount: number;
   nextSectionId: string | null;
+  nextLessonTitle: string | null;
 }
 
 export interface LessonVideoItem {

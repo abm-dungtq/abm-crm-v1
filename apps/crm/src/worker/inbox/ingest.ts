@@ -1,11 +1,12 @@
 import type { BridgeEvent } from '@abm/contracts';
+import type { Sink } from '../env';
 import { isConstraintFailure } from '../guarded-tx';
+import { postInboxNotice } from '../inbox-notices';
 import { slaDueSql } from './assignment';
 import {
   ATTACHMENT_ONLY_TEXT, BOT_CALL_RE, GROUP_PAUSE_MS, appendStaffContext, cancelPendingGroupReplies, markMessageSent,
   scheduleCompletion, scheduleGroupReply,
 } from './conversation-flow';
-import { enqueueCommand } from './dispatcher';
 
 /**
  * Applies events pushed by the Zalo bridge sidecar. Each event is handled on its own: a failure or an
@@ -339,17 +340,18 @@ async function ingestZaloMessage(db: D1Database, event: MessageEvent, now: Date)
 }
 
 /**
- * The bridge gave up on an account's session: sending stops until an admin turns it back on, and the Lark inbox
- * group is warned at most once per account per hour.
+ * The bridge gave up on an account's session: sending stops until an admin turns it back on, and the CRM "Inbox"
+ * chat group is warned at most once per account per hour.
  */
-async function pauseFailedAccount(db: D1Database, accountId: string, now: string) {
-  const account = await db.prepare('UPDATE channel_account SET send_paused = 1, updated_at = ? WHERE id = ? RETURNING display_name')
-    .bind(now, accountId).first<{ display_name: string }>();
+async function pauseFailedAccount(db: D1Database, accountId: string, now: string, sink: Sink, ensuredOrgs?: Set<string>) {
+  const account = await db.prepare('UPDATE channel_account SET send_paused = 1, updated_at = ? WHERE id = ? RETURNING organization_id, display_name')
+    .bind(now, accountId).first<{ organization_id: string; display_name: string }>();
   if (!account) return;
-  await enqueueCommand(db, {
-    kind: 'send_lark', target: 'worker', channelAccountId: accountId,
-    payload: { text: `Tài khoản ${account.display_name} lỗi kết nối, đã tạm dừng gửi` },
+  await postInboxNotice(sink, db, {
+    organizationId: account.organization_id,
+    text: `Tài khoản ${account.display_name} lỗi kết nối, đã tạm dừng gửi`,
     dedupeKey: `account-error:${accountId}:${now.slice(0, 13)}`,
+    ensuredOrgs,
   });
 }
 
@@ -367,7 +369,7 @@ export const ADMIN_RECONNECT_WINDOW_MS = 15 * 60_000;
 /** How long a login QR stays scannable after the Worker receives it. The bridge clock is not used. */
 export const QR_IMAGE_TTL_MS = 90_000;
 
-async function ingestAccountStatus(db: D1Database, event: AccountStatusEvent, now: string) {
+async function ingestAccountStatus(db: D1Database, event: AccountStatusEvent, now: string, sink: Sink, ensuredOrgs?: Set<string>) {
   const connected = event.status === 'connected';
   // Only an account in error keeps a reason; any other status clears the previous one.
   const lastError = event.status === 'error' ? accountErrorReason(event.lastError) ?? 'UNKNOWN_ERROR' : null;
@@ -387,7 +389,7 @@ async function ingestAccountStatus(db: D1Database, event: AccountStatusEvent, no
         connected ? 1 : 0, reconnectSince, event.accountId)
       .run();
     if (res.meta.changes !== 1) return false;
-    if (event.status === 'error') await pauseFailedAccount(db, event.accountId, now);
+    if (event.status === 'error') await pauseFailedAccount(db, event.accountId, now, sink, ensuredOrgs);
     return true;
   } catch (error) {
     if (!isConstraintFailure(error)) throw error;
@@ -426,14 +428,15 @@ async function ingestGroupList(db: D1Database, event: GroupListEvent, now: strin
   return true;
 }
 
-export async function ingestEvents(db: D1Database, events: BridgeEvent[]): Promise<IngestResult> {
+export async function ingestEvents(db: D1Database, events: BridgeEvent[], sink: Sink): Promise<IngestResult> {
   const result: IngestResult = { accepted: 0, rejected: 0 };
+  const ensuredOrgs = new Set<string>();
   for (const event of events) {
     const now = new Date();
     try {
       const ok = event.type === 'message' ? await ingestZaloMessage(db, event, now)
         : event.type === 'group_members' ? await ingestGroupMembers(db, event, now.toISOString())
-        : event.type === 'account_status' ? await ingestAccountStatus(db, event, now.toISOString())
+        : event.type === 'account_status' ? await ingestAccountStatus(db, event, now.toISOString(), sink, ensuredOrgs)
         : event.type === 'qr' ? await ingestQr(db, event, now.toISOString())
         : await ingestGroupList(db, event, now.toISOString());
       result[ok ? 'accepted' : 'rejected'] += 1;

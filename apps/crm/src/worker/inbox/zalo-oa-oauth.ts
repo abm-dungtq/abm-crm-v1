@@ -1,6 +1,6 @@
 import type { Context } from 'hono';
-import type { Env } from '../env';
-import { enqueueCommand } from './dispatcher';
+import type { Env, Sink } from '../env';
+import { postInboxNotice } from '../inbox-notices';
 
 /**
  * Zalo Official Account OAuth v4 (PKCE) and the AES-GCM storage of the resulting tokens.
@@ -323,31 +323,40 @@ export async function refreshZaloOaAccount(db: D1Database, env: Pick<Env, 'ZALO_
   }
 }
 
-/** Vietnam calendar day, used so a refresh failure notifies Lark once per account per day. */
+/** Vietnam calendar day, used so a refresh failure notifies the inbox group once per account per day. */
 function vietnamDate(now: Date): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Saigon', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
 }
 
-/** Marks the account in error and queues one Lark notice for this Vietnam day. The text contains no token. */
-export async function recordZaloOaRefreshFailure(db: D1Database, accountId: string, now = new Date()): Promise<void> {
+/** Marks the account in error and posts one CRM inbox notice for this Vietnam day. The text contains no token. */
+export async function recordZaloOaRefreshFailure(
+  db: D1Database, accountId: string, now: Date, sink: Sink, ensuredOrgs?: Set<string>,
+): Promise<void> {
   const account = await db.prepare(`UPDATE channel_account SET status = 'error', last_error = 'ZALO_OA_REFRESH_FAILED', updated_at = ?
-    WHERE id = ? RETURNING display_name`).bind(now.toISOString(), accountId).first<{ display_name: string }>();
+    WHERE id = ? RETURNING organization_id, display_name`).bind(now.toISOString(), accountId).first<{ organization_id: string; display_name: string }>();
   if (!account) return;
-  await enqueueCommand(db, {
-    kind: 'send_lark', target: 'worker', channelAccountId: accountId,
-    payload: { text: `Zalo OA ${account.display_name} không làm mới được token` },
+  await postInboxNotice(sink, db, {
+    organizationId: account.organization_id,
+    text: `Zalo OA ${account.display_name} không làm mới được token`,
     dedupeKey: `zalo-oa-refresh:${accountId}:${vietnamDate(now)}`,
+    ensuredOrgs,
   });
 }
 
 /** Refreshes every OA credential whose access token expires within three hours. */
-export async function refreshZaloOaTokens(db: D1Database, env: Pick<Env, 'ZALO_OA_APP_ID' | 'ZALO_OA_APP_SECRET' | 'ZALO_OA_TOKEN_KEY'>, now = new Date()): Promise<void> {
+export async function refreshZaloOaTokens(
+  db: D1Database,
+  env: Pick<Env, 'ZALO_OA_APP_ID' | 'ZALO_OA_APP_SECRET' | 'ZALO_OA_TOKEN_KEY'>,
+  now: Date,
+  sink: Sink,
+): Promise<void> {
   const due = await db.prepare(`SELECT c.channel_account_id FROM zalo_oa_credential c
     JOIN channel_account a ON a.id = c.channel_account_id
     WHERE a.channel = 'zalo_oa' AND c.access_expires_at <= ?`).bind(new Date(now.getTime() + REFRESH_WINDOW_MS).toISOString())
     .all<{ channel_account_id: string }>();
+  const ensuredOrgs = new Set<string>();
   for (const row of due.results) {
     const outcome = await refreshZaloOaAccount(db, env, row.channel_account_id, now);
-    if (outcome === 'failed') await recordZaloOaRefreshFailure(db, row.channel_account_id, now);
+    if (outcome === 'failed') await recordZaloOaRefreshFailure(db, row.channel_account_id, now, sink, ensuredOrgs);
   }
 }

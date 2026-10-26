@@ -11,8 +11,9 @@ export function LoginPage() {
 
   const login = useMutation<{ usesDefaultPassword: boolean }, ApiFailure>({
     mutationFn: () => api.post('/auth/login', { email, password }),
-    onSuccess: async () => {
-      await client.invalidateQueries();
+    onSuccess: () => {
+      // Drop anything cached for a previous learner on this device before showing the new account.
+      client.clear();
       void navigate({ to: '/' });
     },
   });

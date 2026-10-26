@@ -3,7 +3,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { loadAgentActor } from './actor';
 import { notifyCommitted } from './approval-notify';
 import { sha256 } from './commands';
-import { background, type AppBindings } from './env';
+import { background, sinkFrom, type AppBindings, type TokenScope } from './env';
 import { callTool, toolsFor } from './mcp-tools';
 
 /**
@@ -19,12 +19,18 @@ mcpRoutes.use('*', async (c, next) => {
   const token = c.req.header('Authorization')?.match(/^Bearer ([^\s]+)$/)?.[1];
   if (!token) return c.json({ error: 'unauthorized' }, 401);
   const db = c.env.DB;
-  const row = await db.prepare('SELECT id, user_id FROM agent_token WHERE token_hash = ? AND revoked_at IS NULL')
-    .bind(await sha256(token)).first<{ id: string; user_id: string }>();
+  const now = new Date().toISOString();
+  // The LMS publish token only serves /api/lms-publish; it never gets MCP tools (and so never reads chat).
+  const row = await db.prepare(`SELECT id, user_id, scope FROM agent_token
+    WHERE token_hash = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)
+      AND (label IS NULL OR label <> 'lms-publish')`)
+    .bind(await sha256(token), now).first<{ id: string; user_id: string; scope: TokenScope }>();
   const actor = row ? await loadAgentActor(db, row.user_id) : null;
   if (!row || !actor) return c.json({ error: 'unauthorized' }, 401);
-  await background(c, db.prepare('UPDATE agent_token SET last_used_at = ? WHERE id = ?').bind(new Date().toISOString(), row.id).run());
+  await background(c, db.prepare('UPDATE agent_token SET last_used_at = ? WHERE id = ?').bind(now, row.id).run());
   c.set('actor', actor);
+  c.set('tokenScope', row.scope);
+  c.set('tokenId', row.id);
   await next();
 });
 
@@ -45,7 +51,8 @@ mcpRoutes.post('/', async (c) => {
     return reply({ protocolVersion: '2025-11-25', capabilities: { tools: {} }, serverInfo: { name: 'abm-crm', version: '1.0.0' } });
   }
   if (rpc.method === 'ping') return reply({});
-  if (rpc.method === 'tools/list') return reply({ tools: toolsFor(c.get('actor')) });
+  const scope = c.get('tokenScope') ?? 'legacy';
+  if (rpc.method === 'tools/list') return reply({ tools: toolsFor(c.get('actor'), scope) });
   if (rpc.method === 'tools/call') {
     const name = rpc.params?.name;
     const args = rpc.params?.arguments ?? {};
@@ -53,7 +60,10 @@ mcpRoutes.post('/', async (c) => {
       return c.json({ jsonrpc: '2.0', id: rpc.id, error: { code: -32602, message: 'Invalid parameters' } });
     }
     try {
-      return reply(await callTool(c.env.DB, c.get('actor'), name, args as Record<string, unknown>, new URL(c.req.url).origin, notifyCommitted(c)));
+      return reply(await callTool({
+        db: c.env.DB, actor: c.get('actor'), scope, tokenId: c.get('tokenId') ?? '', origin: new URL(c.req.url).origin,
+        onCommitted: notifyCommitted(c), sink: sinkFrom(c),
+      }, name, args as Record<string, unknown>));
     } catch (error) {
       console.error('mcp_error', error instanceof Error ? error.message : error);
       return c.json({ jsonrpc: '2.0', id: rpc.id, error: { code: -32603, message: 'Internal error' } });

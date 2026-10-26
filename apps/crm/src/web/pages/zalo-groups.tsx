@@ -95,7 +95,7 @@ export function ZaloGroupsPage() {
       <div className="page-head">
         <div>
           <h1>Nhóm Zalo</h1>
-          <p className="sub">Long chỉ trả lời trong nhóm đã bật, khi học viên @tag Long, trả lời tin của Long hoặc gõ “Long ơi”. Nhân viên nhắn tay, đặt tin định kỳ (cần duyệt) và nhận tóm tắt hằng ngày lúc 21:00 qua Lark.</p>
+          <p className="sub">Long chỉ trả lời trong nhóm đã bật, khi học viên @tag Long, trả lời tin của Long hoặc gõ “Long ơi”. Nhân viên nhắn tay, đặt tin định kỳ (cần duyệt) và nhận tóm tắt hằng ngày lúc 21:00 trong nhóm Inbox của chat CRM.</p>
         </div>
         <select aria-label="Lọc theo tài khoản Zalo" value={account} onChange={(e) => setAccount(e.target.value)}>
           <option value="">Mọi tài khoản</option>
@@ -233,7 +233,7 @@ export function ZaloGroupPage() {
             {groups.data && !group && <span className="small muted">Không tìm thấy cài đặt của nhóm này.</span>}
           </div>
           <p className="small text-2 row" style={{ alignItems: 'flex-start' }}>
-            <Icon name="info" />Long chỉ trả lời trong nhóm đã bật. Tóm tắt hằng ngày gửi vào Lark lúc 21:00 nếu hôm đó nhóm có tin.
+            <Icon name="info" />Long chỉ trả lời trong nhóm đã bật. Tóm tắt hằng ngày gửi vào nhóm Inbox của chat CRM lúc 21:00 nếu hôm đó nhóm có tin.
           </p>
         </aside>
       </div>

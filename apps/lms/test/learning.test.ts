@@ -113,6 +113,7 @@ describe('LMS learning endpoints', () => {
         lessonCount: 2,
         completedCount: 0,
         nextSectionId: 'b1p1',
+        nextLessonTitle: 'Phần 1',
       },
     ]);
 
@@ -229,6 +230,7 @@ describe('LMS learning endpoints', () => {
       completedCount: 1,
       lessonCount: 2,
       nextSectionId: 'b1p2',
+      nextLessonTitle: 'Phần 2',
     });
 
     const markUndone = await call('/lessons/les-1/progress', {

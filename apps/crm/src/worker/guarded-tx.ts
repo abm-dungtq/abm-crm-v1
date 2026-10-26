@@ -1,6 +1,6 @@
 import type { Actor } from './env';
 
-type GuardedTable = 'lead' | 'task' | 'approval' | 'app_user' | 'department' | 'team' | 'contact' | 'product' | 'customer_product'
+type GuardedTable = 'lead' | 'task' | 'task_member' | 'approval' | 'app_user' | 'department' | 'team' | 'contact' | 'product' | 'customer_product'
   | 'lead_step' | 'partner_contract' | 'partner_contract_step'
   | 'course' | 'class_group' | 'class_session' | 'enrollment' | 'trial_booking' | 'attendance'
   | 'org_setting' | 'charge' | 'payment' | 'payment_allocation' | 'privacy_request'

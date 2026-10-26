@@ -287,7 +287,7 @@ test('a bot reply that fails its last attempt hands the conversation to people o
       .bind(attempts, new Date(Date.now() + 60_000).toISOString(), id).run();
     return bridge(`/commands/${id}/result`, { body: { attempts, ok: false, error: 'GOCLAW_HTTP_500' } });
   };
-  const handoffs = () => count("SELECT COUNT(*) AS n FROM channel_command WHERE kind = 'send_lark' AND payload_json LIKE '%Handoff:%'");
+  const handoffs = () => count("SELECT COUNT(*) AS n FROM chat_message WHERE conversation_id = 'sys:inbox:org-abm' AND body LIKE 'Handoff:%'");
 
   // An attempt that will be retried changes nothing.
   expect((await fail(reply!.id, 2)).json.data).toEqual({ ignored: false });

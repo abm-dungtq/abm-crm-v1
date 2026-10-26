@@ -6,6 +6,7 @@ import { applyCompletionResult } from '../src/worker/inbox/conversation-flow';
 import { GRAPH_API_VERSION, OUTSIDE_WINDOW_NOTE, messengerDelivery, splitMessengerText } from '../src/worker/inbox/facebook-send';
 import { processWorkerCommands } from '../src/worker/inbox/worker-commands';
 import { resetDb } from './helpers/reset-db';
+import { testSink } from './helpers/test-sink';
 
 const db = env.DB;
 const ORIGIN = 'http://crm.test';
@@ -138,9 +139,9 @@ test('delivery and read receipts add no message', async () => {
 test('an echo of the bot reply adds nothing; a reply typed in Meta Business Suite is staff_phone and hands over to people', async () => {
   const conv = await customerConversation();
   const calls = fakeGraph(() => json({ recipient_id: PSID, message_id: 'm_bot_1' }));
-  const outcome = await applyCompletionResult(db, testEnv, conv.id, 'Học phí là 5 triệu ạ');
+  const outcome = await applyCompletionResult(db, testEnv, conv.id, 'Học phí là 5 triệu ạ', undefined, undefined, testSink());
   expect(outcome.workerCommandQueued).toBe(true);
-  await processWorkerCommands(testEnv);
+  await processWorkerCommands(testEnv, testSink());
 
   expect(calls).toHaveLength(1);
   expect(calls[0]!.url).toBe(`https://graph.facebook.com/${GRAPH_API_VERSION}/me/messages?access_token=${PAGE_TOKEN}`);
@@ -167,7 +168,7 @@ test('an echo of the bot reply adds nothing; a reply typed in Meta Business Suit
 
 test('an echo that arrives before the send response is recognised by its metadata', async () => {
   const conv = await customerConversation();
-  await applyCompletionResult(db, testEnv, conv.id, 'Dạ em chào chị');
+  await applyCompletionResult(db, testEnv, conv.id, 'Dạ em chào chị', undefined, undefined, testSink());
   const bot = (await messages(conv.id)).find((m) => m.sender_kind === 'bot');
   await webhook(page(echo('m_early', 'Dạ em chào chị', bot.id)));
   expect(await messages(conv.id)).toHaveLength(2);
@@ -178,8 +179,8 @@ test('an echo that arrives before the send response is recognised by its metadat
 test('outside 24 hours the bot is refused with OUTSIDE_WINDOW while staff reply with the HUMAN_AGENT tag', async () => {
   const conv = await customerConversation(25 * HOUR);
   const calls = fakeGraph();
-  await applyCompletionResult(db, testEnv, conv.id, 'Bot trả lời muộn');
-  await processWorkerCommands(testEnv);
+  await applyCompletionResult(db, testEnv, conv.id, 'Bot trả lời muộn', undefined, undefined, testSink());
+  await processWorkerCommands(testEnv, testSink());
   expect(calls).toHaveLength(0);
   const [botSend] = await commands('send_messenger');
   expect(botSend).toMatchObject({ status: 'failed', result: { error: 'OUTSIDE_WINDOW' } });
@@ -208,8 +209,8 @@ test('a long reply is sent as several messages cut at line breaks', async () => 
   const conv = await customerConversation();
   const calls = fakeGraph();
   const line = 'x'.repeat(900);
-  await applyCompletionResult(db, testEnv, conv.id, [line, line, line, line, line].join('\n'));
-  await processWorkerCommands(testEnv);
+  await applyCompletionResult(db, testEnv, conv.id, [line, line, line, line, line].join('\n'), undefined, undefined, testSink());
+  await processWorkerCommands(testEnv, testSink());
   expect(calls.map((c) => c.body.message.text.length)).toEqual([1801, 1801, 900]);
   const bot = (await messages(conv.id)).find((m) => m.sender_kind === 'bot');
   expect(bot).toMatchObject({ status: 'sent', external_msg_id: 'm_out_1' });
@@ -226,8 +227,8 @@ test('a retry after a failed part sends only the parts Messenger has not accepte
   const calls = fakeGraph((_c, i) => (i === 1
     ? json({ error: { message: 'Temporary', code: 2 } }, 500)
     : json({ recipient_id: PSID, message_id: `m_out_${i + 1}` })));
-  await applyCompletionResult(db, testEnv, conv.id, text);
-  await processWorkerCommands(testEnv);
+  await applyCompletionResult(db, testEnv, conv.id, text, undefined, undefined, testSink());
+  await processWorkerCommands(testEnv, testSink());
   const [first] = await commands('send_messenger');
   expect(first).toMatchObject({ status: 'pending', attempts: 1, result: { error: 'GRAPH_2' } });
   expect(first.payload).toMatchObject({ sentChunks: 1, firstMid: 'm_out_1' });
@@ -238,7 +239,7 @@ test('a retry after a failed part sends only the parts Messenger has not accepte
   expect((await messages(conv.id)).find((m) => m.id === bot.id)).toMatchObject({ status: 'sent' });
 
   await db.prepare('UPDATE channel_command SET next_run_at = ? WHERE id = ?').bind(new Date(Date.now() - 1000).toISOString(), first.id).run();
-  await processWorkerCommands(testEnv);
+  await processWorkerCommands(testEnv, testSink());
   expect(calls.map((c) => c.body.message.text)).toEqual([parts[0], parts[1], parts[1], parts[2]]);
   const [done] = await commands('send_messenger');
   expect(done).toMatchObject({ status: 'done', attempts: 2, result: { sent: true, parts: 3, externalMsgId: 'm_out_1' } });
@@ -249,11 +250,11 @@ test('a retry after a failed part sends only the parts Messenger has not accepte
 test('a queued bot reply is not sent to Messenger once the customer bot is off; a staff reply still is', async () => {
   const conv = await customerConversation();
   const calls = fakeGraph();
-  await applyCompletionResult(db, testEnv, conv.id, 'Xin chào');
+  await applyCompletionResult(db, testEnv, conv.id, 'Xin chào', undefined, undefined, testSink());
   await db.prepare('UPDATE customer_bot_switch SET enabled = 1 WHERE id = 1').run();
   const staff = await web('u-lan', 'POST', `/inbox/conversations/${conv.id}/messages`, { text: 'Em Lan đây ạ' });
   expect(staff.status).toBe(200);
-  await processWorkerCommands(testEnv);
+  await processWorkerCommands(testEnv, testSink());
   expect(calls.map((c) => c.body.message.text)).toEqual(['Em Lan đây ạ']);
   const sends = await commands('send_messenger');
   const botSend = sends.find((c) => c.payload.text === 'Xin chào');
@@ -265,8 +266,8 @@ test('a Graph error fails the attempt with the Graph code and never records the 
   const conv = await customerConversation();
   const errors = vi.spyOn(console, 'error');
   fakeGraph(() => json({ error: { message: 'Bad token', type: 'OAuthException', code: 190, error_subcode: 463, fbtrace_id: 'x' } }, 400));
-  await applyCompletionResult(db, testEnv, conv.id, 'Xin chào');
-  await processWorkerCommands(testEnv);
+  await applyCompletionResult(db, testEnv, conv.id, 'Xin chào', undefined, undefined, testSink());
+  await processWorkerCommands(testEnv, testSink());
   const [send] = await commands('send_messenger');
   expect(send).toMatchObject({ status: 'pending', attempts: 1, result: { error: 'GRAPH_190_463' } });
   expect((await messages(conv.id)).find((m) => m.sender_kind === 'bot')).toMatchObject({ status: 'pending' });
@@ -274,7 +275,7 @@ test('a Graph error fails the attempt with the Graph code and never records the 
 
   // The last allowed attempt leaves the message failed.
   await db.prepare("UPDATE channel_command SET attempts = 4, next_run_at = ? WHERE id = ?").bind(new Date(Date.now() - 1000).toISOString(), send.id).run();
-  await processWorkerCommands(testEnv);
+  await processWorkerCommands(testEnv, testSink());
   expect((await commands('send_messenger'))[0]).toMatchObject({ status: 'failed', attempts: 5 });
   expect((await messages(conv.id)).find((m) => m.sender_kind === 'bot')).toMatchObject({ status: 'failed' });
 });
@@ -282,8 +283,8 @@ test('a Graph error fails the attempt with the Graph code and never records the 
 test('a page without a configured token is not sent and does not throw', async () => {
   const conv = await customerConversation();
   const calls = fakeGraph();
-  await applyCompletionResult(db, testEnv, conv.id, 'Xin chào');
-  await expect(processWorkerCommands({ ...testEnv, FB_PAGE_TOKENS: 'not json' })).resolves.toBeUndefined();
+  await applyCompletionResult(db, testEnv, conv.id, 'Xin chào', undefined, undefined, testSink());
+  await expect(processWorkerCommands({ ...testEnv, FB_PAGE_TOKENS: 'not json' }, testSink())).resolves.toBeUndefined();
   expect(calls).toHaveLength(0);
   expect((await commands('send_messenger'))[0]).toMatchObject({ status: 'pending', result: { error: 'FB_NOT_CONFIGURED' } });
 });

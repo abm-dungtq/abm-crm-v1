@@ -7,6 +7,7 @@ import {
 } from '../src/worker/inbox/decision-layer';
 import { ingestEvents } from '../src/worker/inbox/ingest';
 import { resetDb } from './helpers/reset-db';
+import { testSink } from './helpers/test-sink';
 
 const db = env.DB;
 const STAMP = '2026-10-08T03:00:00.000Z';
@@ -27,7 +28,7 @@ let msgSeq = 0;
 const customerSays = (text: string) => ingestEvents(db, [{
   type: 'message', accountExternalId: 'zalo-acc-1', threadId: 'cust-1', threadKind: 'direct', msgId: `hc-${++msgSeq}`,
   fromSelf: false, senderExternalId: 'cust-1', senderName: 'Chị Hoa', text, sentAt: new Date().toISOString(),
-}]);
+}], testSink());
 const conversation = () => db.prepare("SELECT * FROM conversation WHERE external_thread_id = 'cust-1'").first<any>();
 const pendingReply = async () => {
   const row = await db.prepare("SELECT payload_json FROM channel_command WHERE kind = 'run_completion' AND status = 'pending'")
@@ -46,7 +47,7 @@ async function turn(customer: string, reply: string, flowEnv: Parameters<typeof 
   beforeCheck?: (conversationId: string) => Promise<unknown>) {
   await customerSays(customer);
   const conv = await conversation();
-  const outcome = await applyCompletionResult(db, flowEnv, conv.id, reply, 'http://crm.test', asCompletionPayload(await pendingReply()));
+  const outcome = await applyCompletionResult(db, flowEnv, conv.id, reply, 'http://crm.test', asCompletionPayload(await pendingReply()), testSink());
   await beforeCheck?.(conv.id);
   await outcome.handoffCheck?.();
   return conversation();
@@ -136,8 +137,13 @@ test('when the bot hands off itself, its reason is kept and the check is logged 
   expect(conv).toMatchObject({ mode: 'human', handoff_reason: 'Khách đã CK' });
   const [check] = await checks();
   expect(check).toMatchObject({ before: { botHandedOff: true }, after: { applied: false, decided: { layer: 'rule' } } });
-  const larks = await db.prepare("SELECT COUNT(*) AS n FROM channel_command WHERE kind = 'send_lark'").first<{ n: number }>();
-  expect(larks!.n).toBe(1);
+  const notices = await db.prepare(
+    "SELECT author_kind, body FROM chat_message WHERE conversation_id = 'sys:inbox:org-abm'",
+  ).all<{ author_kind: string; body: string }>();
+  expect(notices.results).toEqual([{
+    author_kind: 'system',
+    body: `Handoff: Chị Hoa (Số tư vấn 1) – Khách đã CK – https://crm.example/inbox/${conv.id}`,
+  }]);
 });
 
 test('active Jev hands off a turn the rules miss, sending masked text with the pinned model', async () => {
@@ -178,7 +184,7 @@ test('active mode does not ask Jev after the bot handed off, and attachment-only
 
   await db.prepare("UPDATE conversation SET mode = 'ai' WHERE id = ?").bind(conv.id).run();
   const outcome = await applyCompletionResult(db, withJev('active'), conv.id, 'Dạ em nhận được ảnh ạ', 'http://crm.test',
-    { customerText: '[Tệp đính kèm]\n[Tệp đính kèm]' });
+    { customerText: '[Tệp đính kèm]\n[Tệp đính kèm]' }, testSink());
   expect(outcome.handoffCheck).toBeUndefined();
 });
 

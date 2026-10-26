@@ -1,7 +1,8 @@
-import type { Env } from '../env';
+import type { Env, Sink } from '../env';
+import { postInboxNotice } from '../inbox-notices';
+import { notifyRows } from '../notify';
 import { linkBase, slaDueSql } from './assignment';
 import { abandonStaleReplies, sweepStuckOutgoing } from './conversation-flow';
-import { enqueueCommand } from './dispatcher';
 import { runDueSchedules } from './group-schedules';
 import { enqueueDailyGroupSummaries } from './group-summaries';
 import { extractIdleConversations } from './intake';
@@ -16,10 +17,12 @@ export const EVERY_MINUTE_CRON = '* * * * *';
 export const DAILY_SUMMARY_CRON = '0 14 * * *';
 const SLA_BATCH = 50;
 
-type ScheduledEnv = Pick<Env, 'DB' | 'MEDIA' | 'LARK_APP_ID' | 'LARK_APP_SECRET' | 'LARK_INBOX_CHAT_ID' | 'APP_URL' | 'ZALO_OA_APP_ID' | 'ZALO_OA_APP_SECRET' | 'ZALO_OA_TOKEN_KEY'>;
+type ScheduledEnv = Pick<Env, 'DB' | 'MEDIA' | 'APP_URL' | 'ZALO_OA_APP_ID' | 'ZALO_OA_APP_SECRET' | 'ZALO_OA_TOKEN_KEY'>
+  & Partial<Pick<Env, 'CHAT_HUB' | 'VAPID_PUBLIC_KEY' | 'VAPID_PRIVATE_KEY' | 'VAPID_SUBJECT'>>;
 
 interface OverdueRow {
   id: string;
+  organization_id: string;
   display_name: string | null;
   external_thread_id: string;
   sla_due_at: string;
@@ -28,26 +31,33 @@ interface OverdueRow {
 }
 
 /**
- * Reminds the Lark inbox group of direct `human` conversations whose customer has waited past the reply deadline,
+ * Reminds the CRM inbox group of direct `human` conversations whose customer has waited past the reply deadline,
  * then moves the deadline one reply window ahead. The reminder is deduplicated per conversation and
- * deadline, and the deadline moves only if nobody changed it meanwhile. Returns the number of reminders.
+ * deadline, and the deadline moves only once the reminder is stored and only if nobody changed it meanwhile,
+ * so a failed reminder is tried again next run. Returns the number of reminders.
  */
-export async function checkSla(db: D1Database, now = new Date(), appUrl?: string): Promise<number> {
+export async function checkSla(db: D1Database, sink: Sink, now = new Date(), appUrl?: string): Promise<number> {
   const nowIso = now.toISOString();
   const base = linkBase(appUrl);
-  const overdue = await db.prepare(`SELECT c.id, c.display_name, c.external_thread_id, c.sla_due_at, a.display_name AS account_name,
+  const overdue = await db.prepare(`SELECT c.id, c.organization_id, c.display_name, c.external_thread_id, c.sla_due_at, a.display_name AS account_name,
       u.display_name AS assignee_name
     FROM conversation c JOIN channel_account a ON a.id = c.channel_account_id LEFT JOIN app_user u ON u.id = c.assignee_user_id
     WHERE c.kind = 'direct' AND c.mode = 'human' AND c.sla_due_at IS NOT NULL AND c.sla_due_at < ?
     ORDER BY c.sla_due_at LIMIT ?`).bind(nowIso, SLA_BATCH).all<OverdueRow>();
+  const ensuredOrgs = new Set<string>();
   let reminded = 0;
   for (const conv of overdue.results) {
     const text = `Quá hạn trả lời: ${conv.display_name ?? conv.external_thread_id} (${conv.account_name}) – `
       + `${conv.assignee_name ?? 'chưa giao'} – ${base}/inbox/${conv.id}`;
     try {
-      await enqueueCommand(db, {
-        kind: 'send_lark', target: 'worker', conversationId: conv.id, payload: { text }, dedupeKey: `sla:${conv.id}:${conv.sla_due_at}`,
+      const posted = await postInboxNotice(sink, db, {
+        organizationId: conv.organization_id,
+        text,
+        link: `/inbox/${conv.id}`,
+        dedupeKey: `sla:${conv.id}:${conv.sla_due_at}`,
+        ensuredOrgs,
       });
+      if (!posted) continue;
       await db.prepare(`UPDATE conversation SET sla_due_at = ${slaDueSql('?1')} WHERE id = ?2 AND sla_due_at = ?3`)
         .bind(nowIso, conv.id, conv.sla_due_at).run();
       reminded += 1;
@@ -116,23 +126,97 @@ async function step(name: string, work: () => Promise<unknown>) {
   }
 }
 
+const DUE_TASK_BATCH = 5;
+const DUE_TASK_WINDOW_MS = 30 * 60_000;
+/** Web Push sends per cron run; the remaining due-task notices stay in-app only. */
+const DUE_TASK_PUSH_LIMIT = 15;
+
+/**
+ * Notifies assignees of open/in_progress tasks due within the next 30 minutes.
+ * Processes at most 5 tasks per run with one batched insert, one subscription read and at most 15 pushes;
+ * the dedupe key drains any backlog on subsequent runs.
+ */
+export async function notifyDueTasks(sink: Sink, now = new Date()): Promise<number> {
+  const nowIso = now.toISOString();
+  const untilIso = new Date(now.getTime() + DUE_TASK_WINDOW_MS).toISOString();
+  const rows = await sink.env.DB.prepare(`
+    SELECT tk.id, tk.title, tk.due_at, tk.assignee_user_id, u.organization_id
+    FROM task tk
+    JOIN app_user u ON u.id = tk.assignee_user_id
+    WHERE tk.status IN ('open', 'in_progress')
+      AND tk.due_at IS NOT NULL
+      AND tk.due_at >= ?1
+      AND tk.due_at <= ?2
+      AND u.status = 'active'
+      AND NOT EXISTS (
+        SELECT 1 FROM notification n
+        WHERE n.dedupe_key = ('task-due:' || tk.id || ':' || tk.due_at || ':' || tk.assignee_user_id)
+      )
+    ORDER BY tk.due_at ASC, tk.id ASC
+    LIMIT ?3`)
+    .bind(nowIso, untilIso, DUE_TASK_BATCH)
+    .all<{
+      id: string;
+      title: string;
+      due_at: string;
+      assignee_user_id: string;
+      organization_id: string;
+    }>();
+
+  await notifyRows(
+    sink,
+    rows.results.map((t) => ({
+      organizationId: t.organization_id,
+      userId: t.assignee_user_id,
+      kind: 'task_due' as const,
+      title: 'Việc sắp đến hạn',
+      body: t.title,
+      link: `/tasks/${t.id}`,
+      dedupeKey: `task-due:${t.id}:${t.due_at}:${t.assignee_user_id}`,
+    })),
+    DUE_TASK_PUSH_LIMIT,
+  );
+  return rows.results.length;
+}
+
 /** Entry point of the Cron Trigger: per-minute work, and the daily group summaries at 21:00 Vietnam time. */
-export async function runScheduled(env: ScheduledEnv, cron: string, now = new Date()): Promise<void> {
+export async function runScheduled(
+  env: ScheduledEnv,
+  cron: string,
+  ctxOrNow?: ExecutionContext | Date,
+  maybeNow?: Date,
+): Promise<void> {
+  const now = ctxOrNow instanceof Date ? ctxOrNow : (maybeNow ?? new Date());
+  const ctx = ctxOrNow && !(ctxOrNow instanceof Date) ? ctxOrNow : undefined;
+  const sink: Sink = {
+    env: env as Env,
+    waitUntil: (w) => {
+      if (ctx) {
+        try {
+          ctx.waitUntil(w);
+          return;
+        } catch {
+          /* fall through */
+        }
+      }
+      void w.catch(() => undefined);
+    },
+  };
   if (cron === DAILY_SUMMARY_CRON) {
     await step('group_summaries', () => enqueueDailyGroupSummaries(env.DB, now));
     return;
   }
   if (cron !== EVERY_MINUTE_CRON) return;
-  // Before the Worker's commands, so the Lark notice of a handoff goes out in the same minute.
-  await step('stale_replies', () => abandonStaleReplies(env.DB, env, now));
+  await step('stale_replies', () => abandonStaleReplies(env.DB, env, now, sink));
   await step('offline_session_commands', () => failOfflineSessionCommands(env.DB, now));
   if (now.getUTCMinutes() % 10 === 0) {
-    await step('zalo_oa_refresh', () => refreshZaloOaTokens(env.DB, env, now));
+    await step('zalo_oa_refresh', () => refreshZaloOaTokens(env.DB, env, now, sink));
   }
   await step('oa_avatar_backfill', () => backfillOaSenderAvatars(env.DB, env, now));
-  await step('worker_commands', () => processWorkerCommands(env));
-  await step('sla', () => checkSla(env.DB, now, env.APP_URL));
+  await step('worker_commands', () => processWorkerCommands(env, sink));
+  await step('sla', () => checkSla(env.DB, sink, now, env.APP_URL));
   await step('stuck_outgoing', () => sweepStuckOutgoing(env.DB, now));
   await step('extract_idle', () => extractIdleConversations(env.DB, now));
   await step('group_schedules', () => runDueSchedules(env.DB, now));
+  await step('due_tasks', () => notifyDueTasks(sink, now));
 }

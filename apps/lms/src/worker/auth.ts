@@ -97,6 +97,7 @@ const fail = (code: string, message: string, fields?: Record<string, string>) =>
 });
 
 const wrongCredentials = fail('UNAUTHENTICATED', 'Email hoặc mật khẩu không đúng');
+const sessionExpired = fail('UNAUTHENTICATED', 'Phiên đăng nhập đã hết, vui lòng đăng nhập lại');
 
 const DUMMY_CREDENTIAL: StoredPassword = {
   hash: `${'A'.repeat(43)}=`,
@@ -220,7 +221,7 @@ publicAuthRoutes.post('/login', async (c) => {
 export const requireLearner: MiddlewareHandler<AppBindings> = async (c, next) => {
   const token = getCookie(c, SESSION_COOKIE);
   if (!token) {
-    return c.json(wrongCredentials, 401);
+    return c.json(sessionExpired, 401);
   }
   const hash = await tokenHash(token);
   const nowIso = new Date().toISOString();
@@ -240,7 +241,7 @@ export const requireLearner: MiddlewareHandler<AppBindings> = async (c, next) =>
     }>();
 
   if (!row) {
-    return c.json(wrongCredentials, 401);
+    return c.json(sessionExpired, 401);
   }
 
   c.set('learner', {

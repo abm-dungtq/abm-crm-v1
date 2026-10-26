@@ -4,7 +4,8 @@ import {
 } from '@abm/contracts';
 import type { Actor } from './env';
 import { learnerPhoneVisible } from './learner-queries';
-import { leadScope, mayDecideApproval, type SqlFragment } from './scope';
+import { leadScope, mayDecideApproval } from './scope';
+import { canSeeTask, taskScope } from './task-scope';
 
 export type HealthState = 'ok' | 'warn' | 'breach';
 
@@ -182,44 +183,102 @@ export function searchMatcher(q: string) {
   });
 }
 
-function taskScope(actor: Actor): SqlFragment {
-  if (actor.role === 'sale') return { sql: 'tk.assignee_user_id = ?', binds: [actor.id] };
-  return leadScope(actor);
-}
-
 export const vnDate = (d: Date) => new Date(d.getTime() + 7 * 3600_000).toISOString().slice(0, 10);
 
-export async function listTasks(db: D1Database, actor: Actor, status: 'open' | 'completed' = 'open') {
-  const scope = taskScope(actor);
-  const rows = await db.prepare(`
-    SELECT tk.id, tk.title, tk.due_at, tk.status, tk.outcome, tk.completed_at, tk.version,
-      tk.assignee_user_id, u.display_name AS assignee_name,
-      l.id AS lead_id, l.code AS lead_code, l.stage AS lead_stage, l.status AS lead_status, l.version AS lead_version,
-      l.pipeline, l.contact_id,
-      (l.next_action_task_id = tk.id) AS is_next_action,
-      c.display_name AS contact_name, a.name AS account_name
-    FROM task tk
-    JOIN lead l ON l.id = tk.lead_id
-    JOIN contact c ON c.id = l.contact_id
-    LEFT JOIN account a ON a.id = l.account_id
-    LEFT JOIN app_user u ON u.id = tk.assignee_user_id
-    WHERE ${scope.sql} AND tk.status = ?
-    ORDER BY ${status === 'open' ? 'tk.due_at ASC' : 'tk.completed_at DESC'} LIMIT 300`)
-    .bind(...scope.binds, status).all<Record<string, unknown> & { due_at: string; is_next_action: number }>();
-  const now = new Date();
-  const today = vnDate(now);
-  return rows.results.map((r) => ({
-    id: r.id as string, title: r.title as string, dueAt: r.due_at, status: r.status as string,
-    outcome: r.outcome as string | null, completedAt: r.completed_at as string | null, version: r.version as number,
+const TASK_SELECT = `
+  SELECT tk.id, tk.kind, tk.title, tk.description, tk.priority, tk.parent_task_id, tk.due_at, tk.status, tk.outcome, tk.completed_at, tk.version,
+    tk.assignee_user_id, u.display_name AS assignee_name,
+    tk.created_by_user_id, cu.display_name AS created_by_name,
+    l.id AS lead_id, l.code AS lead_code, l.stage AS lead_stage, l.status AS lead_status, l.version AS lead_version,
+    l.pipeline, l.contact_id,
+    (l.next_action_task_id = tk.id) AS is_next_action,
+    c.display_name AS contact_name, a.name AS account_name
+  FROM task tk
+  LEFT JOIN lead l ON l.id = tk.lead_id
+  LEFT JOIN contact c ON c.id = l.contact_id
+  LEFT JOIN account a ON a.id = l.account_id
+  LEFT JOIN app_user u ON u.id = tk.assignee_user_id
+  LEFT JOIN app_user cu ON cu.id = tk.created_by_user_id`;
+
+function toTaskItem(r: Record<string, unknown> & { due_at: string | null; is_next_action: number }, now: Date, today: string) {
+  const openOrProgress = r.status === 'open' || r.status === 'in_progress';
+  const bucket = !openOrProgress
+    ? 'done'
+    : !r.due_at
+      ? 'nodue'
+      : new Date(r.due_at) < now
+        ? 'overdue'
+        : vnDate(new Date(r.due_at)) === today
+          ? 'today'
+          : 'upcoming';
+  return {
+    id: r.id as string,
+    kind: r.kind as 'crm' | 'internal',
+    title: r.title as string,
+    description: (r.description as string | null) ?? null,
+    priority: r.priority as 'low' | 'normal' | 'high' | 'urgent',
+    parentTaskId: (r.parent_task_id as string | null) ?? null,
+    dueAt: (r.due_at as string | null) ?? null,
+    status: r.status as string,
+    outcome: r.outcome as string | null,
+    completedAt: r.completed_at as string | null,
+    version: r.version as number,
     assignee: { id: r.assignee_user_id as string, name: r.assignee_name as string },
     isNextAction: Boolean(r.is_next_action),
-    lead: {
+    lead: r.lead_id ? {
       id: r.lead_id as string, code: r.lead_code as string, stage: r.lead_stage as string, status: r.lead_status as string,
       version: r.lead_version as number, pipeline: r.pipeline as string, contactId: r.contact_id as string,
       contactName: r.contact_name as string, accountName: r.account_name as string | null,
-    },
-    bucket: r.status !== 'open' ? 'done' : new Date(r.due_at) < now ? 'overdue' : vnDate(new Date(r.due_at)) === today ? 'today' : 'upcoming',
-  }));
+    } : null,
+    bucket,
+  };
+}
+
+export async function listTasks(
+  db: D1Database,
+  actor: Actor,
+  status: 'open' | 'in_progress' | 'completed' = 'open',
+  mine = false,
+) {
+  const scope = taskScope(actor);
+  const mineClause = mine
+    ? ' AND (tk.assignee_user_id = ? OR EXISTS (SELECT 1 FROM task_member tm WHERE tm.task_id = tk.id AND tm.user_id = ?))'
+    : '';
+  const mineBinds = mine ? [actor.id, actor.id] : [];
+  const rows = await db.prepare(`${TASK_SELECT}
+    WHERE ${scope.sql} AND tk.status = ?${mineClause}
+    ORDER BY ${status === 'completed' ? 'tk.completed_at DESC' : 'tk.due_at IS NULL, tk.due_at ASC'} LIMIT 300`)
+    .bind(...scope.binds, status, ...mineBinds)
+    .all<Record<string, unknown> & { due_at: string | null; is_next_action: number }>();
+  const now = new Date();
+  const today = vnDate(now);
+  return rows.results.map((r) => toTaskItem(r, now, today));
+}
+
+export async function taskDetail(db: D1Database, actor: Actor, id: string) {
+  if (!(await canSeeTask(db, actor, id))) return null;
+  const row = await db.prepare(`${TASK_SELECT} WHERE tk.id = ?`)
+    .bind(id)
+    .first<Record<string, unknown> & { due_at: string | null; is_next_action: number }>();
+  if (!row) return null;
+  const [members, subtasks, parent] = await Promise.all([
+    db.prepare('SELECT u.id, u.display_name AS name FROM task_member tm JOIN app_user u ON u.id = tm.user_id WHERE tm.task_id = ? ORDER BY u.display_name')
+      .bind(id).all<{ id: string; name: string }>(),
+    db.prepare('SELECT id, title, status FROM task WHERE parent_task_id = ? ORDER BY created_at ASC')
+      .bind(id).all<{ id: string; title: string; status: string }>(),
+    row.parent_task_id
+      ? db.prepare('SELECT id, title FROM task WHERE id = ?').bind(row.parent_task_id).first<{ id: string; title: string }>()
+      : Promise.resolve(null),
+  ]);
+  const now = new Date();
+  const today = vnDate(now);
+  return {
+    ...toTaskItem(row, now, today),
+    createdBy: row.created_by_user_id ? { id: row.created_by_user_id as string, name: row.created_by_name as string } : null,
+    members: members.results,
+    subtasks: subtasks.results,
+    parent: parent ?? null,
+  };
 }
 
 export async function dashboard(db: D1Database, actor: Actor) {
@@ -324,6 +383,14 @@ export async function teamMembers(db: D1Database, teamId: string | null) {
   const rows = await db.prepare(`SELECT id, display_name AS name, role FROM app_user
     WHERE team_id = ? AND status = 'active' AND role IN ('sale', 'leader') ORDER BY role DESC, display_name`).bind(teamId)
     .all<{ id: string; name: string; role: string }>();
+  return rows.results;
+}
+
+export async function directory(db: D1Database, organizationId: string) {
+  const rows = await db.prepare(`SELECT u.id, u.display_name AS name, u.role, t.name AS teamName
+    FROM app_user u LEFT JOIN team t ON t.id = u.team_id
+    WHERE u.organization_id = ? AND u.status = 'active' ORDER BY u.display_name`).bind(organizationId)
+    .all<{ id: string; name: string; role: string; teamName: string | null }>();
   return rows.results;
 }
 
@@ -543,7 +610,7 @@ export async function adminOverview(db: D1Database, actor: Actor) {
       WHERE d.organization_id = ? ORDER BY t.name`).bind(actor.organizationId).all(),
     db.prepare(`SELECT u.id, u.display_name AS name, u.email, u.role, u.status, u.version, t.name AS teamName, d.name AS departmentName,
         u.must_change_password = 1 AS mustChangePassword, u.password_hash IS NOT NULL AS hasPassword,
-        u.temp_password_expires_at AS tempPasswordExpiresAt, u.lark_link_status AS larkLinkStatus, u.lark_checked_at AS larkCheckedAt,
+        u.temp_password_expires_at AS tempPasswordExpiresAt,
         (SELECT COUNT(*) FROM agent_token at WHERE at.user_id = u.id AND at.revoked_at IS NULL) AS agentTokens
       FROM app_user u LEFT JOIN team t ON t.id = u.team_id LEFT JOIN department d ON d.id = u.department_id
       WHERE u.organization_id = ? ORDER BY u.role, u.display_name`).bind(actor.organizationId).all(),

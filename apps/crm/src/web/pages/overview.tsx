@@ -119,17 +119,17 @@ function OverviewBody({ data }: { data: Overview }) {
 
         <section className="card" aria-labelledby="ov-bot-h">
           <div className="card-head">
-            <h2 id="ov-bot-h">Bot &amp; Lark</h2><span className="spacer" />
+            <h2 id="ov-bot-h">Bot</h2><span className="spacer" />
             <Badge tone={data.bot.agentWritesOpen ? 'ok' : 'danger'}>{data.bot.agentWritesOpen ? 'Bot được ghi' : 'Bot đang khóa ghi'}</Badge>
           </div>
           <ul className="list">
             <li className="row"><span style={{ flex: 1 }}>Chìa khóa bot đang dùng</span><span className="num">{data.bot.activeTokens}</span></li>
             <li className="row"><span style={{ flex: 1 }}>Thao tác ghi qua bot (7 ngày)</span><span className="num">{data.bot.agentWrites7d}</span></li>
             {data.bot.outbox.length === 0
-              ? <li className="small muted">Chưa có tin nhắn Lark nào.</li>
+              ? <li className="small muted">Outbox trống.</li>
               : data.bot.outbox.map((o) => (
                 <li key={o.status} className="row">
-                  <span style={{ flex: 1 }}>Tin nhắn Lark: {OUTBOX_STATUS[o.status] ?? o.status}</span>
+                  <span style={{ flex: 1 }}>Outbox: {OUTBOX_STATUS[o.status] ?? o.status}</span>
                   {o.status === 'failed' && o.count > 0 ? <Badge tone="danger">{o.count}</Badge> : <span className="num">{o.count}</span>}
                 </li>
               ))}

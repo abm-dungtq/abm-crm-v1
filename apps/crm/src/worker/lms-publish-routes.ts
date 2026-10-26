@@ -68,8 +68,10 @@ lmsPublishRoutes.use('*', async (c, next) => {
   const token = c.req.header('Authorization')?.match(/^Bearer ([^\s]+)$/)?.[1];
   if (!token) return c.json({ error: 'unauthorized' }, 401);
   const db = c.env.DB;
-  const row = await db.prepare('SELECT id, user_id FROM agent_token WHERE token_hash = ? AND revoked_at IS NULL')
-    .bind(await sha256(token)).first<{ id: string; user_id: string }>();
+  // Only script-issued tokens may publish; self-service MCP tokens (read / read_tasks) never reach this API.
+  const row = await db.prepare(`SELECT id, user_id FROM agent_token WHERE token_hash = ? AND revoked_at IS NULL
+      AND scope = 'legacy' AND (expires_at IS NULL OR expires_at > ?)`)
+    .bind(await sha256(token), new Date().toISOString()).first<{ id: string; user_id: string }>();
   const actor = row ? await loadAgentActor(db, row.user_id) : null;
   if (!row || !actor) return c.json({ error: 'unauthorized' }, 401);
   await background(c, db.prepare('UPDATE agent_token SET last_used_at = ? WHERE id = ?').bind(new Date().toISOString(), row.id).run());

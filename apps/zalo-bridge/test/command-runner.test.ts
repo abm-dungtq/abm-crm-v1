@@ -330,7 +330,7 @@ describe('CommandRunner', () => {
     });
     runner.dispatch(command('c1', 'run_completion', { agentKey: 'bot', userId: 'u', text: 'hi' }, 'conv-1', 3));
     runner.dispatch(command('c2', 'run_completion', { userId: 'u', text: 'hi' }, 'conv-1', 1));
-    runner.dispatch(command('c3', 'send_lark', { text: 'x' }, null, 1));
+    runner.dispatch(command('c3', 'retired_kind' as BridgeCommand['kind'], { text: 'x' }, null, 1));
     await runner.idle();
     expect([...results].sort((a, b) => a.id.localeCompare(b.id))).toEqual([
       { id: 'c1', result: { attempts: 3, ok: false, error: 'GOCLAW_HTTP_429' } },

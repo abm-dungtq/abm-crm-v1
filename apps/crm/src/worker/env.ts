@@ -3,18 +3,15 @@ import type { Context } from 'hono';
 
 export interface Env {
   DB: D1Database;
+  CHAT_HUB: DurableObjectNamespace;
   /** Inbox images uploaded by staff. Keys are `org/<organizationId>/<yyyy>/<mm>/<uuid>.<jpg|png>`. */
   MEDIA: R2Bucket;
   ASSETS: Fetcher;
   /** `password` enables cookie sessions; otherwise the evaluation header path applies. */
   AUTH_MODE?: string;
   DEMO_MODE?: string;
-  LARK_APP_ID?: string;
-  LARK_APP_SECRET?: string;
   /** Shared HMAC secret that signs requests between the Zalo bridge sidecar and the Worker. */
   BRIDGE_SECRET?: string;
-  /** Lark group chat that receives inbox handoff and SLA notices. */
-  LARK_INBOX_CHAT_ID?: string;
   /** Facebook app secret used to verify Messenger webhook signatures. */
   FB_APP_SECRET?: string;
   /** Token Facebook echoes back when subscribing the Messenger webhook. */
@@ -47,6 +44,10 @@ export interface Env {
   JEV_MODEL?: string;
   /** TypeSafe API key. Customer text is masked for emails, phones and long numbers before it is sent. */
   TYPESAFE_API_KEY?: string;
+  /** Web Push VAPID public key (base64url raw P-256 point) and contact subject; private key is a secret. */
+  VAPID_PUBLIC_KEY?: string;
+  VAPID_SUBJECT?: string;
+  VAPID_PRIVATE_KEY?: string;
 }
 
 /** Authenticated principal. Always resolved server-side; never taken from a request body. */
@@ -61,7 +62,13 @@ export interface Actor {
   kind: 'human' | 'agent';
 }
 
-export type AppBindings = { Bindings: Env; Variables: { actor: Actor; mustChangePassword: boolean } };
+/** MCP token scope: `legacy` for script-issued tokens, `read` / `read_tasks` for self-service tokens. */
+export type TokenScope = 'legacy' | 'read' | 'read_tasks';
+
+export type AppBindings = {
+  Bindings: Env;
+  Variables: { actor: Actor; mustChangePassword: boolean; tokenScope?: TokenScope; tokenId?: string };
+};
 
 /** Runs work after the response when the runtime allows it; tests have no ExecutionContext, so it is awaited there. */
 export async function background(c: Context, work: Promise<unknown>) {
@@ -70,4 +77,18 @@ export async function background(c: Context, work: Promise<unknown>) {
   } catch {
     await work;
   }
+}
+
+export interface Sink {
+  env: Env;
+  waitUntil(work: Promise<unknown>): void;
+}
+
+export function sinkFrom(c: Context<AppBindings>): Sink {
+  return {
+    env: c.env,
+    waitUntil: (w) => {
+      void background(c, w);
+    },
+  };
 }

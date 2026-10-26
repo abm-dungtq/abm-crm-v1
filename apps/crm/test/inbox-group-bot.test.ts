@@ -10,6 +10,7 @@ import {
 import { runDueSchedules, vnDayStart } from '../src/worker/inbox/group-schedules';
 import { ingestEvents } from '../src/worker/inbox/ingest';
 import { resetDb } from './helpers/reset-db';
+import { testSink } from './helpers/test-sink';
 
 const db = env.DB;
 const ORIGIN = 'http://crm.test';
@@ -40,7 +41,7 @@ const groupMessage = (overrides: Record<string, unknown> = {}) => ({
   msgId: `gm-${++msgSeq}`, fromSelf: false, senderExternalId: 'hv-lan', senderName: 'Lan', text: 'Mai học bài gì ạ',
   sentAt: new Date().toISOString(), mentionsSelf: false, quotesSelf: false, ...overrides,
 });
-const ingest = (...events: BridgeEvent[]) => ingestEvents(db, events);
+const ingest = (...events: BridgeEvent[]) => ingestEvents(db, events, testSink());
 const enableBot = () => db.prepare("UPDATE conversation SET bot_reply_enabled = 1 WHERE id = 'grp-1'").run();
 const group = () => db.prepare("SELECT * FROM conversation WHERE id = 'grp-1'").first<Record<string, unknown>>();
 const commands = (kind: string) => db.prepare('SELECT * FROM channel_command WHERE kind = ? ORDER BY created_at, rowid').bind(kind).all<any>()
@@ -181,7 +182,7 @@ test('a completion sends one group reply that quotes the learner', async () => {
   await enableBot();
   const outcome = await applyCompletionResult(db, { APP_URL }, 'grp-1', 'Dạ em gửi lịch ạ', undefined, {
     replyTo: { msgId: 'z-1', senderId: 'hv-lan', senderName: 'Lan' },
-  });
+  }, testSink());
   expect(outcome).toEqual({ workerCommandQueued: false });
   const out = (await messages()).at(-1);
   expect(out).toMatchObject({ direction: 'out', sender_kind: 'bot', status: 'pending', body: '@Lan Dạ em gửi lịch ạ' });
@@ -202,7 +203,7 @@ test('a staff message after the trigger drops the reply as a cancelled note', as
     VALUES ('staff-1', 'grp-1', 'in', 'customer', 'hv-hung', 'Để anh trả lời', 'received', '2026-10-13T01:00:05.000Z')`).run();
   await applyCompletionResult(db, { APP_URL }, 'grp-1', 'Dạ em gửi lịch ạ', undefined, {
     triggerMessageId: 'trig-1', replyTo: { msgId: 'z-1', senderId: 'hv-lan', senderName: 'Lan' },
-  });
+  }, testSink());
   expect(await commands('send_zalo')).toHaveLength(0);
   expect((await messages()).at(-1)).toMatchObject({
     sender_kind: 'system', status: 'failed', body: '[Bot trả lời bị huỷ vì đã chuyển người] Dạ em gửi lịch ạ',
@@ -210,28 +211,32 @@ test('a staff message after the trigger drops the reply as a cancelled note', as
   expect(await group()).toMatchObject({ mode: 'ai' });
 });
 
-test('a handoff marker in a group notifies Lark and stays in ai mode', async () => {
+test('a handoff marker in a group notifies the CRM inbox group and stays in ai mode', async () => {
+  const inboxNotices = () => db.prepare("SELECT id, author_kind, body, meta_json FROM chat_message WHERE conversation_id = 'sys:inbox:org-abm' ORDER BY created_at, rowid")
+    .all<any>().then((r) => r.results);
   await enableBot();
   await db.prepare(`INSERT INTO message (id, conversation_id, direction, sender_kind, sender_external_id, body, status, created_at)
     VALUES ('trig-1', 'grp-1', 'in', 'customer', 'hv-lan', 'Lịch học ngày mai', 'received', '2026-10-13T01:00:00.000Z')`).run();
   const outcome = await applyCompletionResult(db, { APP_URL }, 'grp-1', 'Dạ em chuyển người hỗ trợ.\n[HANDOFF: cần giáo viên]', undefined, {
     triggerMessageId: 'trig-1', replyTo: { msgId: 'z-1', senderId: 'hv-lan', senderName: 'Lan' }, commandId: 'cmd-h',
-  });
-  expect(outcome).toEqual({ workerCommandQueued: true });
+  }, testSink());
+  expect(outcome).toEqual({ workerCommandQueued: false });
   expect((await messages()).filter((row) => row.sender_kind === 'bot').at(-1)?.body).toBe('@Lan Dạ em chuyển người hỗ trợ.');
-  const [notice] = await commands('send_lark');
-  expect(notice.dedupe_key).toBe('group-help:cmd-h');
-  expect(notice.payload.text).toBe(
+  const [notice] = await inboxNotices();
+  expect(notice.id).toBe('notice:group-help:cmd-h');
+  expect(notice.body).toBe(
     `Nhóm Zalo cần hỗ trợ: Lớp IELTS K1 (Số tư vấn 1) – Lan hỏi: "Lịch học ngày mai" – cần giáo viên – ${APP_URL}/inbox/grp-1`,
   );
   expect(await group()).toMatchObject({ mode: 'ai', handoff_reason: null });
 
   await notifyGroupHelp(db, { APP_URL }, 'grp-1', 'cần giáo viên', 'trig-1', undefined,
-    { commandId: 'cmd-h', replyTo: { msgId: 'z-1', senderId: 'hv-lan', senderName: 'Lan' } });
-  expect(await commands('send_lark')).toHaveLength(1);
+    { commandId: 'cmd-h', replyTo: { msgId: 'z-1', senderId: 'hv-lan', senderName: 'Lan' } }, testSink());
+  expect(await inboxNotices()).toHaveLength(1);
 });
 
-test('a failed or stale group reply notifies Lark once and does not change mode', async () => {
+test('a failed or stale group reply notifies the CRM inbox group once and does not change mode', async () => {
+  const inboxNotices = () => db.prepare("SELECT id, author_kind, body, meta_json FROM chat_message WHERE conversation_id = 'sys:inbox:org-abm' ORDER BY created_at, rowid")
+    .all<any>().then((r) => r.results);
   await enableBot();
   await ingest(groupMessage({ mentionsSelf: true, text: 'Lịch học ngày mai' }));
   const [reply] = await commands('run_completion');
@@ -239,11 +244,11 @@ test('a failed or stale group reply notifies Lark once and does not change mode'
     .bind(new Date(Date.now() + 60_000).toISOString(), reply.id).run();
   const failed = await bridge(`/commands/${reply.id}/result`, { attempts: 5, ok: false, error: 'GOCLAW_HTTP_500' });
   expect(failed.json.data).toEqual({ ignored: false });
-  const notices = await commands('send_lark');
+  const notices = await inboxNotices();
   expect(notices).toHaveLength(1);
-  expect(notices[0].dedupe_key).toBe(`group-help:${reply.id}`);
-  expect(notices[0].payload.text).toContain('Nhóm Zalo cần hỗ trợ');
-  expect(notices[0].payload.text).toContain(BOT_SILENT_REASON);
+  expect(notices[0].id).toBe(`notice:group-help:${reply.id}`);
+  expect(notices[0].body).toContain('Nhóm Zalo cần hỗ trợ');
+  expect(notices[0].body).toContain(BOT_SILENT_REASON);
   expect(await group()).toMatchObject({ mode: 'ai' });
 
   await db.prepare('DELETE FROM channel_command').run();
@@ -257,10 +262,10 @@ test('a failed or stale group reply notifies Lark once and does not change mode'
   });
   const old = new Date(Date.now() - 11 * 60_000).toISOString();
   await db.prepare("UPDATE channel_command SET created_at = ?, next_run_at = ? WHERE id = ?").bind(old, old, staleId).run();
-  expect(await abandonStaleReplies(db, { APP_URL })).toBe(1);
-  const staleNotices = (await commands('send_lark')).filter((row) => row.dedupe_key === `group-help:${staleId}`);
+  expect(await abandonStaleReplies(db, { APP_URL }, new Date(), testSink())).toBe(1);
+  const staleNotices = (await inboxNotices()).filter((row) => row.id === `notice:group-help:${staleId}`);
   expect(staleNotices).toHaveLength(1);
-  expect(staleNotices[0].payload.text).toContain('Nhóm Zalo cần hỗ trợ');
+  expect(staleNotices[0].body).toContain('Nhóm Zalo cần hỗ trợ');
   expect(await group()).toMatchObject({ mode: 'ai' });
 });
 

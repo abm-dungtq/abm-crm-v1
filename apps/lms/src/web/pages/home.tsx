@@ -107,7 +107,7 @@ export function HomePage({ me }: { me: LearnerMe }) {
                 </div>
                 <div className="note">
                   Đã học {p.completedCount}/{p.lessonCount} phần
-                  {!isExpired && p.nextSectionId ? ` · Tiếp tục: ${p.nextSectionId}` : ''}
+                  {!isExpired && p.nextLessonTitle ? ` · Tiếp tục: ${p.nextLessonTitle}` : ''}
                 </div>
               </div>
             );

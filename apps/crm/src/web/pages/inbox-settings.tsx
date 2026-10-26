@@ -85,7 +85,7 @@ function SettingsCard() {
           </fieldset>
           <Field label="Hạn trả lời (phút)" required htmlFor="inbox-sla"
             error={errors.slaMinutes ?? (sla && !validSla ? `Từ ${SLA_MIN} đến ${SLA_MAX} phút` : undefined)}
-            hint="Quá hạn mà nhân viên chưa trả lời khách thì nhắc trên Lark.">
+            hint="Quá hạn mà nhân viên chưa trả lời khách thì nhắc trong nhóm Inbox của chat CRM.">
             <input id="inbox-sla" type="number" inputMode="numeric" min={SLA_MIN} max={SLA_MAX} step={1} required value={sla}
               aria-invalid={Boolean(errors.slaMinutes) || (Boolean(sla) && !validSla)} onChange={(e) => setSla(e.target.value)} style={{ maxWidth: 160 }} />
           </Field>

@@ -13,17 +13,14 @@ export interface Actor {
 
 export interface Me extends Actor { mustChangePassword: boolean }
 
-export type LarkLinkStatus = 'unlinked' | 'linked' | 'unmatched' | 'error';
 export interface AdminUser {
   id: string; name: string; email: string; role: RoleCode; status: 'active' | 'disabled'; version: number;
   teamName: string | null; departmentName: string | null;
   /** SQLite booleans arrive as 0/1. */
   mustChangePassword: number; hasPassword: number; tempPasswordExpiresAt: string | null;
-  larkLinkStatus: LarkLinkStatus; larkCheckedAt: string | null;
   agentTokens: number;
 }
 export interface IssuedPassword { name: string; email: string; password: string; expiresAt: string }
-export interface LarkLinkResult { linked: number; unmatched: number; error: number; message?: string }
 
 export interface DemoUser { id: string; name: string; role: RoleCode; teamName: string | null }
 
@@ -68,10 +65,16 @@ export interface LeadItem {
 export interface ListPage<T> { items: T[]; truncated: boolean }
 export interface LeadPage extends ListPage<LeadItem> { counts: Record<string, number> | null }
 
+export type TaskPriority = 'low' | 'normal' | 'high' | 'urgent';
+
 export interface TaskItem {
   id: string;
+  kind: 'crm' | 'internal';
   title: string;
-  dueAt: string;
+  description: string | null;
+  priority: TaskPriority;
+  parentTaskId: string | null;
+  dueAt: string | null;
   status: string;
   outcome: string | null;
   completedAt: string | null;
@@ -81,8 +84,104 @@ export interface TaskItem {
   lead: {
     id: string; code: string; stage: string; status: string; version: number;
     pipeline: string; contactId: string; contactName: string; accountName: string | null;
-  };
-  bucket: 'overdue' | 'today' | 'upcoming' | 'done';
+  } | null;
+  bucket: 'overdue' | 'today' | 'upcoming' | 'nodue' | 'done';
+}
+
+export interface TaskDetail extends TaskItem {
+  createdBy: { id: string; name: string } | null;
+  members: { id: string; name: string }[];
+  subtasks: { id: string; title: string; status: string }[];
+  parent: { id: string; title: string } | null;
+}
+
+export interface DirectoryUser {
+  id: string;
+  name: string;
+  role: RoleCode;
+  teamName: string | null;
+}
+
+export interface ChatAttachment {
+  id: string;
+  fileName: string;
+  contentType: string;
+  size: number;
+}
+
+export interface ChatMessage {
+  id: string;
+  conversationId: string;
+  authorKind: 'user' | 'agent' | 'system';
+  authorUserId: string | null;
+  authorAgentId: string | null;
+  authorName: string | null;
+  parentMessageId: string | null;
+  body: string;
+  mentions: string[];
+  meta: Record<string, unknown> | null;
+  createdAt: string;
+  deleted: boolean;
+  duplicate?: boolean;
+  attachments?: ChatAttachment[];
+}
+
+export interface ChatConversationSummary {
+  id: string;
+  kind: 'group' | 'direct';
+  title: string;
+  agentReadable: boolean;
+  lastMessage: string;
+  lastMessageAt: string | null;
+  updatedAt: string;
+  unread: number;
+}
+
+export interface ChatMember {
+  id: string;
+  name: string;
+  role: 'owner' | 'member';
+}
+
+export interface ChatAgentItem {
+  id: string;
+  name: string;
+  canDm: boolean;
+  canGroup: boolean;
+  enabled?: boolean;
+}
+
+export interface AdminChatAgent {
+  id: string;
+  displayName: string;
+  dmAgentKey: string | null;
+  groupAgentKey: string | null;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ChatTaskSuggestion {
+  title: string;
+  assigneeName: string;
+  assigneeUserId: string | null;
+  dueDate: string | null;
+}
+
+export interface ChatConversationDetail {
+  id: string;
+  kind: 'group' | 'direct' | 'task';
+  title: string;
+  taskId: string | null;
+  /** A system group (the "Inbox" group): members follow the roster and cannot be edited by hand. */
+  system: boolean;
+  agentReadable: boolean;
+  createdByUserId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  lastMessageAt: string | null;
+  members: ChatMember[];
+  agents?: ChatAgentItem[];
 }
 
 export interface DashboardPipelineBreakdown {
@@ -109,7 +208,7 @@ export interface Dashboard {
   pipeline: { stage: StageCode; count: number; value: number }[];
   bySale: { id: string; name: string; active: number; overdue: number; stale: number; won: number; lost: number; value: number }[];
   attention: LeadItem[];
-  upcoming: TaskItem[];
+  upcoming: (TaskItem & { lead: NonNullable<TaskItem['lead']> })[];
   lostReasons: { code: string; count: number }[];
 }
 
@@ -595,6 +694,14 @@ export type ClassLmsDetail =
     hasDefaultPassword: boolean;
   };
 
+export interface LmsProgramOptionLesson {
+  id: string;
+  sectionId: string;
+  title: string;
+  groupTitle: string | null;
+  position: number;
+}
+
 export interface LmsProgramOption {
   programId: string;
   classId: string | null;
@@ -602,6 +709,40 @@ export interface LmsProgramOption {
   courseName: string | null;
   title: string;
   lessonCount: number;
+  lessons?: LmsProgramOptionLesson[];
+}
+
+export type ImportLessonVideoStatus =
+  | 'ready'
+  | 'duplicate'
+  | 'no_program'
+  | 'no_lesson'
+  | 'bad_link'
+  | 'error';
+
+export interface ImportLessonVideoRow {
+  line: number;
+  title: string;
+  streamUid: string;
+  status: ImportLessonVideoStatus;
+  message?: string;
+  programId?: string;
+  programTitle?: string;
+  className?: string;
+  lessonId?: string;
+  lessonTitle?: string;
+  sectionId?: string;
+}
+
+export interface ImportLessonVideosResult {
+  committed: boolean;
+  rows: ImportLessonVideoRow[];
+  summary: {
+    ready: number;
+    duplicate: number;
+    unmatched: number;
+    errors: number;
+  };
 }
 
 export interface LmsOpenClass {

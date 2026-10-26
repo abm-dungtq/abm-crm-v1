@@ -168,3 +168,13 @@ test('editing a user validates placement and reports duplicate email', async () 
   expect(await db.prepare("SELECT role, team_id FROM app_user WHERE id = 'u-lan'").first()).toEqual({ role: 'leader', team_id: 'team-kd2' });
   expect((await admin('/admin/users/u-lan', { version: v, name: 'Cũ' }, 'PATCH')).status).toBe(409);
 });
+
+test('locking a user deletes every push subscription of theirs, and only theirs', async () => {
+  const stamp = new Date().toISOString();
+  const sub = (id: string, userId: string) => db.prepare(`INSERT INTO push_subscription (id, user_id, endpoint, p256dh, auth, created_at)
+    VALUES (?, ?, ?, 'p256dh-key', 'auth-key', ?)`).bind(id, userId, `https://push.example/${id}`, stamp);
+  await db.batch([sub('ps-lan-1', 'u-lan'), sub('ps-lan-2', 'u-lan'), sub('ps-long-1', 'u-long')]);
+  expect((await admin('/admin/users/u-lan/status', { version: await version('u-lan'), status: 'disabled' })).status).toBe(200);
+  expect(await count("SELECT COUNT(*) AS n FROM push_subscription WHERE user_id = 'u-lan'")).toBe(0);
+  expect(await count("SELECT COUNT(*) AS n FROM push_subscription WHERE user_id = 'u-long'")).toBe(1);
+});

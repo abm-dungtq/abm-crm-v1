@@ -5,6 +5,7 @@ import app from '../src/worker/index';
 import { ingestEvents } from '../src/worker/inbox/ingest';
 import { MEDIA_BODY_OVERHEAD, MEDIA_MAX_BYTES } from '../src/worker/inbox/media';
 import { resetDb } from './helpers/reset-db';
+import { testSink } from './helpers/test-sink';
 
 const db = env.DB;
 const ORIGIN = 'http://crm.test';
@@ -67,7 +68,7 @@ async function openConversation() {
   await ingestEvents(db, [{
     type: 'message', accountExternalId: 'zalo-acc-1', threadId: 'cust-1', threadKind: 'direct', msgId: 'zm-1',
     fromSelf: false, senderExternalId: 'cust-1', senderName: 'Chị Hoa', text: 'Cho em hỏi', sentAt: new Date().toISOString(),
-  }]);
+  }], testSink());
   return db.prepare("SELECT id FROM conversation WHERE external_thread_id = 'cust-1'").first<{ id: string }>();
 }
 

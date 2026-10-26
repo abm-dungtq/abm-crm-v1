@@ -8,6 +8,7 @@ import { runScheduled } from '../src/worker/inbox/scheduled';
 import { processWorkerCommands } from '../src/worker/inbox/worker-commands';
 import { accessToken, decryptToken, encryptToken, refreshZaloOaTokens, saveCredential, ZALO_OA_REDIRECT_URI } from '../src/worker/inbox/zalo-oa-oauth';
 import { resetDb } from './helpers/reset-db';
+import { testSink } from './helpers/test-sink';
 
 const db = env.DB;
 const ORIGIN = 'http://crm.test';
@@ -289,7 +290,7 @@ test('a near-expiry credential is refreshed once, a stale version writes nothing
     .toBe(beforeLost!.version + 1);
   expect(await db.prepare('SELECT status, last_error FROM channel_account WHERE id = ?').bind('ca-oa').first())
     .toEqual({ status: 'connected', last_error: null });
-  expect(await commands('send_lark')).toHaveLength(0);
+  expect(await db.prepare("SELECT id FROM chat_message WHERE conversation_id = 'sys:inbox:org-abm'").all().then((r) => r.results)).toHaveLength(0);
   expect(await accessToken(db, testEnv, 'ca-oa', now)).toBe('refreshed-access');
 
   await db.prepare('UPDATE zalo_oa_credential SET access_expires_at = ? WHERE channel_account_id = ?')
@@ -299,14 +300,15 @@ test('a near-expiry credential is refreshed once, a stale version writes nothing
   await refreshTokens(now);
   expect(await db.prepare('SELECT status, last_error FROM channel_account WHERE id = ?').bind('ca-oa').first())
     .toEqual({ status: 'error', last_error: 'ZALO_OA_REFRESH_FAILED' });
-  const [lark] = await commands('send_lark');
-  expect(lark.payload.text).toBe('Zalo OA OA ABM không làm mới được token');
-  expect(lark.dedupe_key).toMatch(/^zalo-oa-refresh:ca-oa:\d{4}-\d{2}-\d{2}$/);
-  expect(JSON.stringify(lark)).not.toContain('refreshed-access');
+  const [notice] = await db.prepare("SELECT id, author_kind, body FROM chat_message WHERE conversation_id = 'sys:inbox:org-abm' ORDER BY created_at, rowid")
+    .all<any>().then((r) => r.results);
+  expect(notice.body).toBe('Zalo OA OA ABM không làm mới được token');
+  expect(notice.id).toMatch(/^notice:zalo-oa-refresh:ca-oa:\d{4}-\d{2}-\d{2}$/);
+  expect(JSON.stringify(notice)).not.toContain('refreshed-access');
 });
 
 function refreshTokens(now: Date) {
-  return refreshZaloOaTokens(db, testEnv, now);
+  return refreshZaloOaTokens(db, testEnv, now, testSink());
 }
 
 test('the minute cron refreshes only when the UTC minute is a multiple of 10', async () => {
@@ -444,8 +446,8 @@ test('an echo of our own message changes nothing, and a seen event sets seen_at'
   const conv = await customerTurn();
   await saveTokens('send-access');
   onFetch = async (url) => (url.includes('/message/cs') ? json({ error: 0, data: { message_id: 'm_bot_1' } }) : json({ error: 0 }));
-  await applyCompletionResult(db, testEnv, conv.id, 'Học phí là 5 triệu ạ');
-  await processWorkerCommands(testEnv);
+  await applyCompletionResult(db, testEnv, conv.id, 'Học phí là 5 triệu ạ', undefined, undefined, testSink());
+  await processWorkerCommands(testEnv, testSink());
   const before = (await messages(conv.id)).length;
   const echo = await webhook({
     app_id: APP_ID, timestamp: '1710000000123', oa_id: OA_ID, event_name: 'oa_send_text',
@@ -482,8 +484,8 @@ test('both echoes of a two-part reply leave the conversation with the bot', asyn
     echoStatuses.push((await webhook(oaSend(mid, text))).status);
     return json({ error: 0, data: { message_id: mid } });
   };
-  await applyCompletionResult(db, testEnv, conv.id, longText);
-  await processWorkerCommands(testEnv);
+  await applyCompletionResult(db, testEnv, conv.id, longText, undefined, undefined, testSink());
+  await processWorkerCommands(testEnv, testSink());
   expect(echoStatuses).toEqual([200, 200]);
   expect((await conversation()).mode).toBe('ai');
   const rows = await messages(conv.id);
@@ -509,8 +511,8 @@ test('an echo that arrives before the send recorded the Zalo message id changes 
     earlyMode = (await conversation()).mode;
     return json({ error: 0, data: { message_id: 'mid-early' } });
   };
-  await applyCompletionResult(db, testEnv, conv.id, 'Học phí là 5 triệu ạ');
-  await processWorkerCommands(testEnv);
+  await applyCompletionResult(db, testEnv, conv.id, 'Học phí là 5 triệu ạ', undefined, undefined, testSink());
+  await processWorkerCommands(testEnv, testSink());
   expect(echoStatus).toBe(200);
   // The echo may fill the channel id. Only the send loop marks the row sent.
   expect(early).toEqual([{ status: 'pending', external_msg_id: 'mid-early', sender_kind: 'bot' }]);
@@ -560,8 +562,8 @@ test('a retried send is still recognised when its echo arrives after the insert 
     expect((await webhook(oaSend('mid-retry', text))).status).toBe(200);
     return json({ error: 0, data: { message_id: 'mid-retry' } });
   };
-  await applyCompletionResult(db, testEnv, conv.id, 'Học phí là 5 triệu ạ');
-  await processWorkerCommands(testEnv);
+  await applyCompletionResult(db, testEnv, conv.id, 'Học phí là 5 triệu ạ', undefined, undefined, testSink());
+  await processWorkerCommands(testEnv, testSink());
   expect((await commands('send_zalo_oa'))[0]).toMatchObject({ status: 'pending', attempts: 1 });
 
   const aged = new Date(Date.now() - 3 * 60_000).toISOString();
@@ -569,7 +571,7 @@ test('a retried send is still recognised when its echo arrives after the insert 
     .bind(aged, conv.id).run();
   await db.prepare(`UPDATE channel_command SET created_at = ?, updated_at = ?, next_run_at = ? WHERE kind = 'send_zalo_oa'`)
     .bind(aged, aged, aged).run();
-  await processWorkerCommands(testEnv);
+  await processWorkerCommands(testEnv, testSink());
 
   expect((await conversation()).mode).toBe('ai');
   const rows = await messages(conv.id);
@@ -584,8 +586,8 @@ test('a short staff reply is stored even when a recent bot reply contains it', a
   const conv = await customerTurn();
   await saveTokens('send-access');
   onFetch = async (url) => (url.includes('/message/cs') ? json({ error: 0, data: { message_id: 'm_bot_da' } }) : json({ error: 0 }));
-  await applyCompletionResult(db, testEnv, conv.id, 'Dạ, học phí khoá là 5 triệu ạ');
-  await processWorkerCommands(testEnv);
+  await applyCompletionResult(db, testEnv, conv.id, 'Dạ, học phí khoá là 5 triệu ạ', undefined, undefined, testSink());
+  await processWorkerCommands(testEnv, testSink());
   const sentAt = new Date(Date.now() - 30_000).toISOString();
   await db.prepare(`UPDATE message SET created_at = ? WHERE conversation_id = ? AND sender_kind = 'bot'`)
     .bind(sentAt, conv.id).run();
@@ -602,7 +604,7 @@ test('an echo of one part of a pending reply leaves that reply pending until the
   const conv = await customerTurn();
   await saveTokens('send-access');
   const longText = `${'a'.repeat(1500)}\n${'b'.repeat(1500)}`;
-  await applyCompletionResult(db, testEnv, conv.id, longText);
+  await applyCompletionResult(db, testEnv, conv.id, longText, undefined, undefined, testSink());
   const res = await webhook(oaSend('part-1', 'a'.repeat(1500)));
   expect(res).toEqual({ status: 200, text: 'OK' });
   expect((await conversation()).mode).toBe('ai');
@@ -613,7 +615,7 @@ test('an echo of one part of a pending reply leaves that reply pending until the
 
   onFetch = async (url) => (url.includes('/message/cs') ? json({ error: 0, data: { message_id: `mid-${csCalls().length}` } }) : json({ error: 0 }));
   calls.length = 0;
-  await processWorkerCommands(testEnv);
+  await processWorkerCommands(testEnv, testSink());
   expect(csCalls().map((call) => JSON.parse(String(call.init?.body)).message.text)).toEqual(['a'.repeat(1500), 'b'.repeat(1500)]);
   expect((await messages(conv.id)).find((message) => message.sender_kind === 'bot')).toMatchObject({
     status: 'sent', external_msg_id: 'part-1',
@@ -629,8 +631,8 @@ test('a long reply is posted in two parts, an outside-window code is final, and 
     ? json({ error: 0, data: { message_id: `mid-${csCalls().length}` } })
     : json({ error: 0 }));
   calls.length = 0;
-  await applyCompletionResult(db, testEnv, conv.id, longText);
-  await processWorkerCommands(testEnv);
+  await applyCompletionResult(db, testEnv, conv.id, longText, undefined, undefined, testSink());
+  await processWorkerCommands(testEnv, testSink());
   expect(csCalls().map((call) => JSON.parse(String(call.init?.body)).message.text)).toEqual(['a'.repeat(1500), 'b'.repeat(1500)]);
   expect(headerValue(csCalls()[0]?.init, 'access_token')).toBe('send-access');
   expect((await commands('send_zalo_oa'))[0]).toMatchObject({ target: 'worker', status: 'done' });
@@ -639,8 +641,8 @@ test('a long reply is posted in two parts, an outside-window code is final, and 
   await db.prepare("UPDATE conversation SET mode = 'ai' WHERE id = ?").bind(conv.id).run();
   onFetch = async (url) => (url.includes('/message/cs') ? json({ error: -230 }) : json({ error: 0 }));
   calls.length = 0;
-  await applyCompletionResult(db, testEnv, conv.id, 'Ngoài giờ');
-  await processWorkerCommands(testEnv);
+  await applyCompletionResult(db, testEnv, conv.id, 'Ngoài giờ', undefined, undefined, testSink());
+  await processWorkerCommands(testEnv, testSink());
   expect(csCalls()).toHaveLength(1);
   expect(tokenCalls()).toHaveLength(0);
   expect((await commands('send_zalo_oa')).at(-1)).toMatchObject({ status: 'failed', attempts: 1, result: { error: 'ZALO_OA_OUTSIDE_WINDOW:-230' } });
@@ -660,8 +662,8 @@ test('a long reply is posted in two parts, an outside-window code is final, and 
   };
   calls.length = 0;
   await db.prepare("UPDATE conversation SET mode = 'ai' WHERE id = ?").bind(conv.id).run();
-  await applyCompletionResult(db, testEnv, conv.id, 'Gửi lại');
-  await processWorkerCommands(testEnv);
+  await applyCompletionResult(db, testEnv, conv.id, 'Gửi lại', undefined, undefined, testSink());
+  await processWorkerCommands(testEnv, testSink());
   expect(tokenCalls()).toHaveLength(1);
   expect(csCalls().map((call) => headerValue(call.init, 'access_token'))).toEqual(['send-access', 'new-access']);
   expect((await messages(conv.id)).find((message) => message.body === 'Gửi lại')).toMatchObject({ status: 'sent', external_msg_id: 'mid-216' });
@@ -679,15 +681,15 @@ test('HTTP 401 refreshes once and an unknown Zalo code stays retryable', async (
     return json({ error: 0 });
   };
   calls.length = 0;
-  await applyCompletionResult(db, testEnv, conv.id, 'Một');
-  await processWorkerCommands(testEnv);
+  await applyCompletionResult(db, testEnv, conv.id, 'Một', undefined, undefined, testSink());
+  await processWorkerCommands(testEnv, testSink());
   expect(tokenCalls()).toHaveLength(1);
   expect(csCalls()).toHaveLength(2);
 
   onFetch = async (url) => (url.includes('/message/cs') ? json({ error: -201 }) : json({ error: 0 }));
   await db.prepare("UPDATE conversation SET mode = 'ai' WHERE id = ?").bind(conv.id).run();
-  await applyCompletionResult(db, testEnv, conv.id, 'Hai');
-  await processWorkerCommands(testEnv);
+  await applyCompletionResult(db, testEnv, conv.id, 'Hai', undefined, undefined, testSink());
+  await processWorkerCommands(testEnv, testSink());
   expect((await commands('send_zalo_oa')).at(-1)).toMatchObject({ status: 'pending', attempts: 1, result: { error: 'ZALO_-201' } });
 });
 
@@ -782,7 +784,7 @@ test('an image typed in the OA app after a text reply is stored', async () => {
   await saveTokens('send-access');
   onFetch = async (url) => (url.includes('/message/cs') ? json({ error: 0, data: { message_id: 'mid-text' } }) : json({ error: 0 }));
   const text = await web('u-lan', 'POST', `/inbox/conversations/${conv.id}/messages`, { text: 'Em nhắn tiếp' });
-  await processWorkerCommands(testEnv);
+  await processWorkerCommands(testEnv, testSink());
   expect(text.status).toBe(200);
   const before = (await messages(conv.id)).length;
   expect((await webhook(oaImage('from-app'))).status).toBe(200);
@@ -926,7 +928,7 @@ test('a retry after the image call fails sends only the image', async () => {
   const past = new Date(Date.now() - 60_000).toISOString();
   await db.prepare(`UPDATE channel_command SET next_run_at = ? WHERE kind = 'send_zalo_oa'`).bind(past).run();
   calls.length = 0;
-  await processWorkerCommands(testEnv);
+  await processWorkerCommands(testEnv, testSink());
   expect(csCalls()).toHaveLength(1);
   expect(JSON.parse(String(csCalls()[0]!.init?.body)).message.text).toBeUndefined();
   expect(JSON.parse(String(csCalls()[0]!.init?.body)).message.attachment.payload.elements[0].attachment_id).toBe('att-part');
@@ -961,15 +963,15 @@ test('a registration confirmation with the wrong group link is not sent and hand
   await db.prepare('UPDATE channel_account SET registration_policy = 1, registration_group_url = ? WHERE id = ?')
     .bind('https://zalo.me/g/abc123', 'ca-oa').run();
   const reply = 'Anh/chị đã đăng ký thành công chương trình Xây dựng Bộ não thứ hai & Đội quân Trợ lý AI cá nhân hóa. https://zalo.me/g/wrong';
-  const outcome = await applyCompletionResult(db, testEnv, conv.id, reply);
-  expect(outcome.workerCommandQueued).toBe(true);
+  const outcome = await applyCompletionResult(db, testEnv, conv.id, reply, undefined, undefined, testSink());
+  expect(outcome.workerCommandQueued).toBe(false);
   expect(await commands('send_zalo_oa')).toHaveLength(0);
   expect((await conversation()).mode).toBe('human');
   const system = (await messages(conv.id)).find((message) => message.sender_kind === 'system');
   expect(system).toMatchObject({ direction: 'out', status: 'failed' });
   expect(system.body.startsWith('Chưa gửi (kiểm tra 199k):')).toBe(true);
   expect(system.body).toContain(reply);
-  expect(await commands('send_lark')).toHaveLength(1);
+  expect(await db.prepare("SELECT id FROM chat_message WHERE conversation_id = 'sys:inbox:org-abm'").all().then((r) => r.results)).toHaveLength(1);
 });
 
 test('a 199k payment keeps the registration rules: the handoff check never hands off a confirmed or 199k-policy turn', async () => {
@@ -981,17 +983,17 @@ test('a 199k payment keeps the registration rules: the handoff check never hands
   const conv = await customerTurn('Em gửi bill chuyển khoản rồi ạ');
   const [pending] = await commands('run_completion');
   const reply = 'Anh/chị đã đăng ký thành công chương trình Xây dựng Bộ não thứ hai & Đội quân Trợ lý AI cá nhân hóa. Mời vào nhóm: https://zalo.me/g/abc123';
-  const confirmed = await applyCompletionResult(db, activeEnv, conv.id, reply, undefined, asCompletionPayload(pending.payload));
+  const confirmed = await applyCompletionResult(db, activeEnv, conv.id, reply, undefined, asCompletionPayload(pending.payload), testSink());
   await confirmed.handoffCheck?.();
   expect(await commands('send_zalo_oa')).toHaveLength(1);
   expect((await conversation()).mode).toBe('ai');
 
   // The bot asks for the receipt instead of confirming: on a 199k-policy account the payment turn is still left to the bot.
   const asking = await applyCompletionResult(db, activeEnv, conv.id, 'Dạ Anh/Chị gửi giúp em ảnh biên lai nhé', undefined,
-    asCompletionPayload(pending.payload));
+    asCompletionPayload(pending.payload), testSink());
   await asking.handoffCheck?.();
   expect((await conversation()).mode).toBe('ai');
-  expect(await commands('send_lark')).toHaveLength(0);
+  expect(await db.prepare("SELECT id FROM chat_message WHERE conversation_id = 'sys:inbox:org-abm'").all().then((r) => r.results)).toHaveLength(0);
   expect((await handoffChecks()).map((after) => [after.decided?.category, after.held, after.applied])).toEqual([
     ['payment_done', 'registration_confirmed', false],
     ['payment_done', 'payment_199k', false],

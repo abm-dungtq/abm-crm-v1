@@ -1,4 +1,4 @@
-import type { Env } from '../env';
+import type { Env, Sink } from '../env';
 import { ATTACHMENT_ONLY_TEXT, BOT_OFF, BOT_SEND_BLOCKED_SQL, markMessageSent } from './conversation-flow';
 import { MAX_COMMAND_ATTEMPTS, completeCommand, dropBotSend, failCommand, type ClaimedCommand } from './dispatcher';
 import { filenameForKey, keyFromCrmMediaUrl, type ImageMime } from './media';
@@ -192,7 +192,7 @@ interface SendRow {
  * Runs one claimed `send_zalo_oa` command. A retry after a lost lease sends only the parts not yet
  * recorded in `sentChunks`. An expired token is refreshed once per run and the same part is tried again.
  */
-export async function sendZaloOaCommand(env: ZaloOaSendEnv, command: ClaimedCommand): Promise<void> {
+export async function sendZaloOaCommand(env: ZaloOaSendEnv, command: ClaimedCommand, sink: Sink): Promise<void> {
   const db = env.DB;
   const messageId = (command.payload as { messageId?: unknown } | null)?.messageId;
   if (typeof messageId !== 'string' || !messageId) return failSend(db, command, null, 'INVALID_PAYLOAD');
@@ -220,7 +220,7 @@ export async function sendZaloOaCommand(env: ZaloOaSendEnv, command: ClaimedComm
   if (!token) {
     refreshedThisRun = true;
     const outcome = await refreshZaloOaAccount(db, env, row.account_id);
-    if (outcome === 'failed') await recordZaloOaRefreshFailure(db, row.account_id);
+    if (outcome === 'failed') await recordZaloOaRefreshFailure(db, row.account_id, new Date(), sink);
     token = outcome === 'failed' ? null : await accessToken(db, env, row.account_id);
     if (!token) return failSend(db, command, messageId, ZALO_OA_NOT_CONFIGURED);
   }
@@ -242,7 +242,7 @@ export async function sendZaloOaCommand(env: ZaloOaSendEnv, command: ClaimedComm
       refreshedThisRun = true;
       const refreshed = await refreshZaloOaAccount(db, env, row.account_id);
       if (refreshed === 'failed') {
-        await recordZaloOaRefreshFailure(db, row.account_id);
+        await recordZaloOaRefreshFailure(db, row.account_id, new Date(), sink);
         return failSend(db, command, messageId, 'ZALO_OA_REFRESH_FAILED');
       }
       const next = await accessToken(db, env, row.account_id);

@@ -1,11 +1,11 @@
 import type { RoleCode } from '@abm/contracts';
-import type { Actor } from '../env';
-import { enqueueCommand } from './dispatcher';
+import type { Actor, Sink } from '../env';
+import { notifyInboxUser, postInboxNotice } from '../inbox-notices';
 
 /**
  * Who handles a conversation: manual assignment by managers, self-claim by sales staff, and round-robin
  * among staff on duty when a conversation is handed off to people. Every assignment is audited and
- * announced in the Lark inbox group (and privately to the assignee when their Lark account is linked).
+ * announced in the CRM "Inbox" chat group (and privately to the assignee as a CRM notification).
  */
 
 export type AssignMode = 'manual' | 'round_robin';
@@ -47,11 +47,10 @@ export async function loadInboxSettings(db: D1Database): Promise<InboxSettings> 
 export interface Assignee {
   id: string;
   displayName: string;
-  larkOpenId: string | null;
 }
 
-interface AssigneeRow { id: string; display_name: string; lark_open_id: string | null }
-const toAssignee = (row: AssigneeRow): Assignee => ({ id: row.id, displayName: row.display_name, larkOpenId: row.lark_open_id });
+interface AssigneeRow { id: string; display_name: string }
+const toAssignee = (row: AssigneeRow): Assignee => ({ id: row.id, displayName: row.display_name });
 
 interface ConversationRef {
   id: string;
@@ -73,7 +72,7 @@ export async function pickRoundRobin(db: D1Database, organizationId: string, now
   const nowIso = now.toISOString();
   const roles = ROUND_ROBIN_ROLES.map(() => '?').join(', ');
   for (let attempt = 0; attempt < ROUND_ROBIN_TRIES; attempt += 1) {
-    const candidate = await db.prepare(`SELECT u.id, u.display_name, u.lark_open_id, r.last_assigned_at
+    const candidate = await db.prepare(`SELECT u.id, u.display_name, r.last_assigned_at
       FROM inbox_roster r JOIN app_user u ON u.id = r.user_id
       WHERE r.on_duty = 1 AND u.status = 'active' AND u.organization_id = ? AND u.role IN (${roles})
       ORDER BY r.last_assigned_at IS NOT NULL, r.last_assigned_at, u.id LIMIT 1`)
@@ -88,11 +87,12 @@ export async function pickRoundRobin(db: D1Database, organizationId: string, now
 
 /**
  * Sets the assignee when it still is `expectedAssignee` (compare-and-set), then records the audit row and
- * queues the Lark notices. False when someone else changed the assignee meanwhile.
+ * sends the CRM inbox notices. False when someone else changed the assignee meanwhile.
  */
 async function applyAssignment(
   db: D1Database, actor: Actor | null, conv: ConversationRef, assignee: Assignee,
-  via: 'manual' | 'round_robin', appBase: string, now: string, options?: { skipPrivateNotice?: boolean },
+  via: 'manual' | 'round_robin', appBase: string, now: string,
+  options: { skipPrivateNotice?: boolean; sink: Sink; ensuredOrgs?: Set<string> },
 ) {
   const updated = await db.prepare(`UPDATE conversation SET assignee_user_id = ?, assigned_at = ?, updated_at = ?
     WHERE id = ? AND assignee_user_id IS ?`).bind(assignee.id, now, now, conv.id, conv.assignee_user_id).run();
@@ -101,34 +101,45 @@ async function applyAssignment(
     VALUES (?, ?, ?, 'inbox.assign', 'conversation', ?, ?, ?, ?)`).bind(crypto.randomUUID(), actor?.id ?? null, actor?.kind ?? 'system',
     conv.id, JSON.stringify({ assigneeUserId: conv.assignee_user_id }), JSON.stringify({ assigneeUserId: assignee.id, via }), now).run();
   const text = `Giao ${conv.display_name ?? conv.external_thread_id} cho ${assignee.displayName} – ${appBase}/inbox/${conv.id}`;
-  await enqueueCommand(db, { kind: 'send_lark', target: 'worker', conversationId: conv.id, payload: { text } });
-  if (assignee.larkOpenId && !options?.skipPrivateNotice) {
-    await enqueueCommand(db, { kind: 'send_lark', target: 'worker', conversationId: conv.id, payload: { text, openId: assignee.larkOpenId } });
+  const link = `/inbox/${conv.id}`;
+  await postInboxNotice(options.sink, db, {
+    organizationId: conv.organization_id,
+    text,
+    link,
+    ensuredOrgs: options.ensuredOrgs,
+  });
+  if (!options.skipPrivateNotice) {
+    await notifyInboxUser(options.sink, {
+      organizationId: conv.organization_id,
+      userId: assignee.id,
+      text,
+      link,
+    });
   }
   return true;
 }
 
 /**
  * Ensures the conversation is assigned to the newly created lead's owner, recording the standard assignment
- * audit and group Lark notice while leaving the private Lark notice to the caller (which sends the lead code).
+ * audit and group notice while leaving the private notice to the caller (which sends the lead code).
  */
 export async function assignConversationToLeadOwner(
-  db: D1Database, actor: Actor, conversationId: string, ownerUserId: string, appBase = '',
+  db: D1Database, actor: Actor, conversationId: string, ownerUserId: string, appBase: string, sink: Sink,
 ): Promise<Assignee | null> {
   const conv = await loadConversationRef(db, conversationId);
   if (!conv || conv.organization_id !== actor.organizationId) return null;
-  const row = await db.prepare(`SELECT id, display_name, lark_open_id FROM app_user
+  const row = await db.prepare(`SELECT id, display_name FROM app_user
     WHERE id = ? AND organization_id = ? AND status = 'active' AND role IN (${ASSIGNABLE_ROLES.map(() => '?').join(', ')})`)
     .bind(ownerUserId, actor.organizationId, ...ASSIGNABLE_ROLES).first<AssigneeRow>();
   if (!row) return null;
   const assignee = toAssignee(row);
   if (conv.assignee_user_id !== assignee.id) {
-    await applyAssignment(db, actor, conv, assignee, 'manual', appBase, new Date().toISOString(), { skipPrivateNotice: true });
+    await applyAssignment(db, actor, conv, assignee, 'manual', appBase, new Date().toISOString(), { skipPrivateNotice: true, sink });
   }
   return assignee;
 }
 
-/** Base URL for links in Lark notices: APP_URL, else the request origin, without a trailing slash. */
+/** Base URL for links in inbox notices: APP_URL, else the request origin, without a trailing slash. */
 export const linkBase = (appUrl: string | undefined, origin?: string) => (appUrl || origin || '').replace(/\/+$/, '');
 
 export type AssignOutcome =
@@ -139,21 +150,23 @@ export type AssignOutcome =
  * Assigns a conversation of the actor's organization. Managers assign it to any active inbox staff member;
  * a sale may only claim an unassigned conversation for themselves.
  */
-export async function assignConversation(db: D1Database, actor: Actor, conversationId: string, userId: string, appBase = ''): Promise<AssignOutcome> {
+export async function assignConversation(
+  db: D1Database, actor: Actor, conversationId: string, userId: string, appBase: string, sink: Sink,
+): Promise<AssignOutcome> {
   const conv = await loadConversationRef(db, conversationId);
   if (!conv || conv.organization_id !== actor.organizationId) return { ok: false, reason: 'NOT_FOUND' };
   const manager = MANAGER_ROLES.has(actor.role);
   if (!manager && (actor.role !== 'sale' || userId !== actor.id)) return { ok: false, reason: 'FORBIDDEN' };
   if (!manager && conv.assignee_user_id !== null) return { ok: false, reason: 'ALREADY_ASSIGNED' };
 
-  const row = await db.prepare(`SELECT id, display_name, lark_open_id FROM app_user
+  const row = await db.prepare(`SELECT id, display_name FROM app_user
     WHERE id = ? AND organization_id = ? AND status = 'active' AND role IN (${ASSIGNABLE_ROLES.map(() => '?').join(', ')})`)
     .bind(userId, actor.organizationId, ...ASSIGNABLE_ROLES).first<AssigneeRow>();
   if (!row) return { ok: false, reason: 'INVALID_ASSIGNEE' };
   const assignee = toAssignee(row);
   if (conv.assignee_user_id === assignee.id) return { ok: true, assignee, changed: false };
 
-  const applied = await applyAssignment(db, actor, conv, assignee, 'manual', appBase, new Date().toISOString());
+  const applied = await applyAssignment(db, actor, conv, assignee, 'manual', appBase, new Date().toISOString(), { sink });
   return applied ? { ok: true, assignee, changed: true } : { ok: false, reason: 'ALREADY_ASSIGNED' };
 }
 
@@ -165,12 +178,15 @@ export type HandoffAssignment =
  * Assignment on handoff: an assigned conversation keeps its assignee; otherwise round-robin mode picks the
  * next person on duty and manual mode leaves it unassigned for a manager.
  */
-export async function autoAssignOnHandoff(db: D1Database, conversationId: string, appBase: string, now = new Date()): Promise<HandoffAssignment> {
+export async function autoAssignOnHandoff(
+  db: D1Database, conversationId: string, appBase: string, now: Date,
+  sink: Sink, ensuredOrgs?: Set<string>,
+): Promise<HandoffAssignment> {
   const conv = await loadConversationRef(db, conversationId);
   if (!conv || conv.assignee_user_id !== null) return { status: 'kept' };
   if ((await loadInboxSettings(db)).assignMode !== 'round_robin') return { status: 'manual' };
   const assignee = await pickRoundRobin(db, conv.organization_id, now);
   if (!assignee) return { status: 'no_one_on_duty' };
-  const applied = await applyAssignment(db, null, conv, assignee, 'round_robin', appBase, now.toISOString());
+  const applied = await applyAssignment(db, null, conv, assignee, 'round_robin', appBase, now.toISOString(), { sink, ensuredOrgs });
   return applied ? { status: 'assigned', assignee } : { status: 'kept' };
 }

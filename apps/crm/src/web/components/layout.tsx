@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useRouterState } from '@tanstack/react-router';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ROLES, type RoleCode } from '@abm/contracts';
-import { currentAuthMode, setDemoUser, useApi } from '../api';
+import { ApiFailure, api, currentAuthMode, setDemoUser, useApi } from '../api';
+import { useChatSocket } from '../chat-socket';
 import { LogoutButton } from '../pages/change-password';
 import type { AccountItem, Actor, ApprovalItem, DemoUser, LeadIntake, LeadItem } from '../types';
 import { Icon, type IconName } from './icons';
+import { NotificationBell } from './notification-bell';
 import { Avatar, ErrorState, Loading, StageBadge } from './ui';
 
 export const roleLabel = (role: string) => ROLES.find((r) => r.code === role)?.label ?? role;
@@ -21,6 +23,7 @@ const B2B_ROLES: RoleCode[] = ['sale', 'leader', 'head', 'director', 'admin'];
 const LEARNER_ROLES: RoleCode[] = ['sale', 'leader', 'director', 'admin'];
 /** Zalo and Fanpage conversations: every role the Worker's inbox API admits. */
 const INBOX_ROLES: RoleCode[] = ['sale', 'leader', 'head', 'director', 'admin'];
+const ALL_ROLES: RoleCode[] = ROLES.map((r) => r.code);
 
 /** One screen. Screens of the same kind share a sidebar entry and switch through tabs at the top of the page. */
 interface NavLeaf { to: string; label: string; roles: RoleCode[]; badge?: number; badgeLabel?: string }
@@ -54,6 +57,13 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
   const canUseInbox = INBOX_ROLES.includes(actor.role);
   const intakes = useApi<LeadIntake[]>(canUseInbox ? '/inbox/intakes?status=pending' : null);
   const pendingIntakes = intakes.data?.length ?? 0;
+  const { connected: chatConnected } = useChatSocket();
+  const chatUnread = useQuery<{ total: number }, ApiFailure>({
+    queryKey: ['chat', 'unread'],
+    queryFn: () => api.get<{ total: number }>('/chat/unread'),
+    refetchInterval: chatConnected ? false : 60_000,
+  });
+  const unreadChat = chatUnread.data?.total ?? 0;
 
   const groups: NavGroup[] = [
     { label: 'Tổng quan', icon: 'home', items: [
@@ -80,10 +90,14 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
       { to: '/my-classes', label: 'Lớp của tôi', roles: ['teacher', 'academic', 'admin'] },
       { to: '/products', label: 'Chương trình', roles: ['academic', 'admin', 'sale', 'leader'] },
       { to: '/learner-accounts', label: 'Tài khoản học viên', roles: ['academic', 'admin', 'director'] },
+      { to: '/lms-videos', label: 'Video bài học', roles: ['academic', 'admin', 'teacher'] },
     ] },
     { label: 'Học phí', icon: 'inbox', items: [
       { to: '/fees', label: 'Học phí', roles: ['accountant', 'admin', 'director'] },
       { to: '/fees/queue', label: 'Tiền chưa khớp', roles: ['accountant', 'admin', 'director'], badge: unmatchedCount, badgeLabel: `${unmatchedCount} khoản chưa khớp` },
+    ] },
+    { label: 'Chat', icon: 'message', items: [
+      { to: '/chat', label: 'Chat', roles: ALL_ROLES, badge: unreadChat, badgeLabel: `${unreadChat} tin nhắn chưa đọc` },
     ] },
     { label: actor.role === 'admin' ? 'Công việc' : 'Việc của tôi', icon: 'check', items: [
       { to: '/tasks', label: actor.role === 'admin' ? 'Công việc' : 'Việc của tôi', roles: B2B_ROLES },
@@ -106,7 +120,7 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
   const leaf = currentLeaf(pathname, [...shownGroups.flatMap((g) => g.items), ...shownAdmin, approvalsItem]);
   const activeGroup = shownGroups.find((g) => leaf && g.items.includes(leaf));
   const passwordMode = currentAuthMode() === 'password';
-  const isInboxScreen = under(pathname, '/inbox');
+  const isInboxScreen = under(pathname, '/inbox') || under(pathname, '/chat');
 
   return (
     <div className="shell">
@@ -143,6 +157,7 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
           <span className="spacer hide-sm" />
           <div className="topbar-actions">
             <Link to="/leads/new" className="btn btn-primary"><Icon name="plus" /><span className="hide-sm">Tạo lead</span></Link>
+            <NotificationBell />
             {approvalsItem.roles.includes(actor.role) && (
               <Link to="/approvals" className={`btn btn-ghost icon-btn badge-btn${leaf === approvalsItem ? ' is-active' : ''}`}
                 aria-label={pending ? `Hàng chờ duyệt, ${pending} chờ bạn duyệt` : 'Hàng chờ duyệt'} title="Hàng chờ duyệt">
@@ -159,6 +174,8 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
             )}
             <Dropdown label={`Tài khoản ${actor.displayName}`} trigger={<Avatar name={actor.displayName} />} wide>
               <div className="menu-head"><ActorSummary actor={actor} /></div>
+              <Link to="/settings/notifications" className="menu-item">Cài đặt thông báo</Link>
+              <Link to="/settings/agents" className="menu-item">Kết nối agent</Link>
               {passwordMode ? (
                 <>
                   <Link to="/account/password" className="menu-item">Đổi mật khẩu</Link>

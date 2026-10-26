@@ -5,14 +5,13 @@ import app from '../src/worker/index';
 import { pickRoundRobin } from '../src/worker/inbox/assignment';
 import { handoff } from '../src/worker/inbox/conversation-flow';
 import { ingestEvents } from '../src/worker/inbox/ingest';
-import { processWorkerCommands } from '../src/worker/inbox/worker-commands';
 import { resetDb } from './helpers/reset-db';
+import { testSink } from './helpers/test-sink';
 
 const db = env.DB;
 const ORIGIN = 'http://crm.test';
 const STAMP = '2026-10-08T03:00:00.000Z';
 const APP_URL = 'https://crm.example';
-const lark = { LARK_APP_ID: 'cli_fake', LARK_APP_SECRET: 'fake-secret-value-123', LARK_INBOX_CHAT_ID: 'oc_inbox' };
 const testEnv = { ...env, DEMO_MODE: '1', APP_URL };
 
 beforeEach(async () => {
@@ -31,8 +30,10 @@ afterEach(() => vi.restoreAllMocks());
 const onDuty = (...userIds: string[]) => db.batch(userIds.map((id) => db.prepare('INSERT INTO inbox_roster (user_id, on_duty) VALUES (?, 1)').bind(id)));
 const setMode = (mode: 'manual' | 'round_robin') => db.prepare('UPDATE inbox_setting SET assign_mode = ? WHERE id = 1').bind(mode).run();
 const conversation = () => db.prepare("SELECT * FROM conversation WHERE id = 'conv-1'").first<any>();
-const larkCommands = () => db.prepare("SELECT * FROM channel_command WHERE kind = 'send_lark' ORDER BY created_at, rowid").all<any>()
-  .then((r) => r.results.map((row) => ({ ...row, payload: JSON.parse(row.payload_json) })));
+const inboxNotices = () => db.prepare("SELECT id, author_kind, body, meta_json FROM chat_message WHERE conversation_id = 'sys:inbox:org-abm' ORDER BY created_at, rowid").all<any>()
+  .then((r) => r.results);
+const inboxNotifications = (userId: string) => db.prepare("SELECT user_id, kind, title, body, link FROM notification WHERE user_id = ? AND kind = 'inbox' ORDER BY created_at, rowid")
+  .bind(userId).all<any>().then((r) => r.results);
 const at = (minute: number) => new Date(Date.parse(STAMP) + minute * 60_000);
 
 async function web(user: string, method: string, path: string, body?: unknown) {
@@ -41,23 +42,6 @@ async function web(user: string, method: string, path: string, body?: unknown) {
     body: body === undefined ? undefined : JSON.stringify(body),
   }), testEnv);
   return { status: res.status, json: await res.json() as any };
-}
-
-const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
-/** Fakes Lark: the token call succeeds and every message is recorded. */
-function fakeLark() {
-  const sent: { url: string; receiveId: string; text: string }[] = [];
-  const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
-    const url = String(input instanceof Request ? input.url : input);
-    if (url.includes('/auth/v3/tenant_access_token/internal')) return json({ code: 0, tenant_access_token: 't-fake', expire: 7200 });
-    if (url.includes('/im/v1/messages')) {
-      const body = JSON.parse(String(init!.body)) as { receive_id: string; content: string };
-      sent.push({ url, receiveId: body.receive_id, text: JSON.parse(body.content).text });
-      return json({ code: 0, data: {} });
-    }
-    return json({ code: 404 }, 404);
-  });
-  return { spy, sent };
 }
 
 test('round-robin takes turns among the people on duty', async () => {
@@ -82,56 +66,52 @@ test('round-robin skips people off duty, disabled accounts and roles outside sal
 
 test('a handoff in manual mode leaves the conversation unassigned', async () => {
   await onDuty('u-lan');
-  await handoff(db, { APP_URL }, 'conv-1', 'khách hỏi học phí');
+  await handoff(db, { APP_URL }, 'conv-1', 'khách hỏi học phí', undefined, { sink: testSink() });
   expect(await conversation()).toMatchObject({ mode: 'human', assignee_user_id: null });
-  const notices = await larkCommands();
-  expect(notices.map((n) => n.payload.text)).toEqual([`Handoff: Chị Hoa (Số tư vấn 1) – khách hỏi học phí – ${APP_URL}/inbox/conv-1`]);
+  const notices = await inboxNotices();
+  expect(notices.map((n) => n.body)).toEqual([`Handoff: Chị Hoa (Số tư vấn 1) – khách hỏi học phí – ${APP_URL}/inbox/conv-1`]);
 });
 
-test('a handoff in round-robin mode assigns the next person on duty and tells Lark who has it', async () => {
+test('a handoff in round-robin mode assigns the next person on duty and tells the inbox group who has it', async () => {
   await setMode('round_robin');
   await onDuty('u-lan');
-  await db.prepare("UPDATE app_user SET lark_open_id = 'ou_lan' WHERE id = 'u-lan'").run();
-  await handoff(db, { APP_URL }, 'conv-1', 'khách hỏi học phí');
+  await handoff(db, { APP_URL }, 'conv-1', 'khách hỏi học phí', undefined, { sink: testSink() });
 
   const conv = await conversation();
   expect(conv).toMatchObject({ mode: 'human', assignee_user_id: 'u-lan' });
   expect(conv.assigned_at).toBeTruthy();
-  const notices = await larkCommands();
+  const notices = await inboxNotices();
   const assignText = `Giao Chị Hoa cho Đỗ Ngọc Lan – ${APP_URL}/inbox/conv-1`;
-  expect(notices.map((n) => n.payload)).toEqual([
-    { text: assignText },
-    { text: assignText, openId: 'ou_lan' },
-    { text: `Handoff: Chị Hoa (Số tư vấn 1) – khách hỏi học phí – ${APP_URL}/inbox/conv-1` },
+  expect(notices.map((n) => n.body)).toEqual([
+    assignText,
+    `Handoff: Chị Hoa (Số tư vấn 1) – khách hỏi học phí – ${APP_URL}/inbox/conv-1`,
   ]);
+  expect(await inboxNotifications('u-lan')).toEqual([{
+    user_id: 'u-lan',
+    kind: 'inbox',
+    title: 'Inbox',
+    body: assignText,
+    link: '/inbox/conv-1',
+  }]);
   expect(await db.prepare("SELECT actor_kind, actor_user_id, after_json FROM audit_log WHERE command = 'inbox.assign'").first<any>())
     .toEqual({ actor_kind: 'system', actor_user_id: null, after_json: JSON.stringify({ assigneeUserId: 'u-lan', via: 'round_robin' }) });
-
-  const { sent } = fakeLark();
-  await processWorkerCommands({ ...env, ...lark });
-  expect(sent).toHaveLength(3);
-  expect(sent).toEqual(expect.arrayContaining([
-    { url: expect.stringContaining('receive_id_type=chat_id'), receiveId: 'oc_inbox', text: assignText },
-    { url: expect.stringContaining('receive_id_type=open_id'), receiveId: 'ou_lan', text: assignText },
-    { url: expect.stringContaining('receive_id_type=chat_id'), receiveId: 'oc_inbox', text: expect.stringContaining('Handoff:') },
-  ]));
 });
 
 test('a handoff keeps an existing assignee and notes when nobody is on duty', async () => {
   await setMode('round_robin');
   await db.prepare("UPDATE conversation SET assignee_user_id = 'u-long' WHERE id = 'conv-1'").run();
   await onDuty('u-lan');
-  await handoff(db, { APP_URL }, 'conv-1', 'lý do');
+  await handoff(db, { APP_URL }, 'conv-1', 'lý do', undefined, { sink: testSink() });
   expect((await conversation()).assignee_user_id).toBe('u-long');
-  expect(await larkCommands()).toHaveLength(1);
+  expect(await inboxNotices()).toHaveLength(1);
 
   await db.prepare("UPDATE conversation SET assignee_user_id = NULL WHERE id = 'conv-1'").run();
-  await db.prepare('DELETE FROM channel_command').run();
+  await db.prepare("DELETE FROM chat_message WHERE conversation_id = 'sys:inbox:org-abm'").run();
   await db.prepare('UPDATE inbox_roster SET on_duty = 0').run();
-  await handoff(db, { APP_URL }, 'conv-1', 'lý do');
+  await handoff(db, { APP_URL }, 'conv-1', 'lý do', undefined, { sink: testSink() });
   expect((await conversation()).assignee_user_id).toBeNull();
-  const [notice] = await larkCommands();
-  expect(notice.payload.text).toBe(`Handoff: Chị Hoa (Số tư vấn 1) – lý do – chưa có người trực – ${APP_URL}/inbox/conv-1`);
+  const [notice] = await inboxNotices();
+  expect(notice.body).toBe(`Handoff: Chị Hoa (Số tư vấn 1) – lý do – chưa có người trực – ${APP_URL}/inbox/conv-1`);
 });
 
 test('a sale may only claim an unassigned conversation for themselves', async () => {
@@ -142,13 +122,57 @@ test('a sale may only claim an unassigned conversation for themselves', async ()
   const claim = await web('u-lan', 'POST', '/inbox/conversations/conv-1/assign', { userId: 'u-lan' });
   expect(claim).toEqual({ status: 200, json: { ok: true, data: { assigneeUserId: 'u-lan', assigneeName: 'Đỗ Ngọc Lan' } } });
   expect((await conversation()).assignee_user_id).toBe('u-lan');
-  expect((await larkCommands()).map((n) => n.payload)).toEqual([{ text: `Giao Chị Hoa cho Đỗ Ngọc Lan – ${APP_URL}/inbox/conv-1` }]);
+  const assignText = `Giao Chị Hoa cho Đỗ Ngọc Lan – ${APP_URL}/inbox/conv-1`;
+  expect((await inboxNotices()).map((n) => n.body)).toEqual([assignText]);
+  expect(await inboxNotifications('u-lan')).toEqual([{
+    user_id: 'u-lan',
+    kind: 'inbox',
+    title: 'Inbox',
+    body: assignText,
+    link: '/inbox/conv-1',
+  }]);
   expect(await db.prepare("SELECT actor_user_id, after_json FROM audit_log WHERE command = 'inbox.assign'").first())
     .toEqual({ actor_user_id: 'u-lan', after_json: JSON.stringify({ assigneeUserId: 'u-lan', via: 'manual' }) });
 
   const late = await web('u-long', 'POST', '/inbox/conversations/conv-1/assign', { userId: 'u-long' });
   expect(late.status).toBe(409);
   expect((await conversation()).assignee_user_id).toBe('u-lan');
+});
+
+test('a manual assignment pushes the private notice to the assignee device with the request context', async () => {
+  const b64url = (buf: ArrayBuffer | Uint8Array) => {
+    let s = '';
+    for (const byte of buf instanceof Uint8Array ? buf : new Uint8Array(buf)) s += String.fromCharCode(byte);
+    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  };
+  const vapid = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']) as CryptoKeyPair;
+  const sub = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']) as CryptoKeyPair;
+  const endpoint = 'https://push.example/long-phone';
+  await db.prepare(`INSERT INTO push_subscription (id, user_id, endpoint, p256dh, auth, created_at) VALUES ('ps-long', 'u-long', ?, ?, ?, ?)`)
+    .bind(endpoint, b64url(await crypto.subtle.exportKey('raw', sub.publicKey) as ArrayBuffer),
+      b64url(crypto.getRandomValues(new Uint8Array(16))), STAMP).run();
+  const pushed: string[] = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    pushed.push(String(input instanceof Request ? input.url : input));
+    return new Response(null, { status: 201 });
+  });
+
+  const pending: Promise<unknown>[] = [];
+  const ctx = { waitUntil: (work: Promise<unknown>) => { pending.push(work); }, passThroughOnException: () => undefined } as unknown as ExecutionContext;
+  const res = await app.fetch(new Request(`${ORIGIN}/api/inbox/conversations/conv-1/assign`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Demo-User': 'u-hung' },
+    body: JSON.stringify({ userId: 'u-long' }),
+  }), {
+    ...testEnv,
+    VAPID_PUBLIC_KEY: b64url(await crypto.subtle.exportKey('raw', vapid.publicKey) as ArrayBuffer),
+    VAPID_PRIVATE_KEY: (await crypto.subtle.exportKey('jwk', vapid.privateKey) as JsonWebKey).d!,
+  }, ctx);
+  expect(res.status).toBe(200);
+  // The push goes out after the response, through waitUntil.
+  await Promise.all(pending);
+  expect(await inboxNotifications('u-long')).toHaveLength(1);
+  expect(pushed).toEqual([endpoint]);
 });
 
 test('managers assign to any active inbox staff member; invalid targets are refused', async () => {
@@ -158,9 +182,9 @@ test('managers assign to any active inbox staff member; invalid targets are refu
   expect((await conversation()).assignee_user_id).toBe('u-lan');
 
   // Assigning the current assignee again changes nothing and sends no notice.
-  const before = (await larkCommands()).length;
+  const before = (await inboxNotices()).length;
   expect((await web('u-hung', 'POST', '/inbox/conversations/conv-1/assign', { userId: 'u-lan' })).status).toBe(200);
-  expect(await larkCommands()).toHaveLength(before);
+  expect(await inboxNotices()).toHaveLength(before);
 
   expect((await web('u-hung', 'POST', '/inbox/conversations/conv-1/assign', { userId: 'u-teacher' })).status).toBe(422);
   await db.prepare("UPDATE app_user SET status = 'disabled' WHERE id = 'u-huy'").run();
@@ -191,14 +215,14 @@ test('leaders and admins manage the assignment settings and the duty roster', as
   expect(await db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE command IN ('inbox.updateSettings', 'inbox.setDuty')").first()).toEqual({ n: 2 });
 
   // The new mode applies to the next handoff.
-  await handoff(db, { APP_URL }, 'conv-1', 'lý do');
+  await handoff(db, { APP_URL }, 'conv-1', 'lý do', undefined, { sink: testSink() });
   expect((await conversation()).assignee_user_id).toBe('u-lan');
 });
 
 test('the reply deadline starts when people take over and clears when staff answer', async () => {
   await db.prepare("UPDATE inbox_setting SET sla_minutes = 20 WHERE id = 1").run();
   const before = Date.now();
-  await handoff(db, { APP_URL }, 'conv-1', 'lý do');
+  await handoff(db, { APP_URL }, 'conv-1', 'lý do', undefined, { sink: testSink() });
   const due = Date.parse((await conversation()).sla_due_at);
   expect(due).toBeGreaterThanOrEqual(before + 20 * 60_000);
   expect(due).toBeLessThanOrEqual(Date.now() + 20 * 60_000);
@@ -211,59 +235,21 @@ test('the reply deadline starts when people take over and clears when staff answ
     type: 'message' as const, accountExternalId: 'zalo-acc-1', threadId: 'cust-1', threadKind: 'direct' as const, msgId,
     fromSelf: false, senderExternalId: 'cust-1', senderName: 'Chị Hoa', text: 'Dạ', sentAt: new Date().toISOString(),
   });
-  await ingestEvents(db, [customer('zm-1')]);
+  await ingestEvents(db, [customer('zm-1')], testSink());
   const first = (await conversation()).sla_due_at;
   expect(first).toBeTruthy();
-  await ingestEvents(db, [customer('zm-2')]);
+  await ingestEvents(db, [customer('zm-2')], testSink());
   expect((await conversation()).sla_due_at).toBe(first);
 
   // Staff answering from the shared phone also clears it.
-  await ingestEvents(db, [{ ...customer('zm-3'), fromSelf: true, senderExternalId: 'zalo-acc-1', text: 'Em gọi chị nhé' }]);
+  await ingestEvents(db, [{ ...customer('zm-3'), fromSelf: true, senderExternalId: 'zalo-acc-1', text: 'Em gọi chị nhé' }], testSink());
   expect((await conversation()).sla_due_at).toBeNull();
 
   // Switching back to ai drops the deadline; taking over again starts it.
-  await ingestEvents(db, [customer('zm-4')]);
+  await ingestEvents(db, [customer('zm-4')], testSink());
   expect((await web('u-lan', 'POST', '/inbox/conversations/conv-1/mode', { mode: 'ai' })).status).toBe(200);
   expect((await conversation()).sla_due_at).toBeNull();
   await web('u-lan', 'POST', '/inbox/conversations/conv-1/mode', { mode: 'human' });
   expect((await conversation()).sla_due_at).toBeTruthy();
-});
-
-test('Lark error 230013 stops retrying immediately and marks the user lark_link_status as error', async () => {
-  await setMode('round_robin');
-  await onDuty('u-lan');
-  await db.prepare("UPDATE app_user SET lark_open_id = 'ou_invisible_lan', lark_link_status = 'linked' WHERE id = 'u-lan'").run();
-  await handoff(db, { APP_URL }, 'conv-1', 'khách hỏi học phí');
-
-  let privateAttempts = 0;
-  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
-    const url = String(input instanceof Request ? input.url : input);
-    if (url.includes('/auth/v3/tenant_access_token/internal')) return json({ code: 0, tenant_access_token: 't-fake', expire: 7200 });
-    if (url.includes('receive_id_type=open_id')) {
-      privateAttempts += 1;
-      return json({ code: 230013, msg: 'Bot has NO availability to this user' });
-    }
-    return json({ code: 0, data: {} });
-  });
-
-  await processWorkerCommands({ ...env, ...lark });
-  await processWorkerCommands({ ...env, ...lark });
-
-  expect(privateAttempts).toBe(1);
-  const cmds = await larkCommands();
-  const privateCmd = cmds.find((c) => c.payload.openId === 'ou_invisible_lan');
-  expect(privateCmd).toMatchObject({
-    status: 'failed',
-    attempts: 1,
-    lease_expires_at: null,
-  });
-  expect(JSON.parse(privateCmd.result_json).error).toContain('230013');
-
-  const user = await db.prepare("SELECT lark_link_status, lark_checked_at, version FROM app_user WHERE id = 'u-lan'").first<any>();
-  expect(user.lark_link_status).toBe('error');
-  expect(user.lark_checked_at).toBeTruthy();
-  expect(user.version).toBeGreaterThan(1);
-  const audit = await db.prepare("SELECT command, entity_id FROM audit_log WHERE command = 'lark.send'").first<any>();
-  expect(audit).toEqual({ command: 'lark.send', entity_id: 'u-lan' });
 });
 

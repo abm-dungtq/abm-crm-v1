@@ -4,7 +4,6 @@ import { useNavigate } from '@tanstack/react-router';
 import { ApiFailure, api, useApi, type LearnerMe, type LessonItem, type ProgramDetail } from '../api';
 import { Header } from './home';
 
-const REFETCH_SIGNED_URL_MS = 100 * 60_000;
 
 export function ProgramPage({
   me,
@@ -18,17 +17,19 @@ export function ProgramPage({
   const navigate = useNavigate();
   const client = useQueryClient();
   const frameRef = useRef<HTMLIFrameElement | null>(null);
-  const loadedAtRef = useRef<number>(Date.now());
   const [selectedVideoId, setSelectedVideoId] = useState<string | null>(null);
   const [iframeUrl, setIframeUrl] = useState<string | null>(null);
   const [videoError, setVideoError] = useState<string | null>(null);
 
   const detail = useApi<ProgramDetail>(`/programs/${encodeURIComponent(programId)}`);
 
+  // Each detail fetch signs a fresh link; keep the loaded one until the handbook version changes so a
+  // background refetch does not reload the frame and lose the reader's place. Lesson switches only change the hash.
+  const [frameSrc, setFrameSrc] = useState<string | null>(null);
   useEffect(() => {
-    if (detail.data?.contentUrl) {
-      loadedAtRef.current = Date.now();
-    }
+    const next = detail.data?.contentUrl;
+    if (!next) return;
+    setFrameSrc((prev) => (prev && prev.split('?')[0] === next.split('?')[0] ? prev : next));
   }, [detail.data?.contentUrl]);
 
   const lessons = detail.data?.lessons ?? [];
@@ -90,9 +91,6 @@ export function ProgramPage({
   }, [navigate, programId]);
 
   const selectLesson = (targetSectionId: string) => {
-    if (Date.now() - loadedAtRef.current > REFETCH_SIGNED_URL_MS) {
-      void detail.refetch();
-    }
     void navigate({
       to: '/hoc/$programId',
       params: { programId },
@@ -159,8 +157,8 @@ export function ProgramPage({
       <Header me={me} />
       <div className="lesson">
         <nav aria-label="Các phần">
-          {groups.map((g) => (
-            <div key={g.title}>
+          {groups.map((g, gi) => (
+            <div key={`${gi}-${g.title}`}>
               <h4>{g.title}</h4>
               {g.items.map((item) => (
                 <button
@@ -188,7 +186,7 @@ export function ProgramPage({
             title="Nội dung bài học"
             sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
             allow="clipboard-write"
-            src={`${detail.data.contentUrl}#${sectionId}`}
+            src={`${frameSrc ?? detail.data.contentUrl}#${sectionId}`}
           />
           <div className="lesson-actions">
             <button

@@ -1,10 +1,9 @@
 import { Hono, type Context } from 'hono';
-import { agentKillSwitchInput, foldText, larkLinkInput, normalizeEmail, rosterImportInput, updateUserInput, userStatusInput, versionInput, type RoleCode } from '@abm/contracts';
+import { agentKillSwitchInput, foldText, normalizeEmail, rosterImportInput, updateUserInput, userStatusInput, versionInput, type RoleCode } from '@abm/contracts';
 import type { z } from 'zod';
 import type { Actor, AppBindings } from './env';
-import { deliverApprovalDm } from './approval-notify';
+import { createChatAgent, listAdminChatAgents, updateChatAgent } from './chat-agents';
 import { GuardedTx, isConstraintFailure, isGuardFailure } from './guarded-tx';
-import { LarkError, lookupOpenIds } from './lark';
 import { TEMP_PASSWORD_HOURS, TEMP_PASSWORD_ITERATIONS, generateTempPassword, hashPassword } from './password';
 import { parseRosterCsv, placementError, planRoster } from './roster';
 import { revokeUserSessions } from './session';
@@ -197,8 +196,6 @@ adminRoutes.patch('/users/:id', async (c) => {
   }
   const email = v.email ? normalizeEmail(v.email) : user.email;
   const set: Record<string, unknown> = { display_name: v.name ?? user.display_name, email, role, department_id: departmentId, team_id: teamId };
-  // A new email may belong to a different Lark account; the old link must not carry over.
-  if (email !== user.email) Object.assign(set, { lark_open_id: null, lark_link_status: 'unlinked', lark_checked_at: null });
   const tx = new GuardedTx(db, actor, 'updateUser');
   tx.update('app_user', user.id, v.version, set);
   tx.audit('app_user', user.id, snapshot(user), snapshot({ display_name: set.display_name as string, email, role, department_id: departmentId, team_id: teamId }));
@@ -224,58 +221,13 @@ adminRoutes.post('/users/:id/status', async (c) => {
   if (status === 'disabled') {
     tx.raw(revokeUserSessions(db, user.id, tx.now));
     tx.raw(revokeAgentTokens(db, user.id, tx.now));
+    // A disabled person's devices must stop showing message previews, even on a shared device.
+    tx.raw(db.prepare('DELETE FROM push_subscription WHERE user_id = ?').bind(user.id));
   }
   tx.audit('app_user', user.id, { status: user.status }, { status });
   assertAdminRemains(tx, actor);
   const failed = await commit(c, tx, status === 'disabled' && user.role === 'admin' ? lastAdmin : stale);
   return failed ?? c.json(ok(null));
-});
-
-adminRoutes.post('/lark/link', async (c) => {
-  const input = await body(c, larkLinkInput);
-  if ('error' in input) return input.error;
-  const actor = c.get('actor');
-  const db = c.env.DB;
-  const ids = input.data.userIds;
-  const candidates = (await db.prepare(`SELECT id, email, version, lark_open_id, lark_link_status FROM app_user
-    WHERE organization_id = ? AND status = 'active'
-      AND ${ids?.length ? `id IN (${ids.map(() => '?').join(',')})` : "lark_link_status IN ('unlinked','unmatched','error')"}`)
-    .bind(actor.organizationId, ...(ids ?? [])).all<{ id: string; email: string; version: number; lark_open_id: string | null; lark_link_status: string }>()).results;
-  if (!candidates.length) return c.json(ok({ linked: 0, unmatched: 0, error: 0 }));
-
-  let found: Map<string, string | null> | null = null;
-  let message: string | undefined;
-  try {
-    found = await lookupOpenIds(c.env, candidates.map((u) => u.email));
-  } catch (error) {
-    if (!(error instanceof LarkError)) throw error;
-    message = error.message;
-  }
-  const taken = new Map((await db.prepare(`SELECT id, lark_open_id FROM app_user WHERE organization_id = ? AND lark_open_id IS NOT NULL`)
-    .bind(actor.organizationId).all<{ id: string; lark_open_id: string }>()).results.map((r) => [r.lark_open_id, r.id]));
-
-  const counts = { linked: 0, unmatched: 0, error: 0 };
-  const tx = new GuardedTx(db, actor, 'linkLark');
-  for (const u of candidates) {
-    let openId: string | null = null;
-    let status: 'linked' | 'unmatched' | 'error' = 'error';
-    if (!found) {
-      // A failed lookup keeps an earlier link, so a Lark outage cannot undo a working one.
-      counts.error++;
-      if (u.lark_open_id) continue;
-    } else {
-      const id = found.get(u.email.toLowerCase()) ?? null;
-      const owner = id ? taken.get(id) : undefined;
-      if (!id) status = 'unmatched';
-      else if (owner && owner !== u.id) message ??= 'open_id đã gắn cho người khác';
-      else { status = 'linked'; openId = id; taken.set(id, u.id); }
-      counts[status]++;
-    }
-    tx.update('app_user', u.id, u.version, { lark_open_id: openId, lark_link_status: status, lark_checked_at: tx.now });
-    tx.audit('app_user', u.id, { larkStatus: u.lark_link_status, larkOpenId: u.lark_open_id }, { larkStatus: status, larkOpenId: openId });
-  }
-  const failed = await commit(c, tx);
-  return failed ?? c.json(ok({ ...counts, ...(message ? { message } : {}) }));
 });
 
 adminRoutes.post('/users/:id/temp-password', async (c) => {
@@ -332,16 +284,38 @@ adminRoutes.post('/users/:id/agent-token/revoke', async (c) => {
   return c.json(ok({ revoked: revoked!.meta.changes ?? 0 }));
 });
 
-/** Retries a Leader DM that failed (or had nobody to reach before a Leader linked Lark). */
-adminRoutes.post('/outbox/:id/resend', async (c) => {
+adminRoutes.get('/chat-agents', async (c) => {
   const actor = c.get('actor');
-  const db = c.env.DB;
-  const id = c.req.param('id');
-  const before = await db.prepare(`SELECT status FROM outbox WHERE id = ? AND event_type = 'approval.requested'`).bind(id).first<{ status: string }>();
-  if (!before) return c.json(notFound, 404);
-  if (before.status === 'no_recipient') await db.prepare(`UPDATE outbox SET status = 'pending' WHERE id = ? AND status = 'no_recipient'`).bind(id).run();
-  await deliverApprovalDm(c.env, id, new URL(c.req.url).origin);
-  const status = (await db.prepare('SELECT status FROM outbox WHERE id = ?').bind(id).first<{ status: string }>())?.status ?? before.status;
-  await auditRow(db, actor, 'resendApprovalDm', 'outbox', id, { status: before.status }, { status }, new Date().toISOString()).run();
-  return c.json(ok({ status }));
+  return c.json(ok(await listAdminChatAgents(c.env.DB, actor.organizationId)));
+});
+
+adminRoutes.post('/chat-agents', async (c) => {
+  const actor = c.get('actor');
+  const raw = await c.req.json<{ displayName?: unknown; dmAgentKey?: unknown; groupAgentKey?: unknown }>().catch(() => null);
+  if (!raw || typeof raw !== 'object') {
+    return c.json(fail('VALIDATION_FAILED', 'Dữ liệu không hợp lệ'), 422);
+  }
+  const res = await createChatAgent(c.env.DB, actor, raw);
+  if (!res.ok) {
+    return c.json(res, res.error.code === 'NOT_FOUND' ? 404 : 422);
+  }
+  return c.json(res);
+});
+
+adminRoutes.patch('/chat-agents/:id', async (c) => {
+  const actor = c.get('actor');
+  const raw = await c.req.json<{
+    displayName?: unknown;
+    dmAgentKey?: unknown;
+    groupAgentKey?: unknown;
+    enabled?: unknown;
+  }>().catch(() => null);
+  if (!raw || typeof raw !== 'object') {
+    return c.json(fail('VALIDATION_FAILED', 'Dữ liệu không hợp lệ'), 422);
+  }
+  const res = await updateChatAgent(c.env.DB, actor, c.req.param('id'), raw);
+  if (!res.ok) {
+    return c.json(res, res.error.code === 'NOT_FOUND' ? 404 : 422);
+  }
+  return c.json(res);
 });

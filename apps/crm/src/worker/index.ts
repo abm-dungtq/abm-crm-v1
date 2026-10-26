@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { COMMANDS, SEARCH_MAX_LENGTH, type ApiResult, type CommandName } from '@abm/contracts';
 import { isDemoMode, requireActor } from './actor';
 import { adminRoutes } from './admin-routes';
+import { agentTokenRoutes } from './agent-token-routes';
 import { notifyCommitted } from './approval-notify';
 import { bridgeRoutes } from './inbox/bridge-routes';
 import { facebookWebhookRoutes } from './inbox/facebook-webhook';
@@ -22,16 +23,20 @@ import { LMS_STAFF, learnerAccountSettings, listLearnerAccounts } from './lms-ac
 import { classProgram, listPrograms, openClasses, previewUrl } from './lms-programs';
 import { lmsPublishRoutes } from './lms-publish-routes';
 import { listPrivacyRequests } from './privacy';
-import type { AppBindings, Env } from './env';
+import { sinkFrom, type AppBindings, type Env } from './env';
 import {
-  accountDetail, adminOverview, canReadAudit, dashboard, leadDetail, listAccounts, listApprovals,
-  listAudit, listLeads, leadPage, accountPage, listProducts, listTasks, search, teamMembers, canReadProducts,
+  accountDetail, adminOverview, canReadAudit, dashboard, directory, leadDetail, listAccounts, listApprovals,
+  listAudit, listLeads, leadPage, accountPage, listProducts, listTasks, search, taskDetail, teamMembers, canReadProducts,
 } from './queries';
+import { ensureTaskConversation, listMessages, markRead, memberIds, postTaskComment } from './chat';
+import { chatRoutes } from './chat-routes';
+import { notificationRoutes, pushRoutes } from './notification-routes';
+import { canSeeTask } from './task-scope';
 
 const OPEN_CLASS_READERS = ['sale', 'leader', 'admin', 'academic', 'director'];
 
 const STATUS: Record<string, 200 | 400 | 401 | 403 | 404 | 409 | 422> = {
-  FORBIDDEN: 403, NOT_FOUND: 404, STALE_VERSION: 409, IDEMPOTENCY_CONFLICT: 409, DUPLICATE_SUSPECTED: 409,
+  FORBIDDEN: 403, NOT_FOUND: 404, STALE_VERSION: 409, IDEMPOTENCY_CONFLICT: 409, CONFLICT: 409, DUPLICATE_SUSPECTED: 409,
   VALIDATION_FAILED: 422, APPROVAL_REQUIRED: 409, KILL_SWITCH_ON: 409, UNAUTHENTICATED: 401,
 };
 
@@ -67,6 +72,10 @@ app.get('/demo-users', async (c) => {
 app.use('*', requireActor);
 app.route('/auth', sessionAuth);
 app.route('/admin', adminRoutes);
+app.route('/chat', chatRoutes);
+app.route('/notifications', notificationRoutes);
+app.route('/push', pushRoutes);
+app.route('/agent-tokens', agentTokenRoutes);
 
 const data = <T>(value: T) => ({ ok: true as const, data: value });
 const notFound = { ok: false as const, error: { code: 'NOT_FOUND' as const, message: 'Không tìm thấy trong phạm vi của bạn' } };
@@ -92,7 +101,55 @@ app.get('/leads/:id', async (c) => {
   const detail = await leadDetail(c.env.DB, c.get('actor'), c.req.param('id'));
   return detail ? c.json(data(detail)) : c.json(notFound, 404);
 });
-app.get('/tasks', async (c) => c.json(data(await listTasks(c.env.DB, c.get('actor'), c.req.query('status') === 'completed' ? 'completed' : 'open'))));
+app.get('/tasks', async (c) => {
+  const s = c.req.query('status');
+  const status = s === 'completed' || s === 'in_progress' ? s : 'open';
+  return c.json(data(await listTasks(c.env.DB, c.get('actor'), status, c.req.query('mine') === '1')));
+});
+app.get('/tasks/:id', async (c) => {
+  const detail = await taskDetail(c.env.DB, c.get('actor'), c.req.param('id'));
+  return detail ? c.json(data(detail)) : c.json(notFound, 404);
+});
+app.get('/tasks/:id/comments', async (c) => {
+  const actor = c.get('actor');
+  const taskId = c.req.param('id');
+  if (!(await canSeeTask(c.env.DB, actor, taskId))) return c.json(notFound, 404);
+  const conversationId = await ensureTaskConversation(c.env.DB, actor, taskId);
+  const [messages, members] = await Promise.all([
+    listMessages(c.env.DB, conversationId, { before: c.req.query('before') || undefined }),
+    memberIds(c.env.DB, conversationId),
+  ]);
+  return c.json(data({ conversationId, messages, isMember: members.includes(actor.id) }));
+});
+app.post('/tasks/:id/comments', async (c) => {
+  const actor = c.get('actor');
+  const taskId = c.req.param('id');
+  if (!(await canSeeTask(c.env.DB, actor, taskId))) return c.json(notFound, 404);
+  const body = await c.req.json<{ id?: string; body?: string; parentMessageId?: string }>().catch(() => null);
+  if (!body || typeof body.id !== 'string' || typeof body.body !== 'string') {
+    return c.json({ ok: false, error: { code: 'VALIDATION_FAILED', message: 'Dữ liệu chưa hợp lệ' } }, 422);
+  }
+  const result = await postTaskComment(c.env.DB, sinkFrom(c), actor, taskId, {
+    id: body.id,
+    body: body.body,
+    parentMessageId: body.parentMessageId ?? null,
+  });
+  return c.json(result, result.ok ? 200 : STATUS[result.error.code] ?? 400);
+});
+app.post('/tasks/:id/comments/read', async (c) => {
+  const actor = c.get('actor');
+  const taskId = c.req.param('id');
+  if (!(await canSeeTask(c.env.DB, actor, taskId))) return c.json(notFound, 404);
+  const conversationId = `task:${taskId}`;
+  const member = await c.env.DB.prepare('SELECT 1 FROM chat_member WHERE conversation_id = ? AND user_id = ?')
+    .bind(conversationId, actor.id)
+    .first();
+  if (member) {
+    const body = await c.req.json<{ at?: string }>().catch(() => null);
+    await markRead(c.env.DB, conversationId, actor.id, body?.at || new Date().toISOString());
+  }
+  return c.json(data({ conversationId }));
+});
 app.get('/accounts', async (c) => c.json(data(await (c.req.query('view') === 'page' ? accountPage : listAccounts)(c.env.DB, c.get('actor'), c.req.query('q') || undefined))));
 app.get('/accounts/:id', async (c) => {
   const detail = await accountDetail(c.env.DB, c.get('actor'), c.req.param('id'));
@@ -168,6 +225,7 @@ app.get('/enrollments/overdue-deferrals', async (c) => {
   return rows ? c.json(data(rows)) : c.json(forbidden, 403);
 });
 app.get('/team-members', async (c) => c.json(data(await teamMembers(c.env.DB, c.get('actor').teamId))));
+app.get('/directory', async (c) => c.json(data(await directory(c.env.DB, c.get('actor').organizationId))));
 app.get('/search', async (c) => c.json(data(await search(c.env.DB, c.get('actor'), c.req.query('q') ?? ''))));
 app.get('/admin/overview', async (c) => {
   const actor = c.get('actor');
@@ -246,7 +304,7 @@ app.get('/classes/:id/lms/preview-url', async (c) => {
 });
 app.get('/lms/programs', async (c) => {
   const actor = c.get('actor');
-  if (!LMS_STAFF.includes(actor.role)) return c.json(forbidden, 403);
+  if (!LMS_STAFF.includes(actor.role) && actor.role !== 'teacher') return c.json(forbidden, 403);
   return c.json(data(await listPrograms(c.env.DB, actor)));
 });
 app.get('/lms/open-classes', async (c) => {
@@ -265,7 +323,9 @@ app.post('/commands/:name', async (c) => {
 
 app.all('*', (c) => c.json(notFound, 404));
 
+export { ChatHub } from './chat-hub';
+
 export default {
   fetch: app.fetch,
-  scheduled: (event: ScheduledController, env: Env, ctx: ExecutionContext) => ctx.waitUntil(runScheduled(env, event.cron)),
+  scheduled: (event: ScheduledController, env: Env, ctx: ExecutionContext) => ctx.waitUntil(runScheduled(env, event.cron, ctx)),
 };

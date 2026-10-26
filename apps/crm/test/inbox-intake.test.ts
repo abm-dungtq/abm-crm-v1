@@ -8,6 +8,7 @@ import { ingestEvents } from '../src/worker/inbox/ingest';
 import { enqueueExtraction, mergeIntakeFields, parseExtraction } from '../src/worker/inbox/intake';
 import { runScheduled } from '../src/worker/inbox/scheduled';
 import { resetDb } from './helpers/reset-db';
+import { testSink } from './helpers/test-sink';
 
 const db = env.DB;
 const ORIGIN = 'http://crm.test';
@@ -26,7 +27,7 @@ let msgSeq = 0;
 const customerSays = (text: string, threadId = 'cust-1') => ingestEvents(db, [{
   type: 'message', accountExternalId: 'zalo-acc-1', threadId, threadKind: 'direct', msgId: `zm-${++msgSeq}`, fromSelf: false,
   senderExternalId: threadId, senderName: 'Chị Hoa', text, sentAt: new Date().toISOString(),
-}]);
+}], testSink());
 const conversation = (threadId = 'cust-1') =>
   db.prepare('SELECT * FROM conversation WHERE external_thread_id = ?').bind(threadId).first<any>();
 const extractCommands = () => db.prepare(`SELECT * FROM channel_command
@@ -73,7 +74,7 @@ const nextAction = () => ({ title: 'Gọi tư vấn', dueAt: new Date(Date.now()
 test('a handoff queues one stateless crm-extractor run over the conversation', async () => {
   await customerSays('Cho em hỏi lịch học');
   const conv = await conversation();
-  await applyCompletionResult(db, testEnv, conv.id, 'Dạ em chuyển nhân viên tư vấn ạ\n[HANDOFF: khách muốn chốt]');
+  await applyCompletionResult(db, testEnv, conv.id, 'Dạ em chuyển nhân viên tư vấn ạ\n[HANDOFF: khách muốn chốt]', undefined, undefined, testSink());
   const last = await db.prepare('SELECT id FROM message WHERE conversation_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1')
     .bind(conv.id).first<{ id: string }>();
   const [command, ...rest] = await extractCommands();
@@ -345,7 +346,7 @@ test('discarding an intake writes nothing else, and a group cannot be extracted 
   await ingestEvents(db, [{
     type: 'message', accountExternalId: 'zalo-acc-1', threadId: 'grp-9', threadKind: 'group', msgId: 'zm-grp', fromSelf: false,
     senderExternalId: 'member-1', senderName: 'Thành viên', text: 'Chào cả nhóm', sentAt: new Date().toISOString(),
-  }]);
+  }], testSink());
   const group = await conversation('grp-9');
   expect((await web('u-lan', 'POST', `/inbox/conversations/${group.id}/extract`)).status).toBe(422);
   const direct = await web('u-lan', 'POST', `/inbox/conversations/${(await conversation()).id}/extract`);
@@ -439,9 +440,8 @@ test('a returning zalo_oa customer in a new conversation is linked to the existi
     .toEqual([{ type: 'zalo_oa_uid', value: 'oa-thread-99' }]);
 });
 
-test('classifying an intake assigns the conversation to the lead owner and queues one private Lark notice with the lead code', async () => {
+test('classifying an intake assigns the conversation to the lead owner and sends the owner one CRM notification with the lead code', async () => {
   await db.batch([
-    db.prepare("UPDATE app_user SET lark_open_id = 'ou_lan_123' WHERE id = 'u-lan'"),
     db.prepare(`INSERT INTO product (id, organization_id, name, price_vnd, active, created_at, updated_at)
       VALUES ('pr-199k', 'org-abm', 'Khóa AI 199K', 199000, 1, ?1, ?1)`).bind(STAMP),
   ]);
@@ -461,14 +461,15 @@ test('classifying an intake assigns the conversation to the lead owner and queue
   expect(await db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE command = 'inbox.assign' AND entity_id = ?").bind(conv.id).first())
     .toEqual({ n: 1 });
 
-  const larkCmds = await db.prepare("SELECT payload_json FROM channel_command WHERE kind = 'send_lark' ORDER BY created_at, rowid").all<{ payload_json: string }>()
-    .then((r) => r.results.map((row) => JSON.parse(row.payload_json)));
-  const privateCmds = larkCmds.filter((p) => p.openId === 'ou_lan_123');
-  expect(privateCmds).toHaveLength(1);
-  expect(privateCmds[0].text).toContain(lead!.code);
-  expect(privateCmds[0].text).toContain('Nguyễn Văn An');
-  expect(privateCmds[0].text).toContain('Khóa AI 199K');
-  expect(privateCmds[0].text).toContain(`https://crm.example/learners/${contactId}`);
+  const notifs = await db.prepare("SELECT user_id, kind, title, body, link FROM notification WHERE user_id = 'u-lan' AND kind = 'inbox' ORDER BY created_at, rowid")
+    .all<{ user_id: string; kind: string; title: string; body: string; link: string }>()
+    .then((r) => r.results);
+  expect(notifs).toHaveLength(1);
+  expect(notifs[0]!.body).toContain(lead!.code);
+  expect(notifs[0]!.body).toContain('Nguyễn Văn An');
+  expect(notifs[0]!.body).toContain('Khóa AI 199K');
+  expect(notifs[0]!.body).toContain(`https://crm.example/learners/${contactId}`);
+  expect(notifs[0]!.link).toBe(`/learners/${contactId}`);
 
   // L2: setLeadProgram on a learner lead enforces mayEdit (head/director rejected with NOT_FOUND) and requires explicit productId (or null).
   expect((await web('u-head', 'POST', '/commands/setLeadProgram', { leadId, expectedVersion: 1, productId: null })).status).toBe(404);

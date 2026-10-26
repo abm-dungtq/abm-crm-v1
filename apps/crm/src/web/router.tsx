@@ -17,6 +17,7 @@ import { LeadNewPage } from './pages/lead-new';
 import { LeadsPage } from './pages/leads';
 import { LearnerDetailPage } from './pages/learner-detail';
 import { LearnerAccountsPage } from './pages/learner-accounts';
+import { LmsVideosPage } from './pages/lms-videos';
 import { LearnerReportsPage } from './pages/learner-reports';
 import { PrivacyRequestsPage } from './pages/privacy-requests';
 import { LearnerNewPage } from './pages/learner-new';
@@ -35,7 +36,11 @@ import { ProductsPage } from './pages/products';
 import { PartnersPage } from './pages/partners';
 import { OverviewPage } from './pages/overview';
 import { PipelinePage } from './pages/pipeline';
+import { TaskDetailPage } from './pages/task-detail';
 import { TasksPage } from './pages/tasks';
+import { ChatPage } from './pages/chat';
+import { NotificationSettingsPage } from './pages/notification-settings';
+import { AgentConnectPage } from './pages/agent-connect';
 import { ChannelAccountsPage } from './pages/channel-accounts';
 import { InboxConversationPage, InboxIndexPage, InboxPage } from './pages/inbox';
 import { InboxSettingsPage } from './pages/inbox-settings';
@@ -140,6 +145,7 @@ const routes = [
   createRoute({ getParentRoute: () => rootRoute, path: '/classes/$classId/online', component: ClassOnlinePage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/my-classes', component: MyClassesPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/learner-accounts', component: LearnerAccountsPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/lms-videos', component: LmsVideosPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/fees', component: FeesPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/fees/queue', component: FeesQueuePage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/fees/ledger/$contactId', component: FeesLedgerPage }),
@@ -151,8 +157,17 @@ const routes = [
     getParentRoute: () => rootRoute,
     path: '/tasks',
     component: TasksPage,
-    validateSearch: (s: Record<string, unknown>): { view?: 'open' | 'completed' } => ({ view: s.view === 'completed' ? 'completed' : undefined }),
+    validateSearch: (s: Record<string, unknown>): { view?: 'list' | 'board'; status?: 'open' | 'completed'; mine?: '1' } => ({
+      view: s.view === 'board' ? 'board' : s.view === 'list' ? 'list' : undefined,
+      status: s.status === 'completed' || s.view === 'completed' ? 'completed' : undefined,
+      mine: s.mine === '1' ? '1' : undefined,
+    }),
   }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/tasks/$taskId', component: TaskDetailPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/chat', component: ChatPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/chat/$conversationId', component: ChatPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/settings/notifications', component: NotificationSettingsPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/settings/agents', component: AgentConnectPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/approvals', component: ApprovalsPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/reports/learner', component: LearnerReportsPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/privacy', component: PrivacyRequestsPage }),

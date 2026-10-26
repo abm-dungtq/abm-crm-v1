@@ -7,13 +7,13 @@ import { computeNextRun, runDueSchedules, vnDate } from '../src/worker/inbox/gro
 import { ingestEvents } from '../src/worker/inbox/ingest';
 import { runScheduled } from '../src/worker/inbox/scheduled';
 import { resetDb } from './helpers/reset-db';
+import { testSink } from './helpers/test-sink';
 
 const db = env.DB;
 const ORIGIN = 'http://crm.test';
 const STAMP = '2026-10-08T03:00:00.000Z';
 const SECRET = 'test-bridge-secret';
-const lark = { LARK_APP_ID: 'cli_fake', LARK_APP_SECRET: 'fake-secret-value-123', LARK_INBOX_CHAT_ID: 'oc_inbox' };
-const testEnv = { ...env, ...lark, DEMO_MODE: '1', BRIDGE_SECRET: SECRET };
+const testEnv = { ...env, DEMO_MODE: '1', BRIDGE_SECRET: SECRET };
 const zero = () => 0;
 /** Monday 2026-10-12, 10:00 Vietnam time. */
 const MONDAY_10 = new Date('2026-10-12T03:00:00.000Z');
@@ -51,22 +51,6 @@ async function bridge(path: string, body: unknown) {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Bridge-Timestamp': timestamp, 'X-Bridge-Signature': signature }, body: raw,
   }), testEnv);
   return { status: res.status, json: await res.json() as any };
-}
-
-const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
-/** Fakes Lark: the token call succeeds and every message text is recorded. */
-function fakeLark() {
-  const sent: string[] = [];
-  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
-    const url = String(input instanceof Request ? input.url : input);
-    if (url.includes('/auth/v3/tenant_access_token/internal')) return json({ code: 0, tenant_access_token: 't-fake', expire: 7200 });
-    if (url.includes('/im/v1/messages')) {
-      sent.push(JSON.parse((JSON.parse(String(init!.body)) as { content: string }).content).text);
-      return json({ code: 0, data: {} });
-    }
-    return json({ code: 404 }, 404);
-  });
-  return sent;
 }
 
 const commands = (kind: string) => db.prepare('SELECT * FROM channel_command WHERE kind = ? ORDER BY created_at, rowid').bind(kind).all<any>()
@@ -264,8 +248,7 @@ test('groups list and toggles; only an admin turns recurring posts on', async ()
     .toMatchObject({ slaMinutes: 20, scheduledSendsEnabled: true });
 });
 
-test('the daily summary queues one run per group with member messages today and posts the answer to Lark', async () => {
-  const sent = fakeLark();
+test('the daily summary queues one run per group with member messages today and posts the answer to the CRM inbox group', async () => {
   // 21:00 in Vietnam on Monday.
   const evening = new Date('2026-10-12T14:00:00.000Z');
   await db.prepare("UPDATE conversation SET summary_enabled = 1 WHERE id IN ('grp-1', 'grp-2')").run();
@@ -297,28 +280,34 @@ test('the daily summary queues one run per group with member messages today and 
 
   const [day, month] = [vnDate(new Date(runs[0].created_at)).slice(8, 10), vnDate(new Date(runs[0].created_at)).slice(5, 7)];
   const expected = `Tóm tắt nhóm Lớp IELTS K1 (Số tư vấn 1) ngày ${day}/${month}:\nHọc viên hỏi lịch tối nay; đã xác nhận.`;
-  const larks = await commands('send_lark');
-  expect(larks.map((l) => l.payload)).toEqual([{ text: expected }]);
-  expect(sent).toEqual([expected]);
+  const notices = await db.prepare("SELECT id, author_kind, body, meta_json FROM chat_message WHERE conversation_id = 'sys:inbox:org-abm' ORDER BY created_at, rowid").all<any>();
+  expect(notices.results).toEqual([{
+    id: `notice:summary:${claimed!.id}`,
+    author_kind: 'system',
+    body: expected,
+    meta_json: JSON.stringify({ link: '/inbox/grp-1' }),
+  }]);
   // Nothing goes into the Zalo group.
   expect(await commands('send_zalo')).toHaveLength(0);
   expect((await commands('run_completion'))[0].status).toBe('done');
 });
 
-test('an account error from the bridge pauses its sending and warns Lark once per hour', async () => {
+test('an account error from the bridge pauses its sending and warns the CRM inbox group once per hour', async () => {
   const event = { type: 'account_status' as const, accountId: 'ca-1', status: 'error' as const, lastError: 'ZALO_KICKED' };
-  expect(await ingestEvents(db, [event])).toEqual({ accepted: 1, rejected: 0 });
+  expect(await ingestEvents(db, [event], testSink())).toEqual({ accepted: 1, rejected: 0 });
   expect(await db.prepare("SELECT status, send_paused FROM channel_account WHERE id = 'ca-1'").first()).toEqual({ status: 'error', send_paused: 1 });
-  const larks = await commands('send_lark');
-  expect(larks).toHaveLength(1);
-  expect(larks[0]).toMatchObject({ target: 'worker', channel_account_id: 'ca-1' });
-  expect(larks[0].dedupe_key).toMatch(/^account-error:ca-1:\d{4}-\d{2}-\d{2}T\d{2}$/);
-  expect(larks[0].payload).toEqual({ text: 'Tài khoản Số tư vấn 1 lỗi kết nối, đã tạm dừng gửi' });
+  const notices = await db.prepare("SELECT id, author_kind, body FROM chat_message WHERE conversation_id = 'sys:inbox:org-abm' ORDER BY created_at, rowid").all<any>();
+  expect(notices.results).toHaveLength(1);
+  expect(notices.results[0].id).toMatch(/^notice:account-error:ca-1:\d{4}-\d{2}-\d{2}T\d{2}$/);
+  expect(notices.results[0]).toMatchObject({
+    author_kind: 'system',
+    body: 'Tài khoản Số tư vấn 1 lỗi kết nối, đã tạm dừng gửi',
+  });
 
-  await ingestEvents(db, [event]);
-  expect(await commands('send_lark')).toHaveLength(1);
+  await ingestEvents(db, [event], testSink());
+  expect((await db.prepare("SELECT id FROM chat_message WHERE conversation_id = 'sys:inbox:org-abm'").all()).results).toHaveLength(1);
   // Reconnecting does not turn sending back on; that stays an admin's call.
-  await ingestEvents(db, [{ type: 'account_status', accountId: 'ca-1', accountExternalId: 'zalo-acc-1', status: 'connected' }]);
+  await ingestEvents(db, [{ type: 'account_status', accountId: 'ca-1', accountExternalId: 'zalo-acc-1', status: 'connected' }], testSink());
   expect(await db.prepare("SELECT status, send_paused FROM channel_account WHERE id = 'ca-1'").first()).toEqual({ status: 'connected', send_paused: 1 });
 });
 
@@ -328,17 +317,17 @@ test('a login an admin asked for within 15 minutes turns sending back on; an old
   const account = () => db.prepare("SELECT status, send_paused, last_error FROM channel_account WHERE id = 'ca-1'").first();
 
   // A login queued 20 minutes ago is not this reconnect: a sidecar restart logged back in by itself.
-  await ingestEvents(db, [paused]);
+  await ingestEvents(db, [paused], testSink());
   const oldLogin = await enqueueCommand(db, { kind: 'zalo_login', target: 'bridge', channelAccountId: 'ca-1', payload: { accountId: 'ca-1' } });
   await db.prepare('UPDATE channel_command SET created_at = ? WHERE id = ?').bind(new Date(Date.now() - 20 * 60_000).toISOString(), oldLogin).run();
-  await ingestEvents(db, [connected]);
+  await ingestEvents(db, [connected], testSink());
   expect(await account()).toEqual({ status: 'connected', send_paused: 1, last_error: null });
 
   // The admin presses connect: the login that follows resumes sending.
   const res = await web('u-admin', 'POST', '/inbox/accounts/ca-1/connect');
   expect(res.status).toBe(200);
-  await ingestEvents(db, [paused]);
+  await ingestEvents(db, [paused], testSink());
   expect(await account()).toEqual({ status: 'error', send_paused: 1, last_error: 'ZALO_KICKED' });
-  await ingestEvents(db, [connected]);
+  await ingestEvents(db, [connected], testSink());
   expect(await account()).toEqual({ status: 'connected', send_paused: 0, last_error: null });
 });

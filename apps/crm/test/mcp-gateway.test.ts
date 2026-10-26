@@ -105,11 +105,16 @@ describe('auth', () => {
 });
 
 describe('protocol', () => {
-  test('initialize and tools/list expose exactly the eleven tools', async () => {
+  test('initialize and tools/list expose exactly the eleven CRM tools plus the seven chat and task tools', async () => {
     expect((await mcp(rpc('initialize', {}), bearer('u-lan'))).json.result.serverInfo.name).toBe('abm-crm');
     const listed = (await mcp(rpc('tools/list'), bearer('u-lan'))).json.result.tools;
     const names = listed.map((t: { name: string }) => t.name);
-    expect(names).toHaveLength(11);
+    expect(names).toHaveLength(18);
+    expect(names).toEqual([
+      'whoami', 'search_leads', 'get_lead', 'my_tasks', 'dashboard_summary', 'create_lead', 'log_activity', 'complete_task',
+      'change_stage', 'assign_lead', 'request_owner_change',
+      'list_conversations', 'read_messages', 'search_messages', 'get_task', 'create_task', 'update_task', 'comment_task',
+    ]);
     expect(names.some((n: string) => /decide|release/.test(n))).toBe(false);
     expect(listed.every((t: { roles?: unknown }) => t.roles === undefined)).toBe(true);
   });
@@ -177,7 +182,7 @@ describe('write', () => {
 
   test('an owner change request through the bot reads as pending approval', async () => {
     const res = await tool('u-lan', 'request_owner_change', { lead_code: 'L-0004', new_owner_email: 'long@demo.abm.example', reason: 'Khách ở khu vực anh Long' });
-    expect(res.data).toMatchObject({ status: 'pending_approval', kind: 'owner_change', message: 'Đã tạo yêu cầu, Leader sẽ được báo qua Lark' });
+    expect(res.data).toMatchObject({ status: 'pending_approval', kind: 'owner_change', message: 'Đã tạo yêu cầu, Leader sẽ nhận thông báo trên CRM' });
     expect(await approvalFor('lead-04', 'owner_change')).not.toBeNull();
   });
 
@@ -189,7 +194,7 @@ describe('write', () => {
 
   test('a won proposal from a sale needs the team leader', async () => {
     const res = await tool('u-lan', 'change_stage', { lead_code: 'L-0014', to_stage: 'won', won_value: 320000000, won_note: 'Hợp đồng đã ký' });
-    expect(res.data.message).toBe('Đã tạo yêu cầu, Leader sẽ được báo qua Lark');
+    expect(res.data.message).toBe('Đã tạo yêu cầu, Leader sẽ nhận thông báo trên CRM');
     const approval = await approvalFor('lead-14', 'agent_stage_change');
     expect((await decide('u-lan', approval)).status).toBe(403);
     expect((await decide('u-hung', approval)).status).toBe(200);
@@ -249,11 +254,14 @@ describe('learner privacy on the bot', () => {
       .bind(`tok-${user}`, user, await sha256(tokens[user]!)).run();
   }
 
-  test('an accountant lists only whoami and cannot search leads', async () => {
+  test('an accountant lists only whoami and the task and chat tools, and cannot search leads', async () => {
     await addUser('u-accountant', 'accountant');
     await issueToken('u-accountant');
     const listed = (await mcp(rpc('tools/list'), bearer('u-accountant'))).json.result.tools;
-    expect(listed.map((t: { name: string }) => t.name)).toEqual(['whoami']);
+    expect(listed.map((t: { name: string }) => t.name)).toEqual([
+      'whoami', 'my_tasks', 'complete_task',
+      'list_conversations', 'read_messages', 'search_messages', 'get_task', 'create_task', 'update_task', 'comment_task',
+    ]);
     expect(listed.every((t: { roles?: unknown }) => t.roles === undefined)).toBe(true);
     const denied = await tool('u-accountant', 'search_leads', {});
     expect(denied.isError).toBe(true);

@@ -1,106 +1,80 @@
 import type { Context } from 'hono';
-import { background, type AppBindings, type Env } from './env';
+import { sinkFrom, type AppBindings } from './env';
 import type { GuardedTx } from './guarded-tx';
-import { LarkError, sendText } from './lark';
+import { notify } from './notify';
 
 /**
- * Won/Lost, assignment and owner-change requests wait on the team Leader, so the Leader gets a Lark
- * direct message. An ordinary stage change is confirmed by the owner on the web and sends nothing.
+ * Won/Lost, assignment and owner-change requests wait on the team Leader, so the Leader gets a CRM
+ * notification. An ordinary stage change is confirmed by the owner on the web and notifies nobody.
  */
-export const approvalNeedsLeaderDm = (kind: string, toStage?: string | null) =>
+export const approvalNeedsLeader = (kind: string, toStage?: string | null) =>
   kind === 'owner_change' || kind === 'agent_assign' || (kind === 'agent_stage_change' && (toStage === 'won' || toStage === 'lost'));
 
-interface Recipient { id: string; display_name: string; lark_open_id: string }
-
-/** Linked, active Leaders of the lead's team (or of its department for a queue lead), never the requester. */
-export async function leaderRecipients(db: D1Database, lead: { team_id: string | null; department_id: string }, requesterId: string | null) {
+/** Active Leaders of the lead's team (or of its department for a queue lead), never the requester. */
+export async function activeLeaders(db: D1Database, lead: { team_id: string | null; department_id: string }, requesterId: string | null) {
   const [column, value] = lead.team_id ? ['team_id', lead.team_id] : ['department_id', lead.department_id];
-  const rows = await db.prepare(`SELECT id, display_name, lark_open_id FROM app_user
-    WHERE ${column} = ? AND role = 'leader' AND status = 'active' AND lark_link_status = 'linked' AND lark_open_id IS NOT NULL
-      AND id IS NOT ?`).bind(value, requesterId).all<Recipient>();
+  const rows = await db.prepare(`SELECT id, display_name FROM app_user
+    WHERE ${column} = ? AND role = 'leader' AND status = 'active'
+      AND id IS NOT ?`).bind(value, requesterId).all<{ id: string; display_name: string }>();
   return rows.results;
 }
 
-interface ApprovalForDm {
-  kind: string; status: string; payload_json: string; requested_by_user_id: string | null; requested_by_kind: string;
-  code: string; team_id: string | null; department_id: string; contact_name: string; requester: string | null;
-}
-
-/** Message text: names and lead code only, never the customer's phone or email. */
-function messageText(a: ApprovalForDm, payload: { toStage?: string; toUserId?: string }, toUserName: string | null, origin: string) {
-  const what = a.kind === 'owner_change' ? `chuyển người phụ trách sang ${toUserName ?? '—'}`
-    : a.kind === 'agent_assign' ? `giao lead cho ${toUserName ?? '—'}`
-    : payload.toStage === 'won' ? 'chốt Won' : 'đóng Lost';
-  const who = `${a.requester ?? 'Người dùng'}${a.requested_by_kind === 'agent' ? ' (qua bot)' : ''}`;
-  return `[CRM] ${who} đề nghị ${what} cho lead ${a.code} – ${a.contact_name}. Duyệt tại: ${origin}/approvals`;
-}
-
-/**
- * Sends the Leader DM for one `approval.requested` outbox row and records the outcome on it. It runs
- * after the commit, so a Lark failure never touches the approval; it never throws.
- */
-export async function deliverApprovalDm(env: Pick<Env, 'DB' | 'LARK_APP_ID' | 'LARK_APP_SECRET'>, outboxId: string, origin: string): Promise<string | null> {
-  const db = env.DB;
-  const row = await db.prepare(`SELECT payload_json FROM outbox WHERE id = ? AND event_type = 'approval.requested'`)
-    .bind(outboxId).first<{ payload_json: string }>();
-  if (!row) return null;
-  // sent_at holds the lease start only while sending; a crashed sender can be reclaimed after five minutes.
-  const lease = new Date().toISOString();
-  const expired = new Date(Date.now() - 5 * 60_000).toISOString();
-  const claimed = await db.prepare(`UPDATE outbox SET status = 'sending', sent_at = ?
-    WHERE id = ? AND (status IN ('pending', 'failed') OR (status = 'sending' AND COALESCE(sent_at, created_at) < ?))`)
-    .bind(lease, outboxId, expired).run();
-  if (claimed.meta.changes !== 1) return null;
-  const finish = async (status: string, error: string | null = null, attempted = true) => {
-    const completed = await db.prepare(`UPDATE outbox SET status = ?, last_error = ?, attempts = attempts + ?, sent_at = CASE WHEN ? = 'sent' THEN ? ELSE NULL END
-      WHERE id = ? AND status = 'sending' AND sent_at = ?`)
-      .bind(status, error, attempted ? 1 : 0, status, new Date().toISOString(), outboxId, lease).run();
-    return completed.meta.changes === 1 ? status : null;
-  };
-  try {
-    const { approvalId } = JSON.parse(row.payload_json) as { approvalId: string };
-    const approval = await db.prepare(`SELECT ap.kind, ap.status, ap.payload_json, ap.requested_by_user_id, ap.requested_by_kind,
-        l.code, l.team_id, l.department_id, c.display_name AS contact_name, ru.display_name AS requester
-      FROM approval ap JOIN lead l ON l.id = ap.lead_id JOIN contact c ON c.id = l.contact_id
-      LEFT JOIN app_user ru ON ru.id = ap.requested_by_user_id WHERE ap.id = ?`).bind(approvalId).first<ApprovalForDm>();
-    const payload = approval ? JSON.parse(approval.payload_json) as { toStage?: string; toUserId?: string } : {};
-    // A decided request (for example an old row resent later) no longer needs anyone's attention.
-    if (!approval || approval.status !== 'pending' || !approvalNeedsLeaderDm(approval.kind, payload.toStage)) return finish('skipped', null, false);
-    const recipients = await leaderRecipients(db, approval, approval.requested_by_user_id);
-    if (!recipients.length) return finish('no_recipient', null, false);
-    const toUserName = payload.toUserId
-      ? (await db.prepare('SELECT display_name FROM app_user WHERE id = ?').bind(payload.toUserId).first<{ display_name: string }>())?.display_name ?? null
-      : null;
-    const text = messageText(approval, payload, toUserName, origin);
-    const errors: string[] = [];
-    for (const r of recipients) {
-      const ownsLease = await db.prepare("SELECT 1 AS owned FROM outbox WHERE id = ? AND status = 'sending' AND sent_at = ?")
-        .bind(outboxId, lease).first();
-      if (!ownsLease) return null;
-      try {
-        await sendText(env, r.lark_open_id, text);
-      } catch (error) {
-        errors.push(`${r.display_name}: ${error instanceof LarkError ? error.message : 'lỗi gửi tin'}`);
-      }
-    }
-    return finish(errors.length ? 'failed' : 'sent', errors.join('; ') || null);
-  } catch (error) {
-    try {
-      return await finish('failed', error instanceof LarkError ? error.message : 'Lỗi khi chuẩn bị tin nhắn');
-    } catch {
-      return 'failed';
-    }
-  }
-}
-
-/** After a command commits, sends the Leader DMs its approval requests need, without delaying the response. */
+/** After a command commits, sends the in-app/push notifications its events need. */
 export function notifyCommitted(c: Context<AppBindings>) {
-  const origin = new URL(c.req.url).origin;
+  const sink = sinkFrom(c);
+  const actor = c.get('actor');
   return async (tx: GuardedTx) => {
     for (const event of tx.events) {
-      const payload = event.payload as { kind?: string; toStage?: string | null };
-      if (event.type === 'approval.requested' && approvalNeedsLeaderDm(payload.kind ?? '', payload.toStage)) {
-        await background(c, deliverApprovalDm(c.env, event.id, origin));
+      const payload = event.payload as {
+        approvalId?: string;
+        leadId?: string;
+        kind?: string;
+        toStage?: string | null;
+        requesterId?: string | null;
+        taskId?: string;
+        assigneeUserId?: string;
+      };
+      if (event.type === 'approval.requested' && approvalNeedsLeader(payload.kind ?? '', payload.toStage)) {
+        if (payload.approvalId) {
+          const leadRow = await c.env.DB.prepare(`
+            SELECT l.team_id, l.department_id, l.code
+            FROM approval ap
+            JOIN lead l ON l.id = ap.lead_id
+            WHERE ap.id = ?`)
+            .bind(payload.approvalId)
+            .first<{ team_id: string | null; department_id: string; code: string }>();
+          if (leadRow) {
+            const leaders = await activeLeaders(c.env.DB, leadRow, payload.requesterId ?? actor.id);
+            await notify(sink, {
+              organizationId: actor.organizationId,
+              userIds: leaders.map((l) => l.id),
+              kind: 'approval',
+              title: 'Yêu cầu duyệt',
+              body: `Lead ${leadRow.code} có yêu cầu chờ duyệt`,
+              link: '/approvals',
+              dedupeKey: `approval:${payload.approvalId}`,
+            });
+          }
+        }
+      }
+      if (
+        (event.type === 'task.created' || event.type === 'task.assigned') &&
+        payload.taskId &&
+        payload.assigneeUserId &&
+        payload.assigneeUserId !== actor.id
+      ) {
+        const taskRow = await c.env.DB.prepare('SELECT title FROM task WHERE id = ?')
+          .bind(payload.taskId)
+          .first<{ title: string }>();
+        await notify(sink, {
+          organizationId: actor.organizationId,
+          userIds: [payload.assigneeUserId],
+          kind: 'task_assigned',
+          title: `${actor.displayName} giao việc cho bạn`,
+          body: taskRow?.title ?? undefined,
+          link: `/tasks/${payload.taskId}`,
+          dedupeKey: `task-assigned:${payload.taskId}:${payload.assigneeUserId}`,
+        });
       }
     }
   };

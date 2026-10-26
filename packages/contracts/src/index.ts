@@ -319,6 +319,35 @@ export const completeTaskInput = z.object({
 });
 export type CompleteTaskInput = z.infer<typeof completeTaskInput>;
 
+export const TASK_PRIORITIES = ['low', 'normal', 'high', 'urgent'] as const;
+export const createTaskInput = z.object({
+  kind: z.enum(['crm', 'internal']),
+  leadId: z.string().min(1).optional(),
+  parentTaskId: z.string().min(1).optional(),
+  title: z.string().trim().min(1).max(200),
+  description: z.string().trim().max(5000).optional(),
+  priority: z.enum(TASK_PRIORITIES).default('normal'),
+  dueAt: z.string().datetime().optional(),
+  assigneeUserId: z.string().min(1),
+  memberUserIds: z.array(z.string().min(1)).max(20).default([]),
+}).refine((v) => v.kind === 'internal' || (v.leadId && v.dueAt), { message: 'Việc CRM cần lead và hạn', path: ['leadId'] })
+  .refine((v) => v.kind === 'crm' || !v.leadId, { message: 'Việc nội bộ không gắn lead', path: ['leadId'] });
+export const updateTaskInput = z.object({
+  taskId: z.string().min(1),
+  expectedVersion: z.number().int().positive(),
+  title: z.string().trim().min(1).max(200).optional(),
+  description: z.string().trim().max(5000).nullable().optional(),
+  priority: z.enum(TASK_PRIORITIES).optional(),
+  dueAt: z.string().datetime().nullable().optional(),
+  assigneeUserId: z.string().min(1).optional(),
+  status: z.enum(['open', 'in_progress']).optional(),
+  memberUserIds: z.array(z.string().min(1)).max(20).optional(),
+});
+export const cancelTaskInput = z.object({ taskId: z.string().min(1), expectedVersion: z.number().int().positive(), reason: z.string().trim().max(500).optional() });
+export type CreateTaskInput = z.infer<typeof createTaskInput>;
+export type UpdateTaskInput = z.infer<typeof updateTaskInput>;
+export type CancelTaskInput = z.infer<typeof cancelTaskInput>;
+
 export const changeStageInput = z.object({
   leadId: id,
   expectedVersion: version,
@@ -714,6 +743,17 @@ export type DeleteLessonVideoInput = z.infer<typeof deleteLessonVideoInput>;
 export const cloneLmsProgramInput = z.object({ fromClassId: id, toClassId: id });
 export type CloneLmsProgramInput = z.infer<typeof cloneLmsProgramInput>;
 
+export const importLessonVideosInput = z.object({
+  text: z.string().min(1, 'Bắt buộc').max(20000, 'Tối đa 20000 ký tự'),
+  programId: id.optional(),
+  overrides: z.array(z.object({
+    line: z.number().int().min(1),
+    lessonId: id,
+  })).max(100).optional(),
+  commit: z.boolean(),
+});
+export type ImportLessonVideosInput = z.infer<typeof importLessonVideosInput>;
+
 type RiskLevel = 'low' | 'medium' | 'high';
 interface CommandDefinition {
   schema: z.ZodType;
@@ -731,7 +771,10 @@ export const COMMANDS = {
   assignLead: { schema: assignLeadInput, roles: ['leader', 'admin'], riskLevel: 'medium', idempotent: true, expectedVersion: true, agentNeedsApproval: true },
   releaseLead: { schema: releaseLeadInput, roles: ['leader'], riskLevel: 'medium', idempotent: true, expectedVersion: true, agentNeedsApproval: true },
   logActivity: { schema: logActivityInput, roles: ['sale', 'leader', 'head', 'director', 'admin'], riskLevel: 'low', idempotent: true, expectedVersion: true, agentNeedsApproval: false },
-  completeTask: { schema: completeTaskInput, roles: ['sale', 'leader', 'head', 'director', 'admin'], riskLevel: 'low', idempotent: true, expectedVersion: true, agentNeedsApproval: false },
+  completeTask: { schema: completeTaskInput, roles: ROLE_CODES, riskLevel: 'low', idempotent: true, expectedVersion: true, agentNeedsApproval: false },
+  createTask: { schema: createTaskInput, roles: ROLE_CODES, riskLevel: 'low', idempotent: true, expectedVersion: false, agentNeedsApproval: false },
+  updateTask: { schema: updateTaskInput, roles: ROLE_CODES, riskLevel: 'low', idempotent: true, expectedVersion: true, agentNeedsApproval: false },
+  cancelTask: { schema: cancelTaskInput, roles: ROLE_CODES, riskLevel: 'low', idempotent: true, expectedVersion: true, agentNeedsApproval: false },
   changeStage: { schema: changeStageInput, roles: ['sale', 'leader', 'head', 'director', 'admin'], riskLevel: 'high', idempotent: true, expectedVersion: true, agentNeedsApproval: true },
   requestOwnerChange: { schema: requestOwnerChangeInput, roles: ['sale'], riskLevel: 'medium', idempotent: true, expectedVersion: true, agentNeedsApproval: true },
   decideApproval: { schema: decideApprovalInput, roles: ['sale', 'leader'], riskLevel: 'high', idempotent: true, expectedVersion: true, agentNeedsApproval: true },
@@ -789,6 +832,7 @@ export const COMMANDS = {
   addLessonVideo: { schema: addLessonVideoInput, roles: ['academic', 'admin', 'teacher'], riskLevel: 'medium', idempotent: true, expectedVersion: false, agentNeedsApproval: false },
   updateLessonVideo: { schema: updateLessonVideoInput, roles: ['academic', 'admin', 'teacher'], riskLevel: 'medium', idempotent: true, expectedVersion: true, agentNeedsApproval: false },
   deleteLessonVideo: { schema: deleteLessonVideoInput, roles: ['academic', 'admin', 'teacher'], riskLevel: 'medium', idempotent: true, expectedVersion: true, agentNeedsApproval: false },
+  importLessonVideos: { schema: importLessonVideosInput, roles: ['academic', 'admin', 'teacher'], riskLevel: 'medium', idempotent: true, expectedVersion: false, agentNeedsApproval: false },
 } as const satisfies Record<string, CommandDefinition>;
 export type CommandName = keyof typeof COMMANDS;
 
@@ -801,7 +845,7 @@ export const changePasswordInput = z.object({
   newPassword: z.string().min(PASSWORD_MIN_LENGTH, `Tối thiểu ${PASSWORD_MIN_LENGTH} ký tự`).max(200),
 });
 
-// Admin user management (accounts, roster, Lark link).
+// Admin user management (accounts, roster).
 export const rosterImportInput = z.object({
   csv: z.string().max(512_000, 'File quá lớn (tối đa 500 KB)'),
   issueTempPasswords: z.boolean().optional(),
@@ -818,8 +862,6 @@ export const updateUserInput = z.object({
 export const userStatusInput = z.object({ version, status: z.enum(['active', 'disabled']) });
 export const versionInput = z.object({ version });
 export const agentKillSwitchInput = z.object({ enabled: z.boolean() });
-// A retry list stays small: D1 caps bound parameters per query.
-export const larkLinkInput = z.object({ userIds: z.array(id).min(1).max(50).optional() });
 
 // Omnichannel inbox (ADR-008, ADR-009, ADR-010): shared by the Worker, the web app and the Zalo bridge sidecar.
 export const CONVERSATION_MODES = ['ai', 'human', 'paused'] as const;
@@ -828,7 +870,7 @@ export const SENDER_KINDS = ['customer', 'bot', 'staff_web', 'staff_phone', 'sys
 export type SenderKind = (typeof SENDER_KINDS)[number];
 export const CHANNEL_KINDS = ['zalo', 'facebook', 'zalo_oa'] as const;
 export type ChannelKind = (typeof CHANNEL_KINDS)[number];
-export const COMMAND_KINDS = ['send_zalo', 'send_messenger', 'run_completion', 'send_lark', 'zalo_login', 'zalo_logout', 'send_zalo_oa', 'leave_zalo_group'] as const;
+export const COMMAND_KINDS = ['send_zalo', 'send_messenger', 'run_completion', 'zalo_login', 'zalo_logout', 'send_zalo_oa', 'leave_zalo_group'] as const;
 export type CommandKind = (typeof COMMAND_KINDS)[number];
 export const CHANNEL_ACCOUNT_STATUSES = ['disconnected', 'qr_pending', 'connected', 'error'] as const;
 export type ChannelAccountStatus = (typeof CHANNEL_ACCOUNT_STATUSES)[number];

@@ -123,7 +123,7 @@ learningRoutes.get('/programs', async (c) => {
   const lessons = (
     await db
       .prepare(
-        `SELECT l.id, l.program_id, l.section_id, l.position,
+        `SELECT l.id, l.program_id, l.section_id, l.title, l.position,
                 CASE WHEN pr.lesson_id IS NOT NULL THEN 1 ELSE 0 END AS done
          FROM lms_lesson l
          LEFT JOIN lms_progress pr ON pr.lesson_id = l.id AND pr.account_id = ?
@@ -131,13 +131,13 @@ learningRoutes.get('/programs', async (c) => {
          ORDER BY l.position ASC, l.id ASC`,
       )
       .bind(learner.accountId, JSON.stringify(visible.map((f) => f.programId)))
-      .all<{ id: string; program_id: string; section_id: string; position: number; done: number }>()
+      .all<{ id: string; program_id: string; section_id: string; title: string; position: number; done: number }>()
   ).results;
 
-  const byProgram = new Map<string, { id: string; section_id: string; done: boolean }[]>();
+  const byProgram = new Map<string, { id: string; section_id: string; title: string; done: boolean }[]>();
   for (const l of lessons) {
     const list = byProgram.get(l.program_id) ?? [];
-    list.push({ id: l.id, section_id: l.section_id, done: Boolean(l.done) });
+    list.push({ id: l.id, section_id: l.section_id, title: l.title, done: Boolean(l.done) });
     byProgram.set(l.program_id, list);
   }
 
@@ -145,7 +145,7 @@ learningRoutes.get('/programs', async (c) => {
     const progLessons = byProgram.get(f.programId) ?? [];
     const lessonCount = progLessons.length;
     const completedCount = progLessons.filter((l) => l.done).length;
-    const nextSectionId = progLessons.find((l) => !l.done)?.section_id ?? null;
+    const next = progLessons.find((l) => !l.done);
     return {
       id: f.programId,
       title: f.title,
@@ -155,7 +155,8 @@ learningRoutes.get('/programs', async (c) => {
       endedAt: f.access.state === 'expired' ? f.access.endedAt : null,
       lessonCount,
       completedCount,
-      nextSectionId,
+      nextSectionId: next?.section_id ?? null,
+      nextLessonTitle: next?.title ?? null,
     };
   });
 

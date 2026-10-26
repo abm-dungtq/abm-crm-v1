@@ -13,7 +13,7 @@
     // Email + password sign-in (docs/adr/adr-006-password-login.md). The demo user picker
     // (DEMO_MODE=1) is for tests and local runs only and is off whenever AUTH_MODE is set.
     "AUTH_MODE": "password",
-    // Base of links in inbox Lark notices; cron runs have no request origin to fall back on.
+    // Base of links in inbox notices; cron runs have no request origin to fall back on.
     "APP_URL": "https://abm-crm-eval.ngulongyquan.workers.dev",
     // Filled in phase 08 when LMS content Worker and Cloudflare Stream are provisioned.
     "LMS_CONTENT_ORIGIN": "https://abm-lms-content.ngulongyquan.workers.dev",
@@ -23,7 +23,10 @@
     "HANDOFF_NET_MODE": "active",
     "JEV_INTENT_MODE": "active",
     "JEV_CONFIDENCE": "0.75",
-    "JEV_MODEL": "jev-1.13.0"
+    "JEV_MODEL": "jev-1.13.0",
+    // Web Push public key (docs/adr/adr-012-internal-chat-in-crm.md). VAPID_PRIVATE_KEY and VAPID_SUBJECT
+    // (mailto: the Admin email) are Worker secrets, so neither the key nor the email lives in the repo.
+    "VAPID_PUBLIC_KEY": "BAxsaqD1q3ZUGqHOlLc1MeMyNaYcC-51IpLcZ7lh7rPK66kbri8kVbpGpsdKbZU-6xhwjhNzCFZHmEvkmUvNoDA"
   },
   "d1_databases": [
     {
@@ -37,6 +40,9 @@
     { "binding": "MEDIA", "bucket_name": "abm-crm-media" },
     { "binding": "LMS_CONTENT", "bucket_name": "abm-lms-content" }
   ],
+  // Internal chat relay (docs/adr/adr-012-internal-chat-in-crm.md). SQLite-backed so it runs on the Workers Free plan.
+  "durable_objects": { "bindings": [{ "name": "CHAT_HUB", "class_name": "ChatHub" }] },
+  "migrations": [{ "tag": "v1-chat-hub", "new_sqlite_classes": ["ChatHub"] }],
   // Every minute: worker commands, inbox SLA reminders and stuck outgoing messages.
   // 0 14 * * * = 14:00 UTC = 21:00 Vietnam time, for the daily group summaries.
   "triggers": { "crons": ["* * * * *", "0 14 * * *"] },

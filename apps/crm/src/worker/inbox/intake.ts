@@ -2,7 +2,8 @@ import { foldText, normalizeEmail, normalizePhone, type ApiResult } from '@abm/c
 import { z } from 'zod';
 import { fail, ok } from '../command-result';
 import { runCommand } from '../commands';
-import type { Actor } from '../env';
+import type { Actor, Sink } from '../env';
+import { notifyInboxUser } from '../inbox-notices';
 import { customerScope } from '../scope';
 import { assignConversationToLeadOwner } from './assignment';
 import { completeCommand, enqueueCommand, failCommand } from './dispatcher';
@@ -460,10 +461,11 @@ export interface ClassifyRequest {
  * still pending. On success the intake is classified, the conversation is linked to the lead's contact, the
  * channel contact point is added, and the lead gets one short note: "Tóm tắt hội thoại <kênh>:" plus
  * `summary` when that summary is non-empty, otherwise "Tạo từ hội thoại <kênh>." The conversation is then
- * assigned to the lead's owner with a Lark notice.
+ * assigned to the lead's owner with an inbox notice.
  */
-export async function classifyIntake(db: D1Database, actor: Actor, intakeId: string, request: ClassifyRequest, appBase = ''):
-  Promise<ApiResult<{ intakeId: string; leadId: string; contactId: string }>> {
+export async function classifyIntake(
+  db: D1Database, actor: Actor, intakeId: string, request: ClassifyRequest, appBase: string, sink: Sink,
+): Promise<ApiResult<{ intakeId: string; leadId: string; contactId: string }>> {
   const intake = await loadIntake(db, actor, intakeId);
   if (!intake) return intakeNotFound();
   if (intake.status !== 'pending') return notPending();
@@ -512,22 +514,23 @@ export async function classifyIntake(db: D1Database, actor: Actor, intakeId: str
 
   if (lead.owner_user_id) {
     try {
-      const assignee = await assignConversationToLeadOwner(db, actor, intake.conversation_id, lead.owner_user_id, appBase);
-      if (assignee?.larkOpenId) {
-        const detailUrl = request.pipeline === 'b2b'
-          ? `${appBase}/leads/${leadId}`
-          : `${appBase}/learners/${lead.contact_id}`;
+      const assignee = await assignConversationToLeadOwner(db, actor, intake.conversation_id, lead.owner_user_id, appBase, sink);
+      if (assignee) {
+        const link = request.pipeline === 'b2b'
+          ? `/leads/${leadId}`
+          : `/learners/${lead.contact_id}`;
+        const detailUrl = `${appBase}${link}`;
         const parts = [
           `Bạn có lead mới ${lead.code}`,
           lead.contact_name,
           ...(lead.product_name ? [lead.product_name] : []),
           detailUrl,
         ];
-        await enqueueCommand(db, {
-          kind: 'send_lark',
-          target: 'worker',
-          conversationId: intake.conversation_id,
-          payload: { text: parts.join(' – '), openId: assignee.larkOpenId },
+        await notifyInboxUser(sink, {
+          organizationId: actor.organizationId,
+          userId: assignee.id,
+          text: parts.join(' – '),
+          link,
         });
       }
     } catch (error) {

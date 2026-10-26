@@ -1,12 +1,14 @@
 #!/usr/bin/env node
-// Issues a chat-bot (MCP) token for each Lark-linked CRM user and stores it as that person's GoClaw
-// credential. D1 keeps only the sha256 hash; the token goes straight to GoClaw and is never printed.
-// The gateway token is read from D:\Goclaw\data\gateway-token.txt and never printed either.
+// Issues a chat-bot (MCP) token for each active CRM user and stores it as that person's GoClaw credential
+// under the key `crm-user:<app_user.id>`, the GoClaw user id the CRM uses for direct chats with the assistant
+// (crm-assistant), so the agent acts with that person's own CRM rights. D1 keeps only the sha256 hash; the token
+// goes straight to GoClaw and is never printed. The gateway token is read from D:\Goclaw\data\gateway-token.txt
+// and never printed either.
 //
 // Usage (cwd apps/crm):
-//   node scripts/issue-agent-tokens.mjs --server <goclaw mcp server id> --email <crm email> [--tenant-user <goclaw user_id>] [--email ...]
-// --tenant-user applies to the --email before it: the key GoClaw uses for that person's direct messages
-// once their Lark contact is merged into a tenant user. Group messages use the Lark open_id (ou_…).
+//   node scripts/issue-agent-tokens.mjs --server <goclaw mcp server id> --email <crm email> [--email ...]
+// wrangler d1 execute has no parameter binding, so every value placed in SQL is validated first: emails cannot
+// contain quotes or spaces, user ids come from D1 and must match a strict id pattern, the rest is generated here.
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -21,9 +23,14 @@ const appDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 function usage(message) {
   console.error(message);
-  console.error('Usage: --server <id> --email <crm email> [--tenant-user <goclaw user_id>] [--email ...]');
+  console.error('Usage: --server <id> --email <crm email> [--email ...]');
   process.exitCode = 1;
 }
+
+/** Checked before an email reaches SQL: no whitespace, quotes or extra @ can appear in the literal. */
+const EMAIL_RE = /^[^\s'"@]+@[^\s'"@]+$/;
+/** app_user ids are interpolated into SQL and into the GoClaw key, so only plain id characters are accepted. */
+const USER_ID_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
 
 /** Shows enough of a key to recognise it without copying it whole into logs. */
 const mask = (key) => (key.length > 10 ? `${key.slice(0, 7)}…${key.slice(-2)}` : key);
@@ -36,8 +43,7 @@ for (let i = 0; i < argv.length; i += 2) {
   const [flag, value] = [argv[i], argv[i + 1]];
   if (!value) { people.length = 0; break; }
   if (flag === '--server') server = value;
-  else if (flag === '--email') people.push({ email: value.trim().toLowerCase(), tenantUser: null });
-  else if (flag === '--tenant-user' && people.length) people.at(-1).tenantUser = value.trim();
+  else if (flag === '--email') people.push({ email: value.trim().toLowerCase() });
   else { people.length = 0; break; }
 }
 
@@ -68,21 +74,24 @@ function runSql(sql) {
 
 async function main() {
   if (!server || !/^[\w-]+$/.test(server) || !people.length) return usage('Thiếu --server hoặc --email.');
-  const badEmail = people.find((p) => !/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(p.email));
-  if (badEmail) return usage(`Email không hợp lệ: ${badEmail.email}`);
-  const badTenant = people.find((p) => p.tenantUser && !/^[\w.:-]+$/.test(p.tenantUser));
-  if (badTenant) return usage(`--tenant-user không hợp lệ cho ${badTenant.email}`);
+  const badEmail = people.find((p) => !EMAIL_RE.test(p.email));
+  if (badEmail) return usage('Email không hợp lệ (không được có khoảng trắng, dấu nháy hoặc thiếu @).');
 
   // Every GoClaw key must belong to exactly one person in this run, or one person's bot would act as another.
   for (const person of people) {
-    const [user] = query(`SELECT id, lark_open_id FROM app_user WHERE email = '${person.email}' AND status = 'active' AND lark_link_status = 'linked'`);
-    if (!user?.lark_open_id) {
-      console.log(`${person.email}: chưa liên kết Lark hoặc không hoạt động, bỏ qua.`);
+    const [user] = query(`SELECT id FROM app_user WHERE email = '${person.email}' AND status = 'active'`);
+    if (!user?.id) {
+      console.log(`${person.email}: không có người dùng đang hoạt động, bỏ qua.`);
+      process.exitCode = 1;
+      continue;
+    }
+    if (!USER_ID_RE.test(user.id)) {
+      console.log(`${person.email}: mã người dùng có ký tự lạ, bỏ qua.`);
       process.exitCode = 1;
       continue;
     }
     person.userId = user.id;
-    person.keys = [user.lark_open_id, ...(person.tenantUser ? [person.tenantUser] : [])];
+    person.keys = [`crm-user:${user.id}`];
   }
   const ready = people.filter((p) => p.userId);
   const owners = new Map();
@@ -111,7 +120,9 @@ async function main() {
     const tokenId = randomUUID();
     const now = new Date().toISOString();
     const hash = createHash('sha256').update(token).digest('hex');
-    runSql(`UPDATE agent_token SET revoked_at = '${now}' WHERE user_id = '${p.userId}' AND revoked_at IS NULL;
+    // Only this person's earlier GoClaw key is replaced: their self-service MCP tokens and an LMS publish token stay
+    // valid. created_via comes from migration 0030, so apply migrations before running this script.
+    runSql(`UPDATE agent_token SET revoked_at = '${now}' WHERE user_id = '${p.userId}' AND revoked_at IS NULL AND label = 'goclaw' AND created_via = 'script';
 INSERT INTO agent_token (id, user_id, token_hash, label, created_at) VALUES ('${tokenId}', '${p.userId}', '${hash}', 'goclaw', '${now}');
 INSERT INTO audit_log (id, actor_user_id, actor_kind, command, entity, entity_id, before_json, after_json, created_at)
   VALUES ('${randomUUID()}', NULL, 'system', 'issueAgentToken', 'agent_token', '${tokenId}', NULL, '{"userId":"${p.userId}"}', '${now}');

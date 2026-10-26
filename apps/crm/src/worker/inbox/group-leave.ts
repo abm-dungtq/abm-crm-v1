@@ -74,7 +74,7 @@ async function failQueuedMessage(db: D1Database, payload: unknown) {
 
 /**
  * Fails pending and claimed commands that would still send into this group: Zalo, Messenger and OA sends,
- * and a group-bot reply that has not been turned into a send yet. Lark notices and summaries are left alone.
+ * and a group-bot reply that has not been turned into a send yet. Inbox notices and summaries are left alone.
  * Pending rows use `cancelCommand`; a claim the bridge already holds uses `dropBotSend`.
  */
 export async function cancelSendsIntoGroup(db: D1Database, conversationId: string): Promise<void> {

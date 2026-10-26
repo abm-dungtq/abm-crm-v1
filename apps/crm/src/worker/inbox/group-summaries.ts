@@ -1,10 +1,12 @@
+import type { Sink } from '../env';
+import { postInboxNotice } from '../inbox-notices';
 import { completeCommand, enqueueCommand, failCommand } from './dispatcher';
 import { VN_OFFSET_MS, vnDate, vnDayStart } from './group-schedules';
 
 /**
  * Daily group summaries: at 21:00 Vietnam time every group with summaries on and at least one customer message
  * today is sent to the `group-summarizer` agent (a fresh GoClaw session each time), and its answer is posted to
- * the Lark inbox group. A summary is never sent into the Zalo group.
+ * the CRM "Inbox" chat group. A summary is never sent into the Zalo group.
  */
 
 export const SUMMARY_AGENT_KEY = 'group-summarizer';
@@ -73,24 +75,27 @@ export async function enqueueDailyGroupSummaries(db: D1Database, now = new Date(
 export interface SummaryCommand { id: string; attempts: number; conversationId: string | null }
 
 /**
- * Applies the summarizer's answer for a claimed command: completes it and queues the Lark post
+ * Applies the summarizer's answer for a claimed command: completes it and posts
  * `Tóm tắt nhóm <group> (<account>) ngày <dd/mm>:\n<summary>`, dated by the day the summary was queued.
  * An empty answer fails the command. Returns false when the claim no longer owns the command (result dropped).
  */
-export async function applyGroupSummaryResult(db: D1Database, command: SummaryCommand, text: string): Promise<boolean> {
+export async function applyGroupSummaryResult(db: D1Database, command: SummaryCommand, text: string, sink: Sink): Promise<boolean> {
   const summary = text.trim();
   if (!summary) return failCommand(db, command.id, command.attempts, 'SUMMARY_EMPTY');
   const row = command.conversationId
-    ? await db.prepare(`SELECT c.id, c.display_name, c.external_thread_id, a.display_name AS account_name, cc.created_at AS queued_at
+    ? await db.prepare(`SELECT c.id, c.organization_id, c.display_name, c.external_thread_id, a.display_name AS account_name, cc.created_at AS queued_at
         FROM channel_command cc JOIN conversation c ON c.id = ? JOIN channel_account a ON a.id = c.channel_account_id
         WHERE cc.id = ?`).bind(command.conversationId, command.id)
-      .first<{ id: string; display_name: string | null; external_thread_id: string; account_name: string; queued_at: string }>()
+      .first<{ id: string; organization_id: string; display_name: string | null; external_thread_id: string; account_name: string; queued_at: string }>()
     : null;
   if (!row) return failCommand(db, command.id, command.attempts, 'INVALID_PAYLOAD');
   if (!(await completeCommand(db, command.id, command.attempts, { summarized: true }))) return false;
   const header = `Tóm tắt nhóm ${row.display_name ?? row.external_thread_id} (${row.account_name}) ngày ${dayMonth(new Date(row.queued_at))}:`;
-  await enqueueCommand(db, {
-    kind: 'send_lark', target: 'worker', conversationId: row.id, payload: { text: `${header}\n${summary}` }, dedupeKey: `summary-lark:${command.id}`,
+  await postInboxNotice(sink, db, {
+    organizationId: row.organization_id,
+    text: `${header}\n${summary}`,
+    link: `/inbox/${row.id}`,
+    dedupeKey: `summary:${command.id}`,
   });
   return true;
 }

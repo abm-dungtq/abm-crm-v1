@@ -1,10 +1,10 @@
 import {
   ACTIVITY_BACKDATE_DAYS, COMMANDS, FIRST_CONTACT_SLA_HOURS, RELEASE_AFTER_HOURS, ACTIVITY_TYPES, addWorkingHours, allowedTransitions,
   foldText, lostReasonLabel, normalizeEmail, normalizePhone, stageLabel, workingMinutesBetween,
-  type ApiError, type ApiResult, type AssignLeadInput, type ChangeStageInput, type CommandName,
-  type CompleteTaskInput, type CreateLeadInput, type DecideApprovalInput, type LogActivityInput,
+  type ApiError, type ApiResult, type AssignLeadInput, type CancelTaskInput, type ChangeStageInput, type CommandName,
+  type CompleteTaskInput, type CreateLeadInput, type CreateTaskInput, type DecideApprovalInput, type LogActivityInput,
   type NextActionInput, type PipelineCode, type RecordConsentInput, type ReleaseLeadInput, type RequestOwnerChangeInput,
-  type SetLeadProgramInput, type StageCode, type UpsertProductInput,
+  type SetLeadProgramInput, type StageCode, type UpdateTaskInput, type UpsertProductInput,
 } from '@abm/contracts';
 import type { z } from 'zod';
 import type { Actor, Env } from './env';
@@ -21,6 +21,7 @@ import { lmsAccountHandlers } from './lms-accounts';
 import { lmsProgramHandlers } from './lms-programs';
 import { privacyHandlers } from './privacy';
 import { canSeeLead, customerScope, leaderOnly, leadScope, mayDecideApproval } from './scope';
+import { canSeeTask } from './task-scope';
 
 export interface LeadRow {
   id: string;
@@ -45,10 +46,17 @@ export interface LeadRow {
 
 interface TaskRow {
   id: string;
-  lead_id: string;
+  kind: 'crm' | 'internal';
+  lead_id: string | null;
+  parent_task_id: string | null;
   title: string;
+  description: string | null;
+  priority: 'low' | 'normal' | 'high' | 'urgent';
+  due_at: string | null;
   assignee_user_id: string;
-  status: 'open' | 'completed' | 'cancelled';
+  created_by_user_id: string | null;
+  status: 'open' | 'in_progress' | 'completed' | 'cancelled';
+  outcome: string | null;
   version: number;
 }
 
@@ -64,7 +72,7 @@ interface ApprovalRow {
 
 
 const handlers: { [K in CommandName]: Handler<z.infer<(typeof COMMANDS)[K]['schema']>> } = {
-  createLead, setLeadProgram, assignLead, releaseLead, logActivity, completeTask, changeStage, requestOwnerChange, decideApproval,
+  createLead, setLeadProgram, assignLead, releaseLead, logActivity, completeTask, createTask, updateTask, cancelTask, changeStage, requestOwnerChange, decideApproval,
   upsertProduct, recordConsent, ...learnerHandlers, ...academicHandlers, ...attendanceHandlers, ...feeHandlers, ...privacyHandlers,
   ...lmsAccountHandlers, ...lmsProgramHandlers,
 };
@@ -155,12 +163,13 @@ export async function runCommand(db: D1Database, actor: Actor, name: CommandName
 export async function replayInScope(db: D1Database, actor: Actor, name: CommandName, input: unknown, stored: ApiResult<unknown>): Promise<ApiResult<unknown>> {
   if (!(COMMANDS[name].roles as readonly string[]).includes(actor.role)) return fail('FORBIDDEN', 'Vai trò hiện tại không được thực hiện thao tác này');
   if (actor.kind === 'agent' && await agentWritesBlocked(db)) return killSwitchOn();
-  if (name === 'createLead') return stored;
+  if (name === 'createLead' || name === 'createTask') return stored;
   const fields = input as { leadId?: string; taskId?: string; approvalId?: string };
   const leadId = fields.leadId
     ?? (fields.taskId ? (await db.prepare('SELECT lead_id FROM task WHERE id = ?').bind(fields.taskId).first<{ lead_id: string }>())?.lead_id : undefined)
     ?? (fields.approvalId ? (await db.prepare('SELECT lead_id FROM approval WHERE id = ?').bind(fields.approvalId).first<{ lead_id: string }>())?.lead_id : undefined);
   if (leadId && !(await canSeeLead(db, actor, leadId))) return notFound();
+  if (fields.taskId && !leadId && !(await canSeeTask(db, actor, fields.taskId))) return notFound();
   return stored;
 }
 
@@ -581,9 +590,143 @@ async function logActivity({ db, actor, input, tx }: Ctx<LogActivityInput>) {
   return ok({ leadId: lead.id, firstContact: Boolean(set.first_contact_at) });
 }
 
+async function createTask({ db, actor, input, tx }: Ctx<CreateTaskInput>) {
+  const wantedUsers = [...new Set([input.assigneeUserId, ...input.memberUserIds])];
+  const activeUsers = await db.prepare(
+    `SELECT id FROM app_user WHERE id IN (SELECT value FROM json_each(?)) AND organization_id = ? AND status = 'active'`,
+  ).bind(JSON.stringify(wantedUsers), actor.organizationId).all<{ id: string }>();
+  if (activeUsers.results.length !== wantedUsers.length) {
+    return fail('VALIDATION_FAILED', 'Người nhận hoặc người cùng làm không hợp lệ');
+  }
+  if (input.kind === 'crm') {
+    if (input.parentTaskId) return fail('VALIDATION_FAILED', 'Việc con luôn là việc nội bộ');
+    if (input.memberUserIds.length > 0) return fail('VALIDATION_FAILED', 'Việc gắn lead không có người cùng làm');
+    const lead = input.leadId ? await loadLead(db, actor, input.leadId) : null;
+    if (!lead) return notFound();
+    if (input.assigneeUserId !== lead.owner_user_id && input.assigneeUserId !== actor.id) {
+      return fail('VALIDATION_FAILED', 'Người nhận việc gắn lead phải là owner hoặc người tạo');
+    }
+  }
+  if (input.parentTaskId) {
+    if (input.kind !== 'internal' || input.leadId) {
+      return fail('VALIDATION_FAILED', 'Việc con luôn là việc nội bộ, không gắn lead');
+    }
+    if (!(await canSeeTask(db, actor, input.parentTaskId))) {
+      return fail('NOT_FOUND', 'Không tìm thấy việc cha trong phạm vi của bạn');
+    }
+  }
+  const id = crypto.randomUUID();
+  const dueAt = input.dueAt ? new Date(input.dueAt).toISOString() : null;
+  const row = {
+    id,
+    kind: input.kind,
+    lead_id: input.leadId ?? null,
+    parent_task_id: input.parentTaskId ?? null,
+    title: input.title,
+    description: input.description ?? null,
+    priority: input.priority,
+    due_at: dueAt,
+    assignee_user_id: input.assigneeUserId,
+    status: 'open',
+    created_by_user_id: actor.id,
+  };
+  tx.insertVersioned('task', row);
+  for (const uid of new Set(input.memberUserIds)) {
+    tx.raw(db.prepare('INSERT OR IGNORE INTO task_member (task_id, user_id, added_at) VALUES (?, ?, ?)').bind(id, uid, tx.now));
+  }
+  tx.audit('task', id, null, { ...row, memberUserIds: input.memberUserIds });
+  tx.event('task.created', { taskId: id, assigneeUserId: input.assigneeUserId });
+  return ok({ taskId: id });
+}
+
+async function updateTask({ db, actor, input, tx }: Ctx<UpdateTaskInput>) {
+  const task = await db.prepare('SELECT * FROM task WHERE id = ?').bind(input.taskId).first<TaskRow>();
+  if (!task || !(await canSeeTask(db, actor, task.id))) return fail('NOT_FOUND', 'Không tìm thấy việc trong phạm vi của bạn');
+  if (task.version !== input.expectedVersion) return stale();
+  if (task.status === 'completed' || task.status === 'cancelled') return fail('VALIDATION_FAILED', 'Việc đã đóng');
+  if (task.kind === 'internal') {
+    const mayEdit = actor.id === task.created_by_user_id || actor.id === task.assignee_user_id || actor.role === 'director' || actor.role === 'admin';
+    if (!mayEdit) return fail('FORBIDDEN', 'Chỉ người tạo, người phụ trách, BGĐ hoặc Admin mới sửa được việc này');
+  } else {
+    const lead = task.lead_id ? await loadLead(db, actor, task.lead_id) : null;
+    if (!lead) return fail('NOT_FOUND', 'Không tìm thấy việc trong phạm vi của bạn');
+    if (input.status !== undefined) return fail('VALIDATION_FAILED', 'Việc gắn lead chỉ đổi trạng thái qua hoàn thành việc');
+    if (input.dueAt === null) return fail('VALIDATION_FAILED', 'Việc gắn lead bắt buộc có hạn');
+    if (input.memberUserIds && input.memberUserIds.length > 0) return fail('VALIDATION_FAILED', 'Việc gắn lead không có người cùng làm');
+    if (input.assigneeUserId !== undefined && input.assigneeUserId !== task.assignee_user_id && input.assigneeUserId !== lead.owner_user_id) {
+      return fail('VALIDATION_FAILED', 'Người nhận việc gắn lead phải là owner của lead');
+    }
+  }
+  const wantedUsers = [...new Set([
+    ...(input.assigneeUserId ? [input.assigneeUserId] : []),
+    ...(input.memberUserIds ?? []),
+  ])];
+  if (wantedUsers.length > 0) {
+    const activeUsers = await db.prepare(
+      `SELECT id FROM app_user WHERE id IN (SELECT value FROM json_each(?)) AND organization_id = ? AND status = 'active'`,
+    ).bind(JSON.stringify(wantedUsers), actor.organizationId).all<{ id: string }>();
+    if (activeUsers.results.length !== wantedUsers.length) {
+      return fail('VALIDATION_FAILED', 'Người nhận hoặc người cùng làm không hợp lệ');
+    }
+  }
+  const set: Record<string, unknown> = {};
+  if (input.title !== undefined) set.title = input.title;
+  if (input.description !== undefined) set.description = input.description;
+  if (input.priority !== undefined) set.priority = input.priority;
+  if (input.dueAt !== undefined) set.due_at = input.dueAt ? new Date(input.dueAt).toISOString() : null;
+  if (input.assigneeUserId !== undefined) set.assignee_user_id = input.assigneeUserId;
+  if (input.status !== undefined) set.status = input.status;
+  tx.update('task', task.id, task.version, set);
+  if (input.memberUserIds !== undefined && task.kind === 'internal') {
+    tx.raw(db.prepare('DELETE FROM task_member WHERE task_id = ?').bind(task.id));
+    for (const uid of new Set(input.memberUserIds)) {
+      tx.raw(db.prepare('INSERT OR IGNORE INTO task_member (task_id, user_id, added_at) VALUES (?, ?, ?)').bind(task.id, uid, tx.now));
+    }
+  }
+  if (input.memberUserIds !== undefined || (input.assigneeUserId !== undefined && input.assigneeUserId !== task.assignee_user_id)) {
+    tx.raw(db.prepare(`DELETE FROM chat_member WHERE conversation_id = ?1 AND user_id NOT IN (
+      SELECT assignee_user_id FROM task WHERE id = ?2 AND assignee_user_id IS NOT NULL
+      UNION SELECT created_by_user_id FROM task WHERE id = ?2 AND created_by_user_id IS NOT NULL
+      UNION SELECT user_id FROM task_member WHERE task_id = ?2
+    )`).bind(`task:${task.id}`, task.id));
+  }
+  tx.audit('task', task.id, {
+    title: task.title, description: task.description, priority: task.priority,
+    due_at: task.due_at, assignee_user_id: task.assignee_user_id, status: task.status,
+  }, { ...set, ...(input.memberUserIds !== undefined ? { memberUserIds: input.memberUserIds } : {}) });
+  tx.event('task.updated', { taskId: task.id });
+  if (input.assigneeUserId !== undefined && input.assigneeUserId !== task.assignee_user_id) {
+    tx.event('task.assigned', { taskId: task.id, assigneeUserId: input.assigneeUserId });
+  }
+  return ok({ taskId: task.id, version: task.version + 1 });
+}
+
+async function cancelTask({ db, actor, input, tx }: Ctx<CancelTaskInput>) {
+  const task = await db.prepare('SELECT * FROM task WHERE id = ?').bind(input.taskId).first<TaskRow>();
+  if (!task || !(await canSeeTask(db, actor, task.id))) return fail('NOT_FOUND', 'Không tìm thấy việc trong phạm vi của bạn');
+  if (task.kind !== 'internal') return fail('VALIDATION_FAILED', 'Việc gắn lead chỉ hủy theo luồng đóng/nhả lead');
+  if (task.version !== input.expectedVersion) return stale();
+  if (task.status !== 'open' && task.status !== 'in_progress') return fail('VALIDATION_FAILED', 'Chỉ hủy được việc đang mở');
+  const mayCancel = actor.id === task.created_by_user_id || actor.role === 'director' || actor.role === 'admin';
+  if (!mayCancel) return fail('FORBIDDEN', 'Chỉ người tạo, BGĐ hoặc Admin mới hủy được việc này');
+  tx.update('task', task.id, task.version, { status: 'cancelled', outcome: input.reason ?? task.outcome ?? null });
+  tx.audit('task', task.id, { status: task.status }, { status: 'cancelled', reason: input.reason ?? null });
+  tx.event('task.cancelled', { taskId: task.id });
+  return ok({ taskId: task.id });
+}
+
 async function completeTask({ db, actor, input, tx }: Ctx<CompleteTaskInput>) {
   const task = await db.prepare('SELECT * FROM task WHERE id = ?').bind(input.taskId).first<TaskRow>();
   if (!task) return fail('NOT_FOUND', 'Không tìm thấy việc');
+  if (task.kind === 'internal') {
+    if (!(await canSeeTask(db, actor, task.id))) return fail('NOT_FOUND', 'Không tìm thấy việc trong phạm vi của bạn');
+    if (task.version !== input.expectedVersion || (task.status !== 'open' && task.status !== 'in_progress')) return stale();
+    tx.update('task', task.id, task.version, { status: 'completed', completed_at: tx.now, outcome: input.outcome ?? null });
+    tx.audit('task', task.id, { status: task.status }, { status: 'completed', outcome: input.outcome ?? null });
+    tx.event('task.completed', { taskId: task.id, leadId: null, nextTaskId: null });
+    return ok({ taskId: task.id, leadId: null, nextTaskId: null });
+  }
+  if (!task.lead_id) return fail('NOT_FOUND', 'Không tìm thấy việc trong phạm vi của bạn');
   const lead = await loadLead(db, actor, task.lead_id);
   if (!lead) return fail('NOT_FOUND', 'Không tìm thấy việc trong phạm vi của bạn');
   if (task.version !== input.expectedVersion || task.status !== 'open') return stale();

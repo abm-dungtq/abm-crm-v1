@@ -1,5 +1,6 @@
 import type { ChannelKind, CommandKind, ConversationMode } from '@abm/contracts';
-import type { Actor, Env } from '../env';
+import type { Actor, Env, Sink } from '../env';
+import { postInboxNotice } from '../inbox-notices';
 import { autoAssignOnHandoff, linkBase, slaDueSql } from './assignment';
 import { commandInsertStatement, enqueueCommand, type CommandTarget } from './dispatcher';
 import { HANDOFF_CATEGORIES, decideHandoff, decisionMode, mentions199k } from './decision-layer';
@@ -362,12 +363,12 @@ export interface FlowOutcome {
 }
 
 /**
- * Hands the conversation to people: `human` mode, the reason, and a Lark notice to the inbox group.
+ * Hands the conversation to people: `human` mode, the reason, and a notice to the CRM "Inbox" chat group.
  * `origin` is the request origin, used for the link when APP_URL is unset. With `onlyFromAi` nothing happens unless
  * the conversation is still in `ai` mode at that moment, so concurrent or repeated callers hand off once.
  */
-export async function handoff(db: D1Database, env: Pick<Env, 'APP_URL'>, conversationId: string, reason: string, origin?: string,
-  options: { onlyFromAi?: boolean } = {}): Promise<FlowOutcome> {
+export async function handoff(db: D1Database, env: Pick<Env, 'APP_URL'>, conversationId: string, reason: string, origin: string | undefined,
+  options: { onlyFromAi?: boolean; sink: Sink; ensuredOrgs?: Set<string>; onApplied?: () => void }): Promise<FlowOutcome> {
   const conv = await loadConversation(db, conversationId);
   if (!conv) return { workerCommandQueued: false };
   const nowDate = new Date();
@@ -383,29 +384,41 @@ export async function handoff(db: D1Database, env: Pick<Env, 'APP_URL'>, convers
   } else {
     await db.batch([update, audit]);
   }
-  const assignment = await autoAssignOnHandoff(db, conv.id, base, nowDate);
+  options.onApplied?.();
+  const resolvedSink = options.sink;
+  const ensuredOrgs = options.ensuredOrgs ?? new Set<string>();
+  const assignment = await autoAssignOnHandoff(db, conv.id, base, nowDate, resolvedSink, ensuredOrgs);
   const noOneOnDuty = assignment.status === 'no_one_on_duty' ? ' – chưa có người trực' : '';
   const text = `Handoff: ${conv.display_name ?? conv.external_thread_id} (${conv.account_name}) – ${reason}${noOneOnDuty} – ${base}/inbox/${conv.id}`;
-  await enqueueCommand(db, { kind: 'send_lark', target: 'worker', conversationId: conv.id, payload: { text } });
+  await postInboxNotice(resolvedSink, db, {
+    organizationId: conv.organization_id,
+    text,
+    link: `/inbox/${conv.id}`,
+    ensuredOrgs,
+  });
   await requestExtraction(db, conv.id);
-  return { workerCommandQueued: true };
+  return { workerCommandQueued: false };
 }
 
 /** Handoff reason when the bot could not produce a reply. */
 export const BOT_SILENT_REASON = 'Bot không trả lời được';
 
 /** The bot's reply was given up: people take over unless they already have the conversation. Hands off once. */
-export const handOffSilentBot = (db: D1Database, env: Pick<Env, 'APP_URL'>, conversationId: string, origin?: string) =>
-  handoff(db, env, conversationId, BOT_SILENT_REASON, origin, { onlyFromAi: true });
+export const handOffSilentBot = (
+  db: D1Database, env: Pick<Env, 'APP_URL'>, conversationId: string, origin: string | undefined, sink: Sink, ensuredOrgs?: Set<string>,
+) => handoff(db, env, conversationId, BOT_SILENT_REASON, origin, { onlyFromAi: true, sink, ensuredOrgs });
 
 const QUESTION_CLIP = 300;
 
 /**
- * Tells the Lark inbox group that a Zalo group needs a person. The conversation mode stays as it is.
- * `commandId` dedupes the notice, so one failed reply notifies Lark once.
+ * Tells the CRM inbox group that a Zalo group needs a person. The conversation mode stays as it is.
+ * `commandId` dedupes the notice, so one failed reply notifies the group once.
  */
-export async function notifyGroupHelp(db: D1Database, env: Pick<Env, 'APP_URL'>, conversationId: string, reason: string,
-  triggerMessageId?: string, origin?: string, notice?: { commandId?: string; replyTo?: GroupReplyTarget }): Promise<FlowOutcome> {
+export async function notifyGroupHelp(
+  db: D1Database, env: Pick<Env, 'APP_URL'>, conversationId: string, reason: string,
+  triggerMessageId: string | undefined, origin: string | undefined, notice: { commandId?: string; replyTo?: GroupReplyTarget } | undefined,
+  sink: Sink, ensuredOrgs?: Set<string>,
+): Promise<FlowOutcome> {
   const conv = await loadConversation(db, conversationId);
   if (!conv || conv.kind !== 'group') return { workerCommandQueued: false };
   const questionRow = triggerMessageId
@@ -416,11 +429,14 @@ export async function notifyGroupHelp(db: D1Database, env: Pick<Env, 'APP_URL'>,
   const groupName = conv.display_name ?? 'không tên';
   const base = linkBase(env.APP_URL, origin);
   const text = `Nhóm Zalo cần hỗ trợ: ${groupName} (${conv.account_name}) – ${senderName} hỏi: "${question}" – ${reason} – ${base}/inbox/${conv.id}`;
-  await enqueueCommand(db, {
-    kind: 'send_lark', target: 'worker', conversationId: conv.id, payload: { text },
+  await postInboxNotice(sink, db, {
+    organizationId: conv.organization_id,
+    text,
+    link: `/inbox/${conv.id}`,
     ...(notice?.commandId ? { dedupeKey: `group-help:${notice.commandId}` } : {}),
+    ensuredOrgs,
   });
-  return { workerCommandQueued: true };
+  return { workerCommandQueued: false };
 }
 
 /** A reply still pending or running this long after it was queued means the bridge or GoClaw is not answering. */
@@ -432,7 +448,7 @@ const STALE_REPLY_BATCH = 50;
  * and hands each affected conversation to people once. A late result of a given-up reply is ignored, since only a
  * claimed command accepts one. Returns the number of replies given up.
  */
-export async function abandonStaleReplies(db: D1Database, env: Pick<Env, 'APP_URL'>, now = new Date()): Promise<number> {
+export async function abandonStaleReplies(db: D1Database, env: Pick<Env, 'APP_URL'>, now: Date, sink: Sink): Promise<number> {
   const nowIso = now.toISOString();
   const cutoff = new Date(now.getTime() - STALE_REPLY_MS).toISOString();
   // A pending reply that new customer messages keep pushing back is not due yet and is left alone.
@@ -443,6 +459,7 @@ export async function abandonStaleReplies(db: D1Database, env: Pick<Env, 'APP_UR
     ORDER BY cc.created_at LIMIT ?3`).bind(cutoff, nowIso, STALE_REPLY_BATCH)
     .all<{ id: string; conversation_id: string | null; payload_json: string; conversation_kind: string | null }>();
   const directConversations = new Set<string>();
+  const ensuredOrgs = new Set<string>();
   let abandoned = 0;
   for (const row of stale.results) {
     const res = await db.prepare(`UPDATE channel_command SET status = 'failed', lease_expires_at = NULL, result_json = ?, updated_at = ?
@@ -454,7 +471,7 @@ export async function abandonStaleReplies(db: D1Database, env: Pick<Env, 'APP_UR
       try {
         const payload = asCompletionPayload(JSON.parse(row.payload_json) as unknown);
         await notifyGroupHelp(db, env, row.conversation_id, BOT_SILENT_REASON, payload.triggerMessageId, undefined,
-          { commandId: row.id, replyTo: payload.replyTo });
+          { commandId: row.id, replyTo: payload.replyTo }, sink, ensuredOrgs);
       } catch (error) {
         console.error('stale_reply_handoff_error', error instanceof Error ? error.message : 'unknown');
       }
@@ -464,7 +481,7 @@ export async function abandonStaleReplies(db: D1Database, env: Pick<Env, 'APP_UR
   }
   for (const conversationId of directConversations) {
     try {
-      await handOffSilentBot(db, env, conversationId);
+      await handOffSilentBot(db, env, conversationId, undefined, sink, ensuredOrgs);
     } catch (error) {
       console.error('stale_reply_handoff_error', error instanceof Error ? error.message : 'unknown');
     }
@@ -507,10 +524,11 @@ async function storeUnsentReply(db: D1Database, conversationId: string, prefix: 
 
 /**
  * Applies a group reply. The direct `botMayReply` rule does not apply here. A reply that may no longer go out
- * is kept as a system note. A handoff marker only notifies Lark.
+ * is kept as a system note. A handoff marker only notifies the CRM "Inbox" chat group.
  */
 async function applyGroupCompletion(db: D1Database, env: Pick<Env, 'APP_URL'>, conv: ConversationRow, text: string,
-  reason: string | undefined, now: string, origin: string | undefined, payload: CompletionResultPayload | undefined): Promise<FlowOutcome> {
+  reason: string | undefined, now: string, origin: string | undefined, payload: CompletionResultPayload | undefined,
+  sink: Sink): Promise<FlowOutcome> {
   if (!groupBotMayReply(conv, new Date(now))) {
     await storeUnsentReply(db, conv.id, BOT_OFF_REPLY_PREFIX, text, now);
     return { workerCommandQueued: false };
@@ -529,7 +547,7 @@ async function applyGroupCompletion(db: D1Database, env: Pick<Env, 'APP_URL'>, c
   }
   if (reason) {
     const outcome = await notifyGroupHelp(db, env, conv.id, reason, payload?.triggerMessageId, origin,
-      { commandId: payload?.commandId, replyTo: payload?.replyTo });
+      { commandId: payload?.commandId, replyTo: payload?.replyTo }, sink);
     workerCommandQueued ||= outcome.workerCommandQueued;
   }
   return { workerCommandQueued };
@@ -542,13 +560,13 @@ async function applyGroupCompletion(db: D1Database, env: Pick<Env, 'APP_URL'>, c
  * After an allowed reply the customer's own turn is checked as well, so a missing marker can still hand off.
  */
 export async function applyCompletionResult(db: D1Database, env: HandoffCheckEnv, conversationId: string, replyText: string,
-  origin?: string, payload?: CompletionResultPayload): Promise<FlowOutcome> {
+  origin: string | undefined, payload: CompletionResultPayload | undefined, sink: Sink): Promise<FlowOutcome> {
   const conv = await loadConversation(db, conversationId);
   if (!conv) return { workerCommandQueued: false };
   const marker = HANDOFF_MARKER.exec(replyText);
   const text = replyText.replace(HANDOFF_MARKER_ALL, '').trim();
   const now = new Date().toISOString();
-  if (conv.kind === 'group') return applyGroupCompletion(db, env, conv, text, marker?.[1]?.trim(), now, origin, payload);
+  if (conv.kind === 'group') return applyGroupCompletion(db, env, conv, text, marker?.[1]?.trim(), now, origin, payload, sink);
   if (!botMayReply(conv)) {
     if (text) {
       const prefix = conv.mode !== 'ai' ? CANCELLED_REPLY_PREFIX : BOT_OFF_REPLY_PREFIX;
@@ -570,7 +588,7 @@ export async function applyCompletionResult(db: D1Database, env: HandoffCheckEnv
       await db.prepare(`INSERT INTO message (id, conversation_id, direction, sender_kind, body, status, created_at)
         VALUES (?, ?, 'out', 'system', ?, 'failed', ?)`).bind(crypto.randomUUID(), conv.id,
         `Chưa gửi (kiểm tra 199k): ${error.message}\n${text}`, now).run();
-      return handoff(db, env, conv.id, error.message, origin);
+      return handoff(db, env, conv.id, error.message, origin, { sink });
     }
   }
   let workerCommandQueued = false;
@@ -580,7 +598,7 @@ export async function applyCompletionResult(db: D1Database, env: HandoffCheckEnv
     workerCommandQueued = target === 'worker';
   }
   if (marker) {
-    const outcome = await handoff(db, env, conv.id, marker[1]!.trim(), origin);
+    const outcome = await handoff(db, env, conv.id, marker[1]!.trim(), origin, { sink });
     workerCommandQueued ||= outcome.workerCommandQueued;
   }
   const customerText = payload?.customerText;
@@ -588,7 +606,7 @@ export async function applyCompletionResult(db: D1Database, env: HandoffCheckEnv
   if (customerText && customerText.split('\n').some((line) => line !== ATTACHMENT_ONLY_TEXT)) {
     return {
       workerCommandQueued,
-      handoffCheck: () => checkHandoff(db, env, conv, customerText, { botHandedOff: Boolean(marker), registrationConfirmed }, origin),
+      handoffCheck: () => checkHandoff(db, env, conv, customerText, { botHandedOff: Boolean(marker), registrationConfirmed }, origin, sink),
     };
   }
   return { workerCommandQueued };
@@ -606,11 +624,12 @@ type HandoffCheckEnv = Pick<Env, 'APP_URL' | 'HANDOFF_NET_MODE' | 'JEV_INTENT_MO
  * confirmed a registration, and leaves a payment turn to the bot when it names 199k or the account runs the 199k policy.
  */
 async function checkHandoff(db: D1Database, env: HandoffCheckEnv, conv: ConversationRow, customerText: string,
-  reply: { botHandedOff: boolean; registrationConfirmed: boolean }, origin: string | undefined): Promise<FlowOutcome> {
+  reply: { botHandedOff: boolean; registrationConfirmed: boolean }, origin: string | undefined, sink: Sink): Promise<FlowOutcome> {
   const mode = decisionMode(env.HANDOFF_NET_MODE);
   if (mode === 'off') return { workerCommandQueued: false };
   const { botHandedOff } = reply;
   let outcome: FlowOutcome = { workerCommandQueued: false };
+  let applied = false;
   try {
     // Once the bot has handed off in active mode, Jev's answer could change nothing; shadow still asks, for comparison.
     const decision = await decideHandoff(env, customerText, !(botHandedOff && mode === 'active'));
@@ -620,7 +639,11 @@ async function checkHandoff(db: D1Database, env: HandoffCheckEnv, conv: Conversa
     let handoffError: string | null = null;
     if (mode === 'active' && !botHandedOff && !held && decision.decided) {
       try {
-        outcome = await handoff(db, env, conv.id, HANDOFF_CATEGORIES[decision.decided.category].reason, origin, { onlyFromAi: true });
+        outcome = await handoff(db, env, conv.id, HANDOFF_CATEGORIES[decision.decided.category].reason, origin, {
+          onlyFromAi: true,
+          sink,
+          onApplied: () => { applied = true; },
+        });
       } catch (error) {
         handoffError = error instanceof Error ? error.message : 'unknown';
       }
@@ -628,7 +651,7 @@ async function checkHandoff(db: D1Database, env: HandoffCheckEnv, conv: Conversa
     // `applied` is what happened: false when staff had already taken the conversation or the handoff failed.
     await auditStatement(db, null, 'inbox.handoffCheck', conv.id, { botHandedOff }, {
       mode, jevMode: decisionMode(env.JEV_INTENT_MODE), rule: decision.rule, jev: decision.jev ?? null, decided: decision.decided,
-      applied: outcome.workerCommandQueued, ...(held ? { held } : {}), ...(handoffError ? { handoffError } : {}),
+      applied, ...(held ? { held } : {}), ...(handoffError ? { handoffError } : {}),
     }, new Date().toISOString()).run();
   } catch (error) {
     console.error('handoff_check_error', error instanceof Error ? error.message : 'unknown');

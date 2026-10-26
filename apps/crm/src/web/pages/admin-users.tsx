@@ -6,7 +6,7 @@ import { ApiFailure, api, useApi } from '../api';
 import { roleLabel } from '../components/layout';
 import { Alert, Badge, ErrorState, Field, FormError, Loading, Modal, fieldErrors, useToast, type Tone } from '../components/ui';
 import { fmtDateTime } from '../format';
-import type { AdminOverview, AdminUser, IssuedPassword, LarkLinkResult } from '../types';
+import type { AdminOverview, AdminUser, IssuedPassword } from '../types';
 
 /** Admin mutations: refresh the user list afterwards, including after a lost race. */
 function useAdminMutation<I, T = null>(fn: (input: I) => Promise<T>) {
@@ -16,10 +16,6 @@ function useAdminMutation<I, T = null>(fn: (input: I) => Promise<T>) {
     onSettled: () => client.invalidateQueries(),
   });
 }
-
-const LARK_LABEL: Record<AdminUser['larkLinkStatus'], [string, Tone]> = {
-  linked: ['Đã liên kết', 'ok'], unmatched: ['Không tìm thấy', 'warn'], error: ['Lỗi', 'danger'], unlinked: ['Chưa kiểm', 'neutral'],
-};
 
 function passwordState(u: AdminUser): [string, Tone] {
   if (!u.hasPassword) return ['Chưa cấp', 'neutral'];
@@ -35,27 +31,14 @@ export function AdminUsersPage() {
   const q = useApi<AdminOverview>(actor.role === 'admin' ? '/admin/overview' : null);
   const [dialog, setDialog] = useState<Dialog>(null);
   const [issued, setIssued] = useState<IssuedPassword[] | null>(null);
-  const [larkResult, setLarkResult] = useState<LarkLinkResult | null>(null);
-  const link = useAdminMutation((userIds?: string[]) => api.post<LarkLinkResult>('/admin/lark/link', userIds ? { userIds } : {}));
   if (actor.role !== 'admin') return <Alert tone="warn">Chỉ Admin quản lý người dùng.</Alert>;
-  const runLink = (userIds?: string[]) => link.mutate(userIds, { onSuccess: setLarkResult });
 
   return (
     <>
       <div className="page-head">
-        <div><h1>Người dùng</h1><p className="sub">Tạo tài khoản từ file danh sách nhân sự, cấp mật khẩu tạm và liên kết Lark để bot nhận ra người nhắn.</p></div>
-        <div className="row-wrap">
-          <button className="btn" onClick={() => runLink()} disabled={link.isPending}>{link.isPending ? 'Đang liên kết…' : 'Liên kết Lark cho mọi người'}</button>
-        </div>
+        <div><h1>Người dùng</h1><p className="sub">Tạo tài khoản từ file danh sách nhân sự và cấp mật khẩu tạm.</p></div>
       </div>
       <div className="stack">
-        {link.error && <FormError error={link.error} />}
-        {larkResult && (
-          <Alert tone={larkResult.error ? 'warn' : 'ok'}>
-            Lark: {larkResult.linked} đã liên kết · {larkResult.unmatched} không tìm thấy · {larkResult.error} lỗi
-            {larkResult.message && <div className="small">{larkResult.message}</div>}
-          </Alert>
-        )}
         {q.data && <AgentKillSwitch enabled={q.data.counts.agentKillSwitch === 1} />}
         <RosterImport onIssued={setIssued} />
         {q.isLoading && <Loading />}
@@ -65,11 +48,10 @@ export function AdminUsersPage() {
             <div className="card-head"><h2>Danh sách người dùng</h2><span className="spacer" /><Badge>{q.data.users.length}</Badge></div>
             <div className="table-wrap">
               <table className="table responsive">
-                <thead><tr><th>Tên</th><th>Vai trò</th><th>Phòng ban / Nhóm</th><th>Trạng thái</th><th>Mật khẩu</th><th>Lark</th><th>Bot</th><th><span className="visually-hidden">Thao tác</span></th></tr></thead>
+                <thead><tr><th>Tên</th><th>Vai trò</th><th>Phòng ban / Nhóm</th><th>Trạng thái</th><th>Mật khẩu</th><th>Token agent</th><th><span className="visually-hidden">Thao tác</span></th></tr></thead>
                 <tbody>
                   {q.data.users.map((u) => {
                     const [pw, pwTone] = passwordState(u);
-                    const [lark, larkTone] = LARK_LABEL[u.larkLinkStatus];
                     const self = u.id === actor.id;
                     return (
                       <tr key={u.id}>
@@ -78,17 +60,13 @@ export function AdminUsersPage() {
                         <td data-label="Phòng ban / Nhóm">{[u.departmentName, u.teamName].filter(Boolean).join(' / ') || '—'}</td>
                         <td data-label="Trạng thái"><Badge tone={u.status === 'active' ? 'ok' : 'danger'}>{u.status === 'active' ? 'Hoạt động' : 'Đã khóa'}</Badge></td>
                         <td data-label="Mật khẩu"><Badge tone={pwTone}>{pw}</Badge></td>
-                        <td data-label="Lark"><Badge tone={larkTone} title={u.larkCheckedAt ? `Kiểm lúc ${fmtDateTime(u.larkCheckedAt)}` : undefined}>{lark}</Badge></td>
-                        <td data-label="Bot"><Badge tone={u.agentTokens ? 'ok' : 'neutral'}>{u.agentTokens ? `Có chìa khóa (${u.agentTokens})` : 'Chưa'}</Badge></td>
+                        <td data-label="Token agent"><Badge tone={u.agentTokens ? 'ok' : 'neutral'}>{u.agentTokens ? `${u.agentTokens} token` : 'Chưa'}</Badge></td>
                         <td>
                           <div className="row-wrap">
                             <button className="btn btn-sm" onClick={() => setDialog({ kind: 'edit', user: u })}>Sửa</button>
                             {!self && <button className="btn btn-sm" onClick={() => setDialog({ kind: 'status', user: u })}>{u.status === 'active' ? 'Khóa' : 'Mở khóa'}</button>}
                             <button className="btn btn-sm" onClick={() => setDialog({ kind: 'temp', user: u })}>Cấp mật khẩu tạm</button>
-                            {u.agentTokens > 0 && <button className="btn btn-sm btn-ghost" onClick={() => setDialog({ kind: 'bot', user: u })}>Thu hồi chìa khóa bot</button>}
-                            {u.status === 'active' && u.larkLinkStatus !== 'linked' && (
-                              <button className="btn btn-sm btn-ghost" onClick={() => runLink([u.id])} disabled={link.isPending}>Thử liên kết Lark</button>
-                            )}
+                            {u.agentTokens > 0 && <button className="btn btn-sm btn-ghost" onClick={() => setDialog({ kind: 'bot', user: u })}>Thu hồi token agent</button>}
                           </div>
                         </td>
                       </tr>
@@ -239,7 +217,7 @@ function EditUserDialog({ user, overview, self, onClose }: { user: AdminUser; ov
     </>}>
       <FormError error={save.error} />
       <Field label="Họ tên" required error={errors.name} htmlFor="u-name"><input id="u-name" value={form.name} onChange={set('name')} /></Field>
-      <Field label="Email" required error={errors.email} hint="Đổi email sẽ bỏ liên kết Lark cũ." htmlFor="u-email"><input id="u-email" type="email" value={form.email} onChange={set('email')} /></Field>
+      <Field label="Email" required error={errors.email} htmlFor="u-email"><input id="u-email" type="email" value={form.email} onChange={set('email')} /></Field>
       <Field label="Vai trò" required hint={self ? 'Không tự đổi vai trò của mình.' : undefined} htmlFor="u-role">
         <select id="u-role" value={form.role} disabled={self}
           onChange={(e) => { const role = e.target.value as RoleCode; setForm((f) => ({ ...f, role, ...(NO_PLACEMENT_ROLES.includes(role) ? { departmentName: '', teamName: '' } : role === 'head' ? { teamName: '' } : {}) })); }}>
@@ -279,7 +257,7 @@ function StatusDialog({ user, onClose }: { user: AdminUser; onClose: () => void 
       </button>
     </>}>
       <FormError error={save.error} />
-      <p>{disabling ? 'Người này bị đăng xuất ngay, chìa khóa bot bị thu hồi và không đăng nhập được cho đến khi mở khóa. Dữ liệu của họ giữ nguyên.' : 'Người này đăng nhập lại được bằng mật khẩu hiện có.'}</p>
+      <p>{disabling ? 'Người này bị đăng xuất ngay, mọi token agent bị thu hồi và không đăng nhập được cho đến khi mở khóa. Dữ liệu của họ giữ nguyên.' : 'Người này đăng nhập lại được bằng mật khẩu hiện có.'}</p>
     </Modal>
   );
 }
@@ -349,7 +327,7 @@ function AgentKillSwitch({ enabled }: { enabled: boolean }) {
         <Badge tone={enabled ? 'danger' : 'ok'}>{enabled ? 'Đang tạm khóa' : 'Đang mở'}</Badge>
         <button className={enabled ? 'btn btn-sm' : 'btn btn-sm btn-danger'} onClick={() => setConfirming(true)}>{enabled ? 'Mở lại' : 'Tạm khóa bot'}</button>
       </div>
-      <div className="card-body small text-2">Khi tạm khóa, mọi lệnh ghi qua bot Lark bị chặn, kể cả của Admin. Bot vẫn đọc được dữ liệu; làm trên web không bị ảnh hưởng.</div>
+      <div className="card-body small text-2">Khi tạm khóa, mọi lệnh ghi qua bot bị chặn, kể cả của Admin. Agent cũng không đọc được chat qua MCP; các dữ liệu khác bot vẫn đọc được. Làm trên web không bị ảnh hưởng.</div>
       {confirming && (
         <Modal open title={enabled ? 'Mở lại cho bot ghi dữ liệu?' : 'Tạm khóa bot ghi dữ liệu?'} onClose={() => setConfirming(false)} footer={<>
           <button className="btn" onClick={() => setConfirming(false)}>Hủy</button>
@@ -370,13 +348,13 @@ function RevokeBotDialog({ user, onClose }: { user: AdminUser; onClose: () => vo
   const toast = useToast();
   const revoke = useAdminMutation(() => api.post(`/admin/users/${user.id}/agent-token/revoke`, {}));
   return (
-    <Modal open title={`Thu hồi chìa khóa bot của ${user.name}?`} onClose={onClose} footer={<>
+    <Modal open title={`Thu hồi mọi token agent của ${user.name}?`} onClose={onClose} footer={<>
       <button className="btn" onClick={onClose}>Hủy</button>
       <button className="btn btn-danger" disabled={revoke.isPending}
-        onClick={() => revoke.mutate(undefined, { onSuccess: () => { toast('Đã thu hồi chìa khóa bot'); onClose(); } })}>Thu hồi</button>
+        onClick={() => revoke.mutate(undefined, { onSuccess: () => { toast('Đã thu hồi token agent'); onClose(); } })}>Thu hồi</button>
     </>}>
       <FormError error={revoke.error} />
-      <p>Bot không đọc hay ghi CRM thay người này được nữa cho đến khi cấp chìa khóa mới. Tài khoản web không bị ảnh hưởng.</p>
+      <p>Mọi agent (bot GoClaw, Claude Code, Codex, Antigravity) không đọc hay ghi CRM thay người này được nữa cho đến khi có token mới. Tài khoản web không bị ảnh hưởng.</p>
     </Modal>
   );
 }

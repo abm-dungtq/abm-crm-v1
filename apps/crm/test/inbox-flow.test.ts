@@ -7,12 +7,12 @@ import { enqueueCommand } from '../src/worker/inbox/dispatcher';
 import { ingestEvents } from '../src/worker/inbox/ingest';
 import { processWorkerCommands } from '../src/worker/inbox/worker-commands';
 import { resetDb } from './helpers/reset-db';
+import { testSink } from './helpers/test-sink';
 
 const db = env.DB;
 const ORIGIN = 'http://crm.test';
 const STAMP = '2026-10-08T03:00:00.000Z';
 const APP_URL = 'https://crm.example';
-const lark = { LARK_APP_ID: 'cli_fake', LARK_APP_SECRET: 'fake-secret-value-123', LARK_INBOX_CHAT_ID: 'oc_inbox' };
 const testEnv = { ...env, DEMO_MODE: '1', APP_URL };
 
 beforeEach(async () => {
@@ -32,7 +32,7 @@ const message = (overrides: Record<string, unknown> = {}) => ({
   msgId: `zm-${++msgSeq}`, fromSelf: false, senderExternalId: 'cust-1', senderName: 'Chị Hoa', text: 'Cho em hỏi lịch học',
   sentAt: new Date().toISOString(), ...overrides,
 });
-const ingest = (...events: ReturnType<typeof message>[]) => ingestEvents(db, events);
+const ingest = (...events: ReturnType<typeof message>[]) => ingestEvents(db, events, testSink());
 const conversation = () => db.prepare("SELECT * FROM conversation WHERE external_thread_id = 'cust-1'").first<any>();
 const commands = (kind: string) => db.prepare('SELECT * FROM channel_command WHERE kind = ? ORDER BY created_at').bind(kind).all<any>()
   .then((r) => r.results.map((row) => ({ ...row, payload: JSON.parse(row.payload_json) })));
@@ -45,23 +45,6 @@ async function web(user: string, method: string, path: string, body?: unknown) {
     body: body === undefined ? undefined : JSON.stringify(body),
   }), testEnv);
   return { status: res.status, json: await res.json() as any };
-}
-
-const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
-/** Fakes Lark: the token call succeeds and every message is recorded. */
-function fakeLark() {
-  const sent: { url: string; receiveId: string; text: string }[] = [];
-  const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
-    const url = String(input instanceof Request ? input.url : input);
-    if (url.includes('/auth/v3/tenant_access_token/internal')) return json({ code: 0, tenant_access_token: 't-fake', expire: 7200 });
-    if (url.includes('/im/v1/messages')) {
-      const body = JSON.parse(String(init!.body)) as { receive_id: string; content: string };
-      sent.push({ url, receiveId: body.receive_id, text: JSON.parse(body.content).text });
-      return json({ code: 0, data: {} });
-    }
-    return json({ code: 404 }, 404);
-  });
-  return { spy, sent };
 }
 
 test('a customer message in ai mode queues one delayed reply that later messages extend', async () => {
@@ -164,44 +147,44 @@ test('the echo of a bridge send is matched by its command and records the Zalo i
   expect((await conversation()).mode).toBe('ai');
 });
 
-test('a reply with a handoff marker sends the text without the marker and notifies the Lark group', async () => {
+test('a reply with a handoff marker sends the text without the marker and notifies the CRM inbox group', async () => {
   await ingest(message());
   const conv = await conversation();
-  const outcome = await applyCompletionResult(db, { APP_URL }, conv.id, 'Dạ em chuyển chị sang tư vấn viên ạ.\n[HANDOFF: khách hỏi học bổng]');
-  expect(outcome).toEqual({ workerCommandQueued: true });
+  const outcome = await applyCompletionResult(db, { APP_URL }, conv.id, 'Dạ em chuyển chị sang tư vấn viên ạ.\n[HANDOFF: khách hỏi học bổng]', undefined, undefined, testSink());
+  expect(outcome).toEqual({ workerCommandQueued: false });
   const out = (await messages(conv.id)).at(-1);
   expect(out).toMatchObject({ direction: 'out', sender_kind: 'bot', status: 'pending', body: 'Dạ em chuyển chị sang tư vấn viên ạ.' });
   const [send] = await commands('send_zalo');
   expect(send).toMatchObject({ target: 'bridge', channel_account_id: 'ca-1', dedupe_key: `send:${out.id}` });
   expect(send.payload).toEqual({ messageId: out.id, threadId: 'cust-1', threadKind: 'direct', text: 'Dạ em chuyển chị sang tư vấn viên ạ.' });
   expect(await conversation()).toMatchObject({ mode: 'human', handoff_reason: 'khách hỏi học bổng' });
-  const [notice] = await commands('send_lark');
-  expect(notice).toMatchObject({ target: 'worker', status: 'pending' });
-  expect(notice.payload.text).toBe(`Handoff: Chị Hoa (Số tư vấn 1) – khách hỏi học bổng – ${APP_URL}/inbox/${conv.id}`);
+  const notices = await db.prepare("SELECT author_kind, body, meta_json FROM chat_message WHERE conversation_id = 'sys:inbox:org-abm' ORDER BY created_at, rowid").all<any>();
+  expect(notices.results).toEqual([{
+    author_kind: 'system',
+    body: `Handoff: Chị Hoa (Số tư vấn 1) – khách hỏi học bổng – ${APP_URL}/inbox/${conv.id}`,
+    meta_json: JSON.stringify({ link: `/inbox/${conv.id}` }),
+  }]);
   expect(await db.prepare("SELECT actor_kind FROM audit_log WHERE command = 'inbox.handoff' AND entity_id = ?").bind(conv.id).first())
     .toEqual({ actor_kind: 'system' });
-
-  const { sent } = fakeLark();
-  await processWorkerCommands({ ...env, ...lark });
-  expect(sent).toEqual([{ url: expect.stringContaining('receive_id_type=chat_id'), receiveId: 'oc_inbox', text: notice.payload.text }]);
-  expect((await commands('send_lark'))[0].status).toBe('done');
 });
 
-test('a Lark notice without a configured group chat fails without calling Lark', async () => {
-  const id = await enqueueCommand(db, { kind: 'send_lark', target: 'worker', payload: { text: 'Handoff: test' } });
-  const { spy } = fakeLark();
-  await processWorkerCommands({ ...env, LARK_APP_ID: lark.LARK_APP_ID, LARK_APP_SECRET: lark.LARK_APP_SECRET });
+test('a Lark notice still queued from before is failed by the Worker without calling out', async () => {
+  const now = new Date().toISOString();
+  await db.prepare(`INSERT INTO channel_command (id, kind, target, payload_json, status, attempts, next_run_at, created_at, updated_at)
+    VALUES ('cmd-old-lark', 'send_lark', 'worker', '{"text":"Handoff: test"}', 'pending', 0, ?, ?, ?)`).bind(now, now, now).run();
+  const spy = vi.spyOn(globalThis, 'fetch');
+  await processWorkerCommands(env, testSink());
   expect(spy).not.toHaveBeenCalled();
-  const row = await db.prepare('SELECT status, attempts, result_json FROM channel_command WHERE id = ?').bind(id).first<any>();
-  expect(row).toMatchObject({ status: 'pending', attempts: 1 });
-  expect(JSON.parse(row.result_json)).toEqual({ error: 'LARK_NOT_CONFIGURED' });
+  const row = await db.prepare("SELECT status, attempts, result_json FROM channel_command WHERE id = 'cmd-old-lark'").first<any>();
+  expect(row).toMatchObject({ attempts: 1 });
+  expect(JSON.parse(row.result_json)).toEqual({ error: 'UNSUPPORTED_COMMAND' });
 });
 
 test('a reply that arrives after people took over is kept as a cancelled note and not sent', async () => {
   await ingest(message());
   const conv = await conversation();
   await db.prepare("UPDATE conversation SET mode = 'human' WHERE id = ?").bind(conv.id).run();
-  await applyCompletionResult(db, { APP_URL }, conv.id, 'Học phí là 5 triệu ạ');
+  await applyCompletionResult(db, { APP_URL }, conv.id, 'Học phí là 5 triệu ạ', undefined, undefined, testSink());
   expect(await commands('send_zalo')).toHaveLength(0);
   expect((await messages(conv.id)).at(-1)).toMatchObject({ sender_kind: 'system', body: '[Bot trả lời bị huỷ vì đã chuyển người] Học phí là 5 triệu ạ' });
 });
@@ -213,7 +196,7 @@ test('a reply that arrives after the customer bot or the account bot was turned 
   const outgoing = async () => (await messages(conv.id)).filter((m) => m.direction === 'out');
 
   await db.prepare('UPDATE customer_bot_switch SET enabled = 1 WHERE id = 1').run();
-  await applyCompletionResult(db, { APP_URL }, conv.id, 'Học phí là 5 triệu ạ\n[HANDOFF: khách hỏi giá]');
+  await applyCompletionResult(db, { APP_URL }, conv.id, 'Học phí là 5 triệu ạ\n[HANDOFF: khách hỏi giá]', undefined, undefined, testSink());
   expect(await commands('send_zalo')).toHaveLength(0);
   expect((await outgoing()).filter((m) => m.sender_kind === 'bot')).toHaveLength(0);
   expect(await outgoing()).toEqual([expect.objectContaining({ sender_kind: 'system', status: 'failed', body: '[Bot trả lời bị huỷ vì bot đang tắt] Học phí là 5 triệu ạ' })]);
@@ -221,7 +204,7 @@ test('a reply that arrives after the customer bot or the account bot was turned 
 
   await db.prepare('UPDATE customer_bot_switch SET enabled = 0 WHERE id = 1').run();
   await db.prepare("UPDATE channel_account SET bot_enabled = 0 WHERE id = 'ca-1'").run();
-  await applyCompletionResult(db, { APP_URL }, conv.id, 'Học phí là 5 triệu ạ');
+  await applyCompletionResult(db, { APP_URL }, conv.id, 'Học phí là 5 triệu ạ', undefined, undefined, testSink());
   expect(await commands('send_zalo')).toHaveLength(0);
   expect((await outgoing()).filter((m) => m.sender_kind === 'bot')).toHaveLength(0);
 });

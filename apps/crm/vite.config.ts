@@ -7,6 +7,7 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
-    proxy: { '/api': 'http://127.0.0.1:8787' },
+    // Keep the browser's Host so the worker's same-origin check sees localhost:5173 (the string shorthand rewrites it).
+    proxy: { '/api': { target: 'http://127.0.0.1:8787', changeOrigin: false, ws: true } },
   },
 });

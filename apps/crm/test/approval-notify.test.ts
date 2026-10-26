@@ -2,20 +2,17 @@ import { env } from 'cloudflare:test';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import seedSql from '../seed/demo.sql?raw';
 import app from '../src/worker/index';
-import { deliverApprovalDm } from '../src/worker/approval-notify';
 import { sha256 } from '../src/worker/commands';
 import { resetDb } from './helpers/reset-db';
 
 const db = env.DB;
 const ORIGIN = 'http://crm.test';
-const lark = { LARK_APP_ID: 'cli_fake', LARK_APP_SECRET: 'fake-secret-value-123' };
-const testEnv = { ...env, DEMO_MODE: '1', ...lark };
+const testEnv = { ...env, DEMO_MODE: '1' };
 const tokens: Record<string, string> = {};
 
 beforeEach(async () => {
   await resetDb(db, seedSql);
   await db.prepare('INSERT INTO agent_kill_switch (id, enabled) VALUES (1, 0) ON CONFLICT(id) DO UPDATE SET enabled = 0').run();
-  await db.prepare("UPDATE app_user SET lark_link_status = 'linked', lark_open_id = 'ou_hung' WHERE id = 'u-hung'").run();
   for (const user of ['u-lan', 'u-hung']) {
     tokens[user] = crypto.randomUUID();
     await db.prepare("INSERT INTO agent_token (id, user_id, token_hash, created_at) VALUES (?, ?, ?, '2026-10-04T00:00:00Z')")
@@ -24,24 +21,6 @@ beforeEach(async () => {
 });
 afterEach(() => vi.restoreAllMocks());
 
-const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
-/** Fakes Lark: the token call succeeds; messages answer with `messageStatus`. Records every message sent. */
-function fakeLark(messageStatus = 200, beforeMessage?: () => Promise<void>) {
-  const sent: { receiveId: string; text: string; auth: string | null }[] = [];
-  const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
-    const url = String(input instanceof Request ? input.url : input);
-    if (url.includes('/auth/v3/tenant_access_token/internal')) return json({ code: 0, tenant_access_token: 't-fake', expire: 7200 });
-    if (url.includes('/im/v1/messages')) {
-      await beforeMessage?.();
-      const body = JSON.parse(String(init!.body)) as { receive_id: string; content: string };
-      sent.push({ receiveId: body.receive_id, text: JSON.parse(body.content).text, auth: new Headers(init!.headers).get('Authorization') });
-      return messageStatus === 200 ? json({ code: 0, data: {} }) : json({ code: 99991, msg: 'server error' }, messageStatus);
-    }
-    return json({ code: 404 }, 404);
-  });
-  return { spy, sent };
-}
-
 async function tool(user: string, name: string, args: Record<string, unknown>) {
   const res = await app.fetch(new Request(`${ORIGIN}/api/mcp`, {
     method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokens[user]}` },
@@ -49,198 +28,70 @@ async function tool(user: string, name: string, args: Record<string, unknown>) {
   }), testEnv);
   return JSON.parse(((await res.json()) as any).result.content[0].text);
 }
-async function web(user: string, path: string, body: unknown, headers: Record<string, string> = {}, database = db) {
+async function web(user: string, path: string, body: unknown, headers: Record<string, string> = {}) {
   const res = await app.fetch(new Request(`${ORIGIN}/api${path}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Demo-User': user, ...headers }, body: JSON.stringify(body),
-  }), { ...testEnv, DB: database });
+  }), testEnv);
   return { status: res.status, json: await res.json() as any };
 }
-const requestOutbox = (approvalId: string) =>
-  db.prepare("SELECT * FROM outbox WHERE event_type = 'approval.requested' AND json_extract(payload_json, '$.approvalId') = ?").bind(approvalId).first<any>();
+const approvalNotices = () => db.prepare("SELECT user_id, title, body, link, dedupe_key FROM notification WHERE kind = 'approval' ORDER BY user_id")
+  .all<{ user_id: string; title: string; body: string | null; link: string | null; dedupe_key: string | null }>().then((r) => r.results);
+const commandCount = () => db.prepare('SELECT COUNT(*) AS n FROM channel_command').first<{ n: number }>().then((r) => r!.n);
 const wonArgs = { lead_code: 'L-0014', to_stage: 'won', won_value: 320000000, won_note: 'Hợp đồng đã ký' };
 
-test('overlapping delivery calls send only once', async () => {
-  fakeLark(500);
-  const res = await tool('u-lan', 'change_stage', wonArgs);
-  const row = await requestOutbox(res.approvalId);
-  vi.restoreAllMocks();
-  let entered!: () => void;
-  let release!: () => void;
-  const sending = new Promise<void>((resolve) => { entered = resolve; });
-  const blocked = new Promise<void>((resolve) => { release = resolve; });
-  let duplicate!: () => void;
-  const duplicateSending = new Promise<void>((resolve) => { duplicate = resolve; });
-  let calls = 0;
-  const { sent } = fakeLark(200, async () => {
-    if (++calls === 1) entered();
-    else duplicate();
-    await blocked;
-  });
-  const first = deliverApprovalDm(testEnv, row.id, ORIGIN);
-  await sending;
-  expect(await requestOutbox(res.approvalId)).toMatchObject({ status: 'sending', attempts: 1 });
-  const second = deliverApprovalDm(testEnv, row.id, ORIGIN);
-  // Allow both calls to finish even when the broken implementation sends twice.
-  const secondResult = await Promise.race([second, duplicateSending.then(() => 'duplicate')]);
-  release();
-  await Promise.all([first, second]);
-  expect(secondResult).toBeNull();
-  expect(sent).toHaveLength(1);
-});
-
-test('a sender that loses its expired lease cannot overwrite the newer result', async () => {
-  fakeLark(500);
-  const res = await tool('u-lan', 'change_stage', wonArgs);
-  const row = await requestOutbox(res.approvalId);
-  vi.restoreAllMocks();
-  let entered!: () => void;
-  let release!: () => void;
-  const started = new Promise<void>((resolve) => { entered = resolve; });
-  const blocked = new Promise<void>((resolve) => { release = resolve; });
-  const { sent } = fakeLark(200, async () => { entered(); await blocked; });
-  const first = deliverApprovalDm(testEnv, row.id, ORIGIN);
-  await started;
-  // Simulate a recovered sender already claiming and finishing while the old network call was stalled.
-  await db.prepare("UPDATE outbox SET status = 'failed', sent_at = NULL, last_error = 'newer sender failed', attempts = 2 WHERE id = ?").bind(row.id).run();
-  release();
-  expect(await first).toBeNull();
-  expect(sent).toHaveLength(1);
-  expect(await requestOutbox(res.approvalId)).toMatchObject({ status: 'failed', last_error: 'newer sender failed', attempts: 2, sent_at: null });
-});
-
-test('admin resend reports and audits the current status after another sender claims the row', async () => {
-  fakeLark(500);
-  const res = await tool('u-lan', 'change_stage', wonArgs);
-  const row = await requestOutbox(res.approvalId);
-  vi.restoreAllMocks();
-  let readBefore!: () => void;
-  let entered!: () => void;
-  let release!: () => void;
-  const read = new Promise<void>((resolve) => { readBefore = resolve; });
-  const sending = new Promise<void>((resolve) => { entered = resolve; });
-  const blocked = new Promise<void>((resolve) => { release = resolve; });
-  fakeLark(200, async () => { entered(); await blocked; });
-  const observed = new Proxy(db, { get(target, key) {
-    if (key === 'prepare') return (sql: string) => {
-      const statement = target.prepare(sql);
-      if (!sql.startsWith('SELECT status FROM outbox WHERE id = ? AND')) return statement;
-      return { bind: (...args: unknown[]) => ({ first: async () => {
-        const before = await statement.bind(...args).first();
-        readBefore();
-        await sending;
-        return before;
-      } }) };
-    };
-    const value = Reflect.get(target, key);
-    return typeof value === 'function' ? value.bind(target) : value;
-  } });
-  const retry = web('u-admin', `/admin/outbox/${row.id}/resend`, {}, {}, observed);
-  await read;
-  const first = deliverApprovalDm(testEnv, row.id, ORIGIN);
-  await sending;
-  const response = await retry;
-  release();
-  await first;
-  expect(response.json.data.status).toBe('sending');
-  const audit = await db.prepare("SELECT after_json FROM audit_log WHERE command = 'resendApprovalDm' AND entity_id = ?").bind(row.id).first<{ after_json: string }>();
-  expect(JSON.parse(audit!.after_json)).toEqual({ status: 'sending' });
-});
-
-test('an expired sending claim can be retried by admin', async () => {
-  fakeLark(500);
-  const res = await tool('u-lan', 'change_stage', wonArgs);
-  const row = await requestOutbox(res.approvalId);
-  await db.prepare("UPDATE outbox SET status = 'sending', sent_at = ? WHERE id = ?")
-    .bind(new Date(Date.now() - 6 * 60_000).toISOString(), row.id).run();
-  vi.restoreAllMocks();
-  const { sent } = fakeLark();
-  const retry = await web('u-admin', `/admin/outbox/${row.id}/resend`, {});
-  expect(retry.json.data.status).toBe('sent');
-  expect(sent).toHaveLength(1);
-});
-
-test('a won proposal through the bot sends the team leader a Lark DM', async () => {
-  const { sent } = fakeLark();
+test('a won proposal through the bot notifies the team Leader in the CRM, not the requester, with no Lark message', async () => {
+  const fetchSpy = vi.spyOn(globalThis, 'fetch');
+  const commandsBefore = await commandCount();
   const res = await tool('u-lan', 'change_stage', wonArgs);
   expect(res.status).toBe('pending_approval');
-  const row = await requestOutbox(res.approvalId);
-  expect(row).toMatchObject({ status: 'sent', attempts: 1 });
-  expect(row.sent_at).toBeTruthy();
-  expect(sent.map((m) => m.receiveId)).toEqual(['ou_hung']);
-  expect(sent[0]!.text).toContain('Đỗ Ngọc Lan (qua bot) đề nghị chốt Won cho lead L-0014');
-  expect(sent[0]!.text).toContain(`${ORIGIN}/approvals`);
+  expect(res.message).toBe('Đã tạo yêu cầu, Leader sẽ nhận thông báo trên CRM');
+
+  expect(await approvalNotices()).toEqual([{
+    user_id: 'u-hung',
+    title: 'Yêu cầu duyệt',
+    body: 'Lead L-0014 có yêu cầu chờ duyệt',
+    link: '/approvals',
+    dedupe_key: `approval:${res.approvalId}:u-hung`,
+  }]);
+  // No channel command (the old `send_lark` route) and no outside request.
+  expect(await commandCount()).toBe(commandsBefore);
+  expect(fetchSpy).not.toHaveBeenCalled();
 });
 
-test('the message never carries the customer phone or email', async () => {
-  const { sent } = fakeLark();
+test('the notice never carries the customer phone or email', async () => {
   await tool('u-lan', 'change_stage', wonArgs);
   const points = (await db.prepare(`SELECT cp.value, cp.normalized_value FROM contact_point cp JOIN lead l ON l.contact_id = cp.contact_id WHERE l.id = 'lead-14'`)
     .all<{ value: string; normalized_value: string }>()).results;
   expect(points.length).toBeGreaterThan(0);
+  const [notice] = await approvalNotices();
   for (const p of points) {
-    expect(sent[0]!.text).not.toContain(p.value);
-    expect(sent[0]!.text).not.toContain(p.normalized_value);
+    expect(`${notice!.title} ${notice!.body}`).not.toContain(p.value);
+    expect(`${notice!.title} ${notice!.body}`).not.toContain(p.normalized_value);
   }
 });
 
-test('an ordinary stage proposal records the request but messages nobody', async () => {
-  const { sent } = fakeLark();
+test('an ordinary stage proposal records the request but notifies nobody', async () => {
   const res = await tool('u-lan', 'change_stage', { lead_code: 'L-0004', to_stage: 'qualified' });
-  const row = await requestOutbox(res.approvalId);
-  expect(row.status).toBe('pending');
-  expect(sent).toHaveLength(0);
-  expect(await deliverApprovalDm(testEnv, row.id, ORIGIN)).toBe('skipped');
-  expect(sent).toHaveLength(0);
+  expect(res.status).toBe('pending_approval');
+  expect(await approvalNotices()).toEqual([]);
 });
 
-test('a leader never messages themself about their own request', async () => {
-  const { sent } = fakeLark();
+test('a leader is never notified about their own request', async () => {
   const res = await tool('u-hung', 'assign_lead', { lead_code: 'L-0020', owner_email: 'long@demo.abm.example' });
-  expect((await requestOutbox(res.approvalId)).status).toBe('no_recipient');
-  expect(sent).toHaveLength(0);
+  expect(res.status).toBe('pending_approval');
+  expect((await approvalNotices()).map((n) => n.user_id)).not.toContain('u-hung');
 });
 
 test('an owner change asked on the web also reaches the leader', async () => {
-  const { sent } = fakeLark();
   const res = await web('u-lan', '/commands/requestOwnerChange', { leadId: 'lead-04', expectedVersion: 1, toUserId: 'u-long', reason: 'Khách ở khu vực anh Long' },
     { 'Idempotency-Key': crypto.randomUUID() });
   expect(res.status).toBe(200);
-  expect((await requestOutbox(res.json.data.approvalId)).status).toBe('sent');
-  expect(sent[0]!.text).toContain('Đỗ Ngọc Lan đề nghị chuyển người phụ trách sang Vũ Đức Long');
+  expect((await approvalNotices()).map((n) => n.user_id)).toEqual(['u-hung']);
 });
 
-test('a Lark failure leaves the approval pending and admin can resend it', async () => {
-  fakeLark(500);
-  const res = await tool('u-lan', 'change_stage', wonArgs);
-  const approval = await db.prepare('SELECT status FROM approval WHERE id = ?').bind(res.approvalId).first<{ status: string }>();
-  expect(approval!.status).toBe('pending');
-  const failed = await requestOutbox(res.approvalId);
-  expect(failed).toMatchObject({ status: 'failed', attempts: 1 });
-  expect(failed.last_error).toContain('HTTP 500');
-  expect(failed.last_error).not.toContain('Bearer');
-  expect(failed.last_error).not.toContain('t-fake');
-
-  vi.restoreAllMocks();
-  const { sent } = fakeLark();
-  expect((await web('u-lan', `/admin/outbox/${failed.id}/resend`, {})).status).toBe(403);
-  const resent = await web('u-admin', `/admin/outbox/${failed.id}/resend`, {});
-  expect(resent.json.data.status).toBe('sent');
-  expect(await requestOutbox(res.approvalId)).toMatchObject({ status: 'sent', attempts: 2 });
-  expect(sent).toHaveLength(1);
-  const audit = await db.prepare("SELECT actor_user_id FROM audit_log WHERE command = 'resendApprovalDm'").first<{ actor_user_id: string }>();
-  expect(audit!.actor_user_id).toBe('u-admin');
-});
-
-test('a request decided before the resend messages nobody', async () => {
-  fakeLark(500);
-  const res = await tool('u-lan', 'change_stage', wonArgs);
-  const failed = await requestOutbox(res.approvalId);
-  expect(failed.status).toBe('failed');
-  await db.prepare("UPDATE approval SET status = 'rejected' WHERE id = ?").bind(res.approvalId).run();
-
-  vi.restoreAllMocks();
-  const { spy } = fakeLark();
-  expect(await deliverApprovalDm(testEnv, failed.id, ORIGIN)).toBe('skipped');
-  expect(spy).not.toHaveBeenCalled();
-  expect(await requestOutbox(res.approvalId)).toMatchObject({ status: 'skipped', attempts: 1 });
+test('no Worker or web source reads a LARK_ setting', () => {
+  const sources = import.meta.glob<string>('../src/**/*.{ts,tsx}', { query: '?raw', import: 'default', eager: true });
+  expect(Object.keys(sources).length).toBeGreaterThan(20);
+  const readers = Object.entries(sources).filter(([, text]) => /\bLARK_[A-Z_]+/.test(text)).map(([path]) => path);
+  expect(readers).toEqual([]);
 });

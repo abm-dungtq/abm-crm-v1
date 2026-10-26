@@ -2,7 +2,7 @@ import { Hono, type Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { CHANNEL_KINDS, CONVERSATION_MODES, type ApiResult, type RoleCode } from '@abm/contracts';
 import { z } from 'zod';
-import { background, type Actor, type AppBindings } from '../env';
+import { background, sinkFrom, type Actor, type AppBindings } from '../env';
 import { isConstraintFailure } from '../guarded-tx';
 import {
   ASSIGNABLE_ROLES, MANAGER_ROLES, ROUND_ROBIN_ROLES, assignConversation, linkBase, loadInboxSettings, type AssignOutcome,
@@ -197,7 +197,7 @@ inboxRoutes.post('/conversations/:id/messages', async (c) => {
   if ('unsupported' in sent) return c.json(fail('VALIDATION_FAILED', 'Kênh này chưa gửi được ảnh', { fields: { attachments: 'Kênh này chưa gửi được ảnh' } }), 422);
   if ('left' in sent) return c.json(fail('CONFLICT', 'Nhóm đã rời'), 409);
   if (sent.conflict) return c.json(fail('IDEMPOTENCY_CONFLICT', 'Mã tin nhắn đã dùng cho một tin khác'), 409);
-  if (sent.workerCommandQueued) await background(c, processWorkerCommands(c.env));
+  if (sent.workerCommandQueued) await background(c, processWorkerCommands(c.env, sinkFrom(c)));
   const { workerCommandQueued: _queued, conflict: _conflict, ...data } = sent;
   return c.json(ok(data));
 });
@@ -262,13 +262,14 @@ const ASSIGN_FAILURES: Record<Extract<AssignOutcome, { ok: false }>['reason'], {
 inboxRoutes.post('/conversations/:id/assign', async (c) => {
   const input = await body(c, assignInput);
   if ('error' in input) return input.error;
+  const sink = sinkFrom(c);
   const outcome = await assignConversation(c.env.DB, c.get('actor'), c.req.param('id'), input.data.userId,
-    linkBase(c.env.APP_URL, new URL(c.req.url).origin));
+    linkBase(c.env.APP_URL, new URL(c.req.url).origin), sink);
   if (!outcome.ok) {
     const failure = ASSIGN_FAILURES[outcome.reason];
     return c.json(fail(outcome.reason, failure.message), failure.status);
   }
-  if (outcome.changed) await background(c, processWorkerCommands(c.env));
+  if (outcome.changed) await background(c, processWorkerCommands(c.env, sink));
   return c.json(ok({ assigneeUserId: outcome.assignee.id, assigneeName: outcome.assignee.displayName }));
 });
 
@@ -569,7 +570,7 @@ inboxRoutes.post('/intakes/:id/classify', async (c) => {
   const input = await body(c, classifyInput);
   if ('error' in input) return input.error;
   const appBase = linkBase(c.env.APP_URL, new URL(c.req.url).origin);
-  const result = await classifyIntake(c.env.DB, c.get('actor'), c.req.param('id'), input.data, appBase);
+  const result = await classifyIntake(c.env.DB, c.get('actor'), c.req.param('id'), input.data, appBase, sinkFrom(c));
   if (result.ok) {
     const leadRow = await c.env.DB.prepare('SELECT code FROM lead WHERE id = ?').bind(result.data.leadId).first<{ code: string }>();
     return commandResponse(c, { ok: true, data: { ...result.data, leadCode: leadRow?.code } });

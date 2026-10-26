@@ -4,6 +4,7 @@ import { useNavigate } from '@tanstack/react-router';
 import { PASSWORD_MIN_LENGTH } from '@abm/contracts';
 import { ApiFailure, api } from '../api';
 import { Alert, Field, fieldErrors, useToast } from '../components/ui';
+import { forgetPushSubscriptionOnLogout } from './notification-settings';
 
 /** `forced` while a temporary password is in force: the page stands alone, outside the app shell. */
 export function ChangePasswordPage({ forced = false }: { forced?: boolean }) {
@@ -62,7 +63,10 @@ export function ChangePasswordPage({ forced = false }: { forced?: boolean }) {
 export function LogoutButton({ className = 'btn' }: { className?: string }) {
   const client = useQueryClient();
   const logout = useMutation({
-    mutationFn: () => api.post('/auth/logout'),
+    mutationFn: () => {
+      forgetPushSubscriptionOnLogout();
+      return api.post('/auth/logout');
+    },
     onSettled: () => { client.clear(); window.location.assign('/'); },
   });
   return <button type="button" className={className} onClick={() => logout.mutate()} disabled={logout.isPending}>Đăng xuất</button>;

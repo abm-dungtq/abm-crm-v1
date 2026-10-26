@@ -9,6 +9,7 @@ import { runDueSchedules } from '../src/worker/inbox/group-schedules';
 import { enqueueDailyGroupSummaries } from '../src/worker/inbox/group-summaries';
 import { ingestEvents } from '../src/worker/inbox/ingest';
 import { resetDb } from './helpers/reset-db';
+import { testSink } from './helpers/test-sink';
 
 const db = env.DB;
 const ORIGIN = 'http://crm.test';
@@ -308,7 +309,7 @@ test('a new group message clears a previous leave and does not resume the bot by
   })).toBe(false);
   expect(await commands('run_completion')).toHaveLength(0);
 
-  expect(await ingestEvents(db, [groupMessage({ msgId: 'back-1', mentionsSelf: true, text: '@Long lịch học' })])).toEqual({ accepted: 1, rejected: 0 });
+  expect(await ingestEvents(db, [groupMessage({ msgId: 'back-1', mentionsSelf: true, text: '@Long lịch học' })], testSink())).toEqual({ accepted: 1, rejected: 0 });
   let row = await group();
   expect(row.left_at).toBeNull();
   expect(row.leave_requested_at).toBeNull();
@@ -317,11 +318,11 @@ test('a new group message clears a previous leave and does not resume the bot by
   expect(row.scheduled_opt_out).toBe(1);
   expect(await commands('run_completion')).toHaveLength(0);
 
-  await ingestEvents(db, [groupMessage({ msgId: 'back-2', mentionsSelf: true, text: '@Long lịch học tiếp' })]);
+  await ingestEvents(db, [groupMessage({ msgId: 'back-2', mentionsSelf: true, text: '@Long lịch học tiếp' })], testSink());
   expect(await commands('run_completion')).toHaveLength(1);
 
   await db.prepare("UPDATE conversation SET left_at = ?, leave_requested_at = ? WHERE id = 'grp-1'").bind(STAMP, STAMP).run();
-  await ingestEvents(db, [groupMessage({ msgId: 'back-2', text: '@Long lịch học tiếp' })]);
+  await ingestEvents(db, [groupMessage({ msgId: 'back-2', text: '@Long lịch học tiếp' })], testSink());
   row = await group();
   expect(row.left_at).toBe(STAMP);
   expect(row.leave_requested_at).toBe(STAMP);
@@ -329,7 +330,7 @@ test('a new group message clears a previous leave and does not resume the bot by
   const sentAt = new Date().toISOString();
   await db.prepare(`INSERT INTO message (id, conversation_id, direction, sender_kind, body, status, created_at)
     VALUES ('msg-echo', 'grp-1', 'out', 'bot', 'xin chào lớp', 'pending', ?)`).bind(sentAt).run();
-  await ingestEvents(db, [groupMessage({ fromSelf: true, text: 'xin chào lớp', msgId: 'echo-1', senderExternalId: 'zalo-acc-1' })]);
+  await ingestEvents(db, [groupMessage({ fromSelf: true, text: 'xin chào lớp', msgId: 'echo-1', senderExternalId: 'zalo-acc-1' })], testSink());
   expect((await group()).left_at).toBe(STAMP);
 });
 
@@ -429,7 +430,7 @@ test('deleting a left group removes all its rows and R2 images, writes audit, sp
   });
   expect(JSON.parse(audit.after_json)).toBeNull();
 
-  expect(await ingestEvents(db, [groupMessage({ msgId: 'reborn-1', text: 'Nhóm hoạt động lại' })])).toEqual({
+  expect(await ingestEvents(db, [groupMessage({ msgId: 'reborn-1', text: 'Nhóm hoạt động lại' })], testSink())).toEqual({
     accepted: 1, rejected: 0,
   });
   const fresh = await db.prepare("SELECT * FROM conversation WHERE channel_account_id = 'ca-1' AND external_thread_id = 'g-1'").first<any>();

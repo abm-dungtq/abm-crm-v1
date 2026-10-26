@@ -154,6 +154,26 @@ describe('LMS programs, videos, clone, and publish API', () => {
     expect(saleAttempt.status).toBe(403);
   });
 
+  it('3b. a self-service read token or an expired script token cannot publish -> 401', async () => {
+    const { classId } = await makeClass('Lớp Token Tự Tạo');
+    const payload = {
+      classId,
+      title: 'Cẩm nang',
+      html: '<html></html>',
+      lessons: [{ sectionId: 's1', title: 'Phần 1', position: 0 }],
+    };
+
+    const selfToken = await issueAgentToken('u-academic');
+    await db.prepare(`UPDATE agent_token SET scope = 'read', created_via = 'self' WHERE token_hash = ?`)
+      .bind(await sha256(selfToken)).run();
+    expect((await publishCall(selfToken, payload)).status).toBe(401);
+
+    const expiredToken = await issueAgentToken('u-academic');
+    await db.prepare(`UPDATE agent_token SET expires_at = '2000-01-01T00:00:00.000Z' WHERE token_hash = ?`)
+      .bind(await sha256(expiredToken)).run();
+    expect((await publishCall(expiredToken, payload)).status).toBe(401);
+  });
+
   it('4. addLessonVideo with streamUid as academic -> 200; unassigned teacher -> 403; assigned teacher -> 200', async () => {
     const { classId, classVersion } = await makeClass('Lớp Video');
     const token = await issueAgentToken('u-academic');

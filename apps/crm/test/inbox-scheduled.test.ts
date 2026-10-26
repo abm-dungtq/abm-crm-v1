@@ -4,13 +4,14 @@ import seedSql from '../seed/demo.sql?raw';
 import worker from '../src/worker/index';
 import { claimCommands, enqueueCommand } from '../src/worker/inbox/dispatcher';
 import { ingestEvents } from '../src/worker/inbox/ingest';
-import { runScheduled } from '../src/worker/inbox/scheduled';
+import { postInboxNotice } from '../src/worker/inbox-notices';
+import { checkSla, runScheduled } from '../src/worker/inbox/scheduled';
 import { resetDb } from './helpers/reset-db';
+import { testSink } from './helpers/test-sink';
 
 const db = env.DB;
 const STAMP = '2026-10-08T03:00:00.000Z';
 const APP_URL = 'https://crm.example';
-const lark = { LARK_APP_ID: 'cli_fake', LARK_APP_SECRET: 'fake-secret-value-123', LARK_INBOX_CHAT_ID: 'oc_inbox' };
 
 beforeEach(async () => {
   await resetDb(db, seedSql);
@@ -24,28 +25,21 @@ beforeEach(async () => {
 });
 afterEach(() => vi.restoreAllMocks());
 
-const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
-/** Fakes Lark: the token call succeeds and every message text is recorded. */
-function fakeLark() {
+/** Records every outgoing request; nothing in these runs should need the network. */
+function fakeFetch() {
   const sent: string[] = [];
-  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
-    const url = String(input instanceof Request ? input.url : input);
-    if (url.includes('/auth/v3/tenant_access_token/internal')) return json({ code: 0, tenant_access_token: 't-fake', expire: 7200 });
-    if (url.includes('/im/v1/messages')) {
-      sent.push(JSON.parse((JSON.parse(String(init!.body)) as { content: string }).content).text);
-      return json({ code: 0, data: {} });
-    }
-    return json({ code: 404 }, 404);
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    sent.push(String(input instanceof Request ? input.url : input));
+    return new Response(null, { status: 404 });
   });
   return sent;
 }
 
-const scheduledEnv = { ...env, ...lark, APP_URL };
-const reminders = () => db.prepare("SELECT * FROM channel_command WHERE kind = 'send_lark' AND dedupe_key LIKE 'sla:%'").all<any>().then((r) => r.results);
+const scheduledEnv = { ...env, APP_URL };
+const reminders = () => db.prepare("SELECT * FROM chat_message WHERE conversation_id = 'sys:inbox:org-abm' AND id LIKE 'notice:sla:%'").all<any>().then((r) => r.results);
 const slaDueAt = () => db.prepare("SELECT sla_due_at FROM conversation WHERE id = 'conv-1'").first<{ sla_due_at: string | null }>().then((r) => r?.sla_due_at);
 
-test('an overdue human conversation gets one Lark reminder and a new deadline', async () => {
-  const sent = fakeLark();
+test('an overdue human conversation gets one inbox reminder and a new deadline', async () => {
   const due = new Date(Date.now() - 60_000).toISOString();
   await db.prepare("UPDATE conversation SET sla_due_at = ? WHERE id = 'conv-1'").bind(due).run();
 
@@ -53,19 +47,20 @@ test('an overdue human conversation gets one Lark reminder and a new deadline', 
   await runScheduled(scheduledEnv, '* * * * *');
   const [reminder] = await reminders();
   expect(await reminders()).toHaveLength(1);
-  expect(reminder).toMatchObject({ target: 'worker', conversation_id: 'conv-1', dedupe_key: `sla:conv-1:${due}` });
-  expect(JSON.parse(reminder.payload_json)).toEqual({ text: `Quá hạn trả lời: Chị Hoa (Số tư vấn 1) – Đỗ Ngọc Lan – ${APP_URL}/inbox/conv-1` });
+  expect(reminder).toMatchObject({
+    id: `notice:sla:conv-1:${due}`,
+    author_kind: 'system',
+    body: `Quá hạn trả lời: Chị Hoa (Số tư vấn 1) – Đỗ Ngọc Lan – ${APP_URL}/inbox/conv-1`,
+    meta_json: JSON.stringify({ link: '/inbox/conv-1' }),
+  });
   expect(Date.parse((await slaDueAt())!)).toBeGreaterThanOrEqual(before + 15 * 60_000);
 
-  // Run again right away: the deadline is in the future, so nothing new is queued; the reminder itself is sent.
+  // Run again right away: the deadline is in the future, so nothing new is posted.
   await runScheduled(scheduledEnv, '* * * * *');
   expect(await reminders()).toHaveLength(1);
-  expect(sent).toEqual([`Quá hạn trả lời: Chị Hoa (Số tư vấn 1) – Đỗ Ngọc Lan – ${APP_URL}/inbox/conv-1`]);
-  expect((await reminders())[0].status).toBe('done');
 });
 
 test('conversations not in human mode or without a deadline are not reminded', async () => {
-  fakeLark();
   const past = new Date(Date.now() - 60_000).toISOString();
   await db.prepare("UPDATE conversation SET mode = 'ai', sla_due_at = ? WHERE id = 'conv-1'").bind(past).run();
   await runScheduled(scheduledEnv, '* * * * *');
@@ -75,7 +70,6 @@ test('conversations not in human mode or without a deadline are not reminded', a
 });
 
 test('a bot reply the bridge has not answered for 10 minutes is given up and people take over once', async () => {
-  const sent = fakeLark();
   await db.prepare("UPDATE conversation SET mode = 'ai', assignee_user_id = NULL WHERE id = 'conv-1'").run();
   const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
   const reply = async (key: string, createdMinutesAgo: number, status: 'pending' | 'claimed', nextRunMinutesAgo = createdMinutesAgo) => {
@@ -100,19 +94,18 @@ test('a bot reply the bridge has not answered for 10 minutes is given up and peo
   expect((await status(extended)).status).toBe('pending');
   expect(await db.prepare("SELECT mode, handoff_reason FROM conversation WHERE id = 'conv-1'").first())
     .toEqual({ mode: 'human', handoff_reason: 'Bot không trả lời được' });
-  const handoffs = () => db.prepare("SELECT COUNT(*) AS n FROM channel_command WHERE kind = 'send_lark' AND payload_json LIKE '%Handoff:%'").first<{ n: number }>();
-  expect(await handoffs()).toEqual({ n: 1 });
-  expect(sent.filter((t) => t.startsWith('Handoff:'))).toEqual([expect.stringContaining('Bot không trả lời được')]);
+  const handoffs = () => db.prepare("SELECT body FROM chat_message WHERE conversation_id = 'sys:inbox:org-abm' AND body LIKE 'Handoff:%'").all<{ body: string }>().then((r) => r.results);
+  expect(await handoffs()).toEqual([{ body: expect.stringContaining('Bot không trả lời được') }]);
 
   // Another stale reply of the same conversation later gives up the reply but hands off no second time.
   await db.prepare("UPDATE channel_command SET created_at = ?, next_run_at = ? WHERE id = ?").bind(at(11), at(1), fresh).run();
   await runScheduled(scheduledEnv, '* * * * *');
   expect((await status(fresh)).status).toBe('failed');
-  expect(await handoffs()).toEqual({ n: 1 });
+  expect(await handoffs()).toHaveLength(1);
 });
 
 test('a group in human mode has no reply deadline and is never reminded', async () => {
-  fakeLark();
+  fakeFetch();
   await db.prepare(`INSERT INTO conversation (id, organization_id, channel_account_id, kind, external_thread_id, display_name, mode, created_at, updated_at)
     VALUES ('grp-1', 'org-abm', 'ca-1', 'group', 'g-1', 'Lớp IELTS K1', 'ai', ?, ?)`).bind(STAMP, STAMP).run();
   const groupDue = () => db.prepare("SELECT mode, sla_due_at FROM conversation WHERE id = 'grp-1'").first<{ mode: string; sla_due_at: string | null }>();
@@ -126,7 +119,7 @@ test('a group in human mode has no reply deadline and is never reminded', async 
 
   // A member writing in the group starts none either.
   await ingestEvents(db, [{ type: 'message', accountExternalId: 'zalo-acc-1', threadId: 'g-1', threadKind: 'group', msgId: 'gm-1', fromSelf: false,
-    senderExternalId: 'member-1', senderName: 'Bạn A', text: 'Mai lớp nghỉ ạ?', sentAt: new Date().toISOString() }]);
+    senderExternalId: 'member-1', senderName: 'Bạn A', text: 'Mai lớp nghỉ ạ?', sentAt: new Date().toISOString() }], testSink());
   expect(await groupDue()).toEqual({ mode: 'human', sla_due_at: null });
 
   // Even a deadline left over from before is not reminded.
@@ -136,11 +129,12 @@ test('a group in human mode has no reply deadline and is never reminded', async 
 });
 
 test('the daily cron does none of the per-minute work', async () => {
-  const sent = fakeLark();
+  const sent = fakeFetch();
   await db.prepare("UPDATE conversation SET sla_due_at = ? WHERE id = 'conv-1'").bind(new Date(Date.now() - 60_000).toISOString()).run();
-  await enqueueCommand(db, { kind: 'send_lark', target: 'worker', payload: { text: 'Chờ gửi' } });
+  const waiting = await enqueueCommand(db, { kind: 'send_messenger', target: 'worker', payload: { messageId: 'm-waiting' } });
   await runScheduled(scheduledEnv, '0 14 * * *');
   expect(await reminders()).toHaveLength(0);
+  expect(await db.prepare('SELECT status, attempts FROM channel_command WHERE id = ?').bind(waiting).first()).toEqual({ status: 'pending', attempts: 0 });
   expect(sent).toEqual([]);
 });
 
@@ -297,10 +291,34 @@ test('the scheduled handler hands its work to waitUntil and never rejects when t
   const pending: Promise<unknown>[] = [];
   const ctx = { waitUntil: (p: Promise<unknown>) => { pending.push(p); }, passThroughOnException: () => undefined } as unknown as ExecutionContext;
   const event = { cron: '* * * * *', scheduledTime: Date.now(), noRetry: () => undefined } as unknown as ScheduledController;
-  fakeLark();
+  fakeFetch();
   await db.prepare("UPDATE conversation SET sla_due_at = ? WHERE id = 'conv-1'").bind(new Date(Date.now() - 60_000).toISOString()).run();
-  worker.scheduled(event, { ...env, ...lark } as never, ctx);
+  worker.scheduled(event, { ...env } as never, ctx);
   expect(pending).toHaveLength(1);
   await pending[0];
   expect(await reminders()).toHaveLength(1);
+});
+
+test('a reminder that could not be posted keeps the deadline, so the next run tries again', async () => {
+  const due = new Date(Date.now() - 60_000).toISOString();
+  await db.prepare("UPDATE conversation SET sla_due_at = ? WHERE id = 'conv-1'").bind(due).run();
+
+  const batch = vi.spyOn(db, 'batch').mockRejectedValueOnce(new Error('D1 unavailable'));
+  expect(await checkSla(db, testSink())).toBe(0);
+  expect(await reminders()).toHaveLength(0);
+  expect(await slaDueAt()).toBe(due);
+  batch.mockRestore();
+
+  expect(await checkSla(db, testSink())).toBe(1);
+  expect(await reminders()).toHaveLength(1);
+  expect(Date.parse((await slaDueAt())!)).toBeGreaterThan(Date.parse(due));
+});
+
+test('postInboxNotice reports whether the notice is stored', async () => {
+  const input = { organizationId: 'org-abm', text: 'Kiểm tra', dedupeKey: 'posted-flag' };
+  expect(await postInboxNotice(testSink(), db, input)).toBe(true);
+  // Already stored by the earlier try: still true.
+  expect(await postInboxNotice(testSink(), db, input)).toBe(true);
+  vi.spyOn(db, 'batch').mockRejectedValueOnce(new Error('D1 unavailable'));
+  expect(await postInboxNotice(testSink(), db, { ...input, dedupeKey: 'posted-flag-2' })).toBe(false);
 });
