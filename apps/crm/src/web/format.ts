@@ -37,6 +37,21 @@ export function fmtDue(iso: string | null | undefined) {
   return fmtDateTime(iso);
 }
 
+/**
+ * A due time read at a glance: "Quá 3 ngày" when it passed on an earlier Vietnam day, "Quá hạn 09:00" when it passed
+ * earlier today, otherwise `fmtDue` ("Hôm nay 17:00", "Ngày mai 09:00", "30/10 09:00").
+ */
+export function fmtDueRelative(iso: string | null | undefined, now: Date = new Date()) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  if (d.getTime() >= now.getTime()) return fmtDue(iso);
+  const days = Math.round((Date.parse(dayKey.format(now)) - Date.parse(dayKey.format(d))) / 86_400_000);
+  if (days >= 1) return `Quá ${days} ngày`;
+  const time = new Intl.DateTimeFormat('vi-VN', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(d);
+  return `Quá hạn ${time}`;
+}
+
 export function fmtAgo(iso: string | null | undefined) {
   if (!iso) return '—';
   const minutes = Math.round((Date.now() - new Date(iso).getTime()) / 60_000);
@@ -65,12 +80,12 @@ export const fmtHours = (minutes: number) => {
   return h ? `${h} giờ${m ? ` ${m} phút` : ''}` : `${m} phút`;
 };
 
-/** Value for <input type="datetime-local"> in Vietnam time. */
+/** A date-time field value ("YYYY-MM-DDTHH:mm") in Vietnam time. */
 export function toLocalInput(date: Date) {
   const vn = new Date(date.getTime() + 7 * 3600_000);
   return vn.toISOString().slice(0, 16);
 }
-/** Parse a datetime-local value entered in Vietnam time to ISO UTC. */
+/** A date-time field value entered in Vietnam time, as ISO UTC. */
 export function fromLocalInput(value: string) {
   return new Date(`${value}:00+07:00`).toISOString();
 }

@@ -111,6 +111,9 @@ export function ChatTopicList({
           agents={agents}
           thinking={agentThinking.thinking}
           onAgentAsked={agentThinking.start}
+          placeholder="Viết chủ đề mới…"
+          sendLabel="Đăng chủ đề"
+          sendShortLabel="Đăng"
           onPending={onPending}
           onSent={onSent}
           onFailed={onFailed}
@@ -172,7 +175,7 @@ function ChatTopicCard({
   message: ChatMessage;
   pending: boolean;
   onOpen: () => void;
-  /** "Tạo việc từ chuỗi" for the whole topic; absent when the topic cannot be a task source. */
+  /** "Tạo việc từ chủ đề" for the whole topic; absent when the topic cannot be a task source. */
   onMakeTask?: () => void;
   makeTaskPending: boolean;
 }) {
@@ -230,7 +233,7 @@ function ChatTopicCard({
         </span>
         {onMakeTask && (
           <button type="button" className="btn btn-sm btn-ghost" disabled={pending || makeTaskPending} onClick={onMakeTask}>
-            Tạo việc từ chuỗi
+            Tạo việc từ chủ đề
           </button>
         )}
         <button type="button" className="btn btn-sm" disabled={pending} onClick={onOpen}>

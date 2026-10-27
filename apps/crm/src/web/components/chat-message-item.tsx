@@ -3,6 +3,7 @@ import { Link } from '@tanstack/react-router';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useActor } from '../actor-context';
 import { ApiFailure, api } from '../api';
+import { vnTime, type ChatFlowItem } from '../chat-flow';
 import { formatThreadTime, replierInitials } from '../chat-links';
 import { fmtDateTime } from '../format';
 import type { ChatMessage, ChatQuotePreview, ChatTaskSuggestion } from '../types';
@@ -18,11 +19,12 @@ import {
 import { Icon } from './icons';
 import { formatMentionText, renderMessageBody } from './mention-input';
 import { TaskFormDialog } from './task-form-dialog';
-import { Avatar, Badge, ImageLightbox, useToast } from './ui';
+import { Avatar, Badge, ConfirmDialog, ImageLightbox, OverflowMenu, useToast } from './ui';
 
 const INLINE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 const LONG_PRESS_MS = 500;
 const LONG_PRESS_MOVE_PX = 10;
+const RECALL_PREVIEW_MAX = 160;
 
 export function fmtFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -55,9 +57,32 @@ export interface ChatMessageItemProps {
   /** Outlined for 2 s after a jump. */
   highlighted?: boolean;
   canRecall: boolean;
+  /** Follows a message by the same author within a few minutes: no avatar and no name, only the time. */
+  continued?: boolean;
+  /**
+   * Last message of a run by one author: the only one that shows its time. The others keep the time as a tooltip on
+   * the bubble.
+   */
+  endsRun?: boolean;
   onQuote: (message: ChatMessage) => void;
   onOpenThread?: (rootId: string) => void;
   onJumpTo: (quote: ChatQuotePreview) => void;
+}
+
+/** A day separator ("Hôm nay", "Hôm qua", "20/10/2026") or the "Tin mới" divider in a message list. */
+export function ChatFlowSeparator({ item }: { item: Exclude<ChatFlowItem, { kind: 'message' }> }) {
+  if (item.kind === 'day') {
+    return (
+      <li className="chat-flow-sep" role="separator" aria-label={item.label}>
+        <span>{item.label}</span>
+      </li>
+    );
+  }
+  return (
+    <li className="chat-flow-sep" data-tone="new" data-new-divider="true" role="separator" aria-label="Tin mới">
+      <span>Tin mới</span>
+    </li>
+  );
 }
 
 /** One chat message with its action menu, quote block, thread card, attachments and legacy task suggestions. */
@@ -69,6 +94,8 @@ export function ChatMessageItem({
   pending = false,
   highlighted = false,
   canRecall,
+  continued = false,
+  endsRun = true,
   onQuote,
   onOpenThread,
   onJumpTo,
@@ -79,6 +106,7 @@ export function ChatMessageItem({
   const [lightboxImage, setLightboxImage] = useState<{ src: string; alt: string } | null>(null);
   const [suggestionToCreate, setSuggestionToCreate] = useState<ChatTaskSuggestion | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [confirmRecall, setConfirmRecall] = useState(false);
   const pressRef = useRef<{ timer: ReturnType<typeof setTimeout>; x: number; y: number } | null>(null);
   const taskDraftRequest = useTaskDraftRequest();
 
@@ -120,8 +148,8 @@ export function ChatMessageItem({
           data-highlight={highlighted ? 'true' : undefined}
         >
           <TaskCard card={taskCard} />
-          <time className="small muted" dateTime={m.createdAt}>
-            {fmtDateTime(m.createdAt)}
+          <time className="small muted" dateTime={m.createdAt} title={fmtDateTime(m.createdAt)}>
+            {vnTime(m.createdAt)}
           </time>
         </li>
       );
@@ -142,7 +170,9 @@ export function ChatMessageItem({
           </>
         )}
         {' · '}
-        <time dateTime={m.createdAt}>{fmtDateTime(m.createdAt)}</time>
+        <time dateTime={m.createdAt} title={fmtDateTime(m.createdAt)}>
+          {vnTime(m.createdAt)}
+        </time>
         {failedDraftSource && <FailedDraft source={failedDraftSource} />}
       </li>
     );
@@ -166,8 +196,10 @@ export function ChatMessageItem({
     m.threadRootId === null &&
     Boolean(onOpenThread);
   const showRecall = canRecall && !m.deleted && !pending;
+  const recallPreview = showRecall ? formatMentionText(m.body).slice(0, RECALL_PREVIEW_MAX) : '';
   const hasActions = canQuote || showRecall;
   const thread = context === 'main' && m.threadRootId === null ? m.thread : null;
+  const showTime = endsRun || pending;
 
   const clearPress = () => {
     if (pressRef.current) {
@@ -197,6 +229,7 @@ export function ChatMessageItem({
       className="stack-sm"
       data-message-id={m.id}
       data-highlight={highlighted ? 'true' : undefined}
+      data-continued={continued ? 'true' : undefined}
       style={{ alignItems: isMine ? 'flex-end' : 'flex-start' }}
     >
       <div
@@ -210,9 +243,24 @@ export function ChatMessageItem({
         onPointerCancel={clearPress}
         onPointerLeave={clearPress}
       >
-        {!isMine && <Avatar name={sender} />}
+        {!isMine && (continued ? <span className="msg-avatar-spacer" aria-hidden="true" /> : <Avatar name={sender} />)}
         <div className="msg-stack">
-          <div className="msg-bubble">
+          {continued || isMine ? (
+            // The author is still announced to screen readers on every message.
+            <span className="visually-hidden">{sender}:</span>
+          ) : (
+            <div className="msg-head">
+              {m.authorKind === 'agent' && (
+                <>
+                  <Icon name="bot" />
+                  {/* The badge tells an agent from a person; it would only repeat an agent already named "Trợ lý". */}
+                  {sender !== 'Trợ lý' && <Badge tone="accent">Trợ lý</Badge>}
+                </>
+              )}
+              <span className="msg-sender">{sender}</span>
+            </div>
+          )}
+          <div className="msg-bubble" title={showTime ? undefined : fmtDateTime(m.createdAt)}>
             {m.replyTo && !m.deleted && (
               <button
                 type="button"
@@ -309,21 +357,22 @@ export function ChatMessageItem({
             </button>
           )}
 
-          <div className="msg-meta">
-            {m.authorKind === 'agent' && (
-              <>
-                <Icon name="bot" />
-                <Badge tone="accent">Trợ lý</Badge>
-              </>
+          {/* Without the time the row would only hold the "⋯" button; it moves beside the bubble instead. */}
+          <div className="msg-meta" data-compact={showTime ? undefined : 'true'}>
+            {showTime && (
+              <time dateTime={m.createdAt} title={fmtDateTime(m.createdAt)}>
+                {vnTime(m.createdAt)}
+              </time>
             )}
-            <span className="msg-sender">{sender}</span>
-            <time dateTime={m.createdAt}>{fmtDateTime(m.createdAt)}</time>
             {pending && <span className="msg-state">Đang gửi…</span>}
             {hasActions && (
-              <MessageActionMenu
+              <OverflowMenu
+                label="Thao tác với tin"
+                className="chat-msg-actions"
+                buttonClassName="btn btn-ghost btn-sm icon-btn chat-msg-actions-btn"
                 open={menuOpen}
                 onOpenChange={setMenuOpen}
-                side={isMine ? 'out' : 'in'}
+                align={isMine ? 'right' : 'left'}
                 items={[
                   ...(canQuote ? [{ label: 'Trả lời', onSelect: () => onQuote(m) }] : []),
                   ...(canThreadReply ? [{ label: 'Trả lời theo chuỗi', onSelect: () => onOpenThread?.(m.id) }] : []),
@@ -337,12 +386,13 @@ export function ChatMessageItem({
                               conversationId: m.conversationId,
                               messageId: m.id,
                               scope: 'message',
+                              excerpt: m.body,
                             }),
                         },
                       ]
                     : []),
                   ...(showRecall
-                    ? [{ label: 'Thu hồi', disabled: recallMutation.isPending, onSelect: () => recallMutation.mutate(m.id) }]
+                    ? [{ label: 'Thu hồi', danger: true, disabled: recallMutation.isPending, onSelect: () => setConfirmRecall(true) }]
                     : []),
                 ]}
               />
@@ -378,6 +428,20 @@ export function ChatMessageItem({
 
       {taskDraftRequest.dialog}
 
+      {showRecall && confirmRecall && (
+        <ConfirmDialog
+          open
+          title="Thu hồi tin nhắn?"
+          confirmLabel="Thu hồi"
+          pending={recallMutation.isPending}
+          onCancel={() => setConfirmRecall(false)}
+          onConfirm={() => recallMutation.mutate(m.id, { onSettled: () => setConfirmRecall(false) })}
+        >
+          <p>Mọi người sẽ thấy &ldquo;Tin nhắn đã thu hồi&rdquo; thay cho tin này:</p>
+          <blockquote className="confirm-quote">{recallPreview || 'Tin có tệp đính kèm'}</blockquote>
+        </ConfirmDialog>
+      )}
+
       {suggestionToCreate && (
         <TaskFormDialog
           open
@@ -391,83 +455,5 @@ export function ChatMessageItem({
         />
       )}
     </li>
-  );
-}
-
-interface MenuItemSpec {
-  label: string;
-  disabled?: boolean;
-  onSelect: () => void;
-}
-
-/** The "⋯" button and its menu. Closes on a choice, an outside press or Escape. */
-function MessageActionMenu({
-  open,
-  onOpenChange,
-  side,
-  items,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  side: 'in' | 'out';
-  items: MenuItemSpec[];
-}) {
-  const boxRef = useRef<HTMLSpanElement>(null);
-  const buttonRef = useRef<HTMLButtonElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: PointerEvent) => {
-      if (!boxRef.current?.contains(e.target as Node)) onOpenChange(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        onOpenChange(false);
-        buttonRef.current?.focus();
-      }
-    };
-    document.addEventListener('pointerdown', onDown);
-    document.addEventListener('keydown', onKey);
-    boxRef.current?.querySelector<HTMLButtonElement>('.menu-item')?.focus();
-    return () => {
-      document.removeEventListener('pointerdown', onDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [open, onOpenChange]);
-
-  return (
-    <span className="dropdown chat-msg-actions" data-side={side} data-open={open ? 'true' : undefined} ref={boxRef}>
-      <button
-        ref={buttonRef}
-        type="button"
-        className="btn btn-ghost btn-sm icon-btn chat-msg-actions-btn"
-        aria-label="Thao tác với tin"
-        title="Thao tác với tin"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        onClick={() => onOpenChange(!open)}
-      >
-        <span aria-hidden="true">⋯</span>
-      </button>
-      {open && (
-        <span className="menu-pop" role="menu">
-          {items.map((item) => (
-            <button
-              key={item.label}
-              type="button"
-              role="menuitem"
-              className="menu-item"
-              disabled={item.disabled}
-              onClick={() => {
-                onOpenChange(false);
-                item.onSelect();
-              }}
-            >
-              {item.label}
-            </button>
-          ))}
-        </span>
-      )}
-    </span>
   );
 }

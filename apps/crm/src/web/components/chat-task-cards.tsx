@@ -1,11 +1,18 @@
 import { useState, type ReactNode } from 'react';
 import { Link } from '@tanstack/react-router';
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useActor } from '../actor-context';
 import { ApiFailure, api, useApi } from '../api';
 import { draftToInitialValues, type TaskFormInitialValues } from '../chat-task-draft';
 import { fmtDateTime } from '../format';
-import type { ChatTaskCard, ChatTaskDraft, ChatTaskDraftResponse, ChatTaskSource, DirectoryUser } from '../types';
+import type {
+  ChatMessage,
+  ChatTaskCard,
+  ChatTaskDraft,
+  ChatTaskDraftResponse,
+  ChatTaskSource,
+  DirectoryUser,
+} from '../types';
 import { Icon } from './icons';
 import { TaskFormDialog } from './task-form-dialog';
 import { useToast } from './ui';
@@ -16,6 +23,8 @@ export interface TaskDraftRequest {
   scope: ChatTaskSource['scope'];
   /** Skip Trợ lý and get the manual draft at once ("Tự tạo việc"). */
   prefer?: 'manual';
+  /** The raw body of the source message (or thread root), quoted in the form so the source is clear. */
+  excerpt?: string;
 }
 
 /**
@@ -36,8 +45,8 @@ export function useTaskDraftRequest(): {
         scope,
         ...(prefer ? { prefer } : {}),
       }),
-    onSuccess: (res) => {
-      if (res.mode === 'manual') setInitialValues(draftToInitialValues(res.draft));
+    onSuccess: (res, input) => {
+      if (res.mode === 'manual') setInitialValues({ ...draftToInitialValues(res.draft), sourceExcerpt: input.excerpt });
       else toast('Trợ lý đang soạn việc…');
     },
     onError: (err) => toast(err.message, 'danger'),
@@ -78,6 +87,7 @@ export function DraftCard({
   requestedByUserId: string | null;
 }) {
   const actor = useActor();
+  const client = useQueryClient();
   const [expanded, setExpanded] = useState(false);
   const [initialValues, setInitialValues] = useState<TaskFormInitialValues | null>(null);
   const isRequester = requestedByUserId !== null && requestedByUserId === actor.id;
@@ -155,7 +165,17 @@ export function DraftCard({
             <button
               type="button"
               className="btn btn-sm btn-primary"
-              onClick={() => setInitialValues(draftToInitialValues(draft, messageId, index))}
+              onClick={() => {
+                const source = draft.source!;
+                // The source text is quoted when its conversation's messages are already loaded.
+                const sourceMessage = client
+                  .getQueryData<ChatMessage[]>(['chat', source.conversationId])
+                  ?.find((m) => m.id === source.messageId);
+                setInitialValues({
+                  ...draftToInitialValues(draft, messageId, index),
+                  sourceExcerpt: sourceMessage && !sourceMessage.deleted ? sourceMessage.body : undefined,
+                });
+              }}
             >
               Sửa và tạo việc
             </button>
@@ -175,19 +195,22 @@ export function DraftCard({
 export function TaskCard({ card }: { card: ChatTaskCard }) {
   return (
     <div className="chat-task-card" data-state="created">
-      <div className="row" style={{ gap: 8 }}>
+      {/* The title takes the full width; "Mở việc" shares the second line with the assignee and due time. */}
+      <div className="row" style={{ gap: 8, alignItems: 'flex-start' }}>
         <Icon name="check" />
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="chat-task-card-title truncate">{card.title}</div>
-          <div className="small muted">
-            {card.assigneeName ?? 'Chưa có người làm'}
-            {' · '}
-            {card.dueAt ? `Hạn ${fmtDateTime(card.dueAt)}` : 'Chưa đặt hạn'}
+          <div className="chat-task-card-title truncate" title={card.title}>{card.title}</div>
+          <div className="row small" style={{ gap: 8 }}>
+            <span className="muted truncate" style={{ flex: 1 }}>
+              {card.assigneeName ?? 'Chưa có người làm'}
+              {' · '}
+              {card.dueAt ? `Hạn ${fmtDateTime(card.dueAt)}` : 'Chưa đặt hạn'}
+            </span>
+            <span className="nowrap">
+              <OpenTaskLink taskId={card.taskId} />
+            </span>
           </div>
         </div>
-        <span className="small nowrap">
-          <OpenTaskLink taskId={card.taskId} />
-        </span>
       </div>
     </div>
   );

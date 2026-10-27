@@ -1,4 +1,5 @@
 /** Pure helpers for the chat sidebar tree and the group permissions shown in the UI. The server re-checks every action. */
+import { matchesSearch } from './text-search';
 import type { Actor, ChatConversationDetail, ChatConversationSummary, ChatThreadSummary } from './types';
 
 export type ChatTreeActor = Pick<Actor, 'id' | 'role'>;
@@ -88,6 +89,27 @@ export function buildChatTree(conversations: readonly ChatConversationSummary[])
 /** Sum of unread main-flow messages of a list of conversations. */
 export function sumUnread(conversations: readonly ChatConversationSummary[]): number {
   return conversations.reduce((sum, c) => sum + c.unread, 0);
+}
+
+/** True when the conversation has unread messages, or unread replies in a thread the reader follows. */
+export function hasUnread(c: Pick<ChatConversationSummary, 'unread' | 'threadUnread'>): boolean {
+  return c.unread > 0 || c.threadUnread > 0;
+}
+
+/**
+ * The conversations the list filter keeps: titles matching every word of `query` (ignoring case and Vietnamese
+ * accents, so "loc" finds "Dự án Lộc Thọ"), and only unread ones when `unreadOnly` is set. The open conversation
+ * (`keepId`) stays under "Chưa đọc" after it is read, so it does not vanish while the person is in it.
+ */
+export function filterConversations(
+  conversations: readonly ChatConversationSummary[],
+  { query, unreadOnly, keepId }: { query: string; unreadOnly: boolean; keepId?: string },
+): ChatConversationSummary[] {
+  return conversations.filter(
+    (c) =>
+      (!unreadOnly || hasUnread(c) || c.id === keepId) &&
+      matchesSearch(c.title || (c.kind === 'group' ? 'Nhóm chat' : 'Tin riêng'), query),
+  );
 }
 
 /** Switching between "Trò chuyện" and "Chủ đề": groups other than Inbox, by the owner, a director or an admin. */

@@ -3,13 +3,29 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useActor } from '../actor-context';
 import { ApiFailure, api, useApi } from '../api';
 import { useChatSocketConnected } from '../chat-socket';
-import type { ChatAgentItem, ChatConversationDetail, ChatMessage, ChatMessageContext } from '../types';
+import { buildChatFlow, firstNewMessageId } from '../chat-flow';
+import type {
+  ChatAgentItem,
+  ChatConversationDetail,
+  ChatConversationSummary,
+  ChatMessage,
+  ChatMessageContext,
+} from '../types';
 import { ChatComposer, useAgentThinking, useDebouncedMarkRead } from './chat-composer';
-import { ChatMessageItem, scrollToMessage } from './chat-message-item';
+import { ChatFlowSeparator, ChatMessageItem, scrollToMessage } from './chat-message-item';
 import { Icon } from './icons';
 import { Avatar, Badge, Empty, ErrorState, FormError, Loading, Modal, useToast } from './ui';
 
 const HIGHLIGHT_MS = 2000;
+/** Room left above the "Tin mới" divider when a conversation opens on it. */
+const DIVIDER_TOP_GAP_PX = 8;
+
+/** The conversation's read marker and unread count as they were when it opened. */
+interface ReadSnapshot {
+  conversationId: string;
+  lastReadAt: string | null;
+  unread: number;
+}
 
 interface TaskCommentsBootstrap {
   conversationId: string;
@@ -108,17 +124,70 @@ export function ChatThread({
   const newest = messages.at(-1);
   const agentThinking = useAgentThinking(resolvedId, null, newest);
 
+  // "Tin mới": the read marker as it was when the conversation opened, taken before this view marks it read. Only the
+  // chat page's main flow has one; it stays until the person leaves the conversation.
+  const conversationsQuery = useQuery<ChatConversationSummary[], ApiFailure>({
+    queryKey: ['chat', 'conversations'],
+    queryFn: () => api.get<ChatConversationSummary[]>('/chat/conversations'),
+    enabled: context === 'main',
+    // The chat page keeps this list fresh; only opening a conversation refetches it (below), once.
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+  const [readSnapshot, setReadSnapshot] = useState<ReadSnapshot | null>(null);
+  // The cached list can be older than messages that arrived since it loaded, so the snapshot waits for a list fetched
+  // after the conversation opened. Marking read waits for the snapshot, so the refetch still sees the old marker.
+  const openedAtRef = useRef<{ conversationId: string; at: number } | null>(null);
+  const refetchConversations = conversationsQuery.refetch;
+  useEffect(() => {
+    if (context !== 'main' || !resolvedId) return;
+    openedAtRef.current = { conversationId: resolvedId, at: Date.now() };
+    void refetchConversations();
+  }, [context, resolvedId, refetchConversations]);
+  useEffect(() => {
+    if (context !== 'main' || !resolvedId || readSnapshot?.conversationId === resolvedId) return;
+    const opened = openedAtRef.current;
+    if (opened?.conversationId !== resolvedId) return;
+    const fresh = conversationsQuery.dataUpdatedAt >= opened.at;
+    const failed = conversationsQuery.errorUpdatedAt >= opened.at;
+    if (!fresh && !failed) return;
+    // After a failed refetch the older list is still the best guess; with no list at all nothing counts as new.
+    const item = conversationsQuery.data?.find((c) => c.id === resolvedId);
+    setReadSnapshot({ conversationId: resolvedId, lastReadAt: item?.lastReadAt ?? null, unread: item?.unread ?? 0 });
+  }, [
+    context, resolvedId, readSnapshot, conversationsQuery.data, conversationsQuery.dataUpdatedAt,
+    conversationsQuery.errorUpdatedAt,
+  ]);
+  const snapshotReady = context !== 'main' || readSnapshot?.conversationId === resolvedId;
+  const newMessageId = useMemo(
+    () =>
+      context === 'main' && readSnapshot?.conversationId === resolvedId && readSnapshot.unread > 0
+        ? firstNewMessageId(messages, readSnapshot.lastReadAt, actor.id)
+        : null,
+    [context, readSnapshot, resolvedId, messages, actor.id],
+  );
+  const flow = useMemo(() => buildChatFlow(shown, { newMessageId }), [shown, newMessageId]);
+
+  // On open: show the "Tin mới" divider near the top when there is one, otherwise the newest message. Afterwards every
+  // new message scrolls to the bottom.
+  const openedRef = useRef<string | null>(null);
   useEffect(() => {
     if (olderWindow) return;
     const el = listRef.current;
-    if (el) {
-      el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    if (openedRef.current !== resolvedId && snapshotReady && q.data) {
+      openedRef.current = resolvedId;
+      const divider = newMessageId && !focusMessageId ? el.querySelector<HTMLElement>('[data-new-divider]') : null;
+      if (divider) {
+        el.scrollTop += divider.getBoundingClientRect().top - el.getBoundingClientRect().top - DIVIDER_TOP_GAP_PX;
+        return;
+      }
     }
-  }, [messages.length, resolvedId, olderWindow]);
+    el.scrollTop = el.scrollHeight;
+  }, [messages.length, resolvedId, olderWindow, snapshotReady, newMessageId, focusMessageId, Boolean(q.data)]);
 
   useDebouncedMarkRead(
     resolvedId && isMember ? `/chat/conversations/${encodeURIComponent(resolvedId)}/read` : null,
-    newest?.createdAt,
+    snapshotReady ? newest?.createdAt : undefined,
     () => {
       void client.invalidateQueries({ queryKey: ['chat', 'unread'] });
       void client.invalidateQueries({ queryKey: ['chat', 'conversations'] });
@@ -268,12 +337,16 @@ export function ChatThread({
           </Empty>
         ) : (
           <ol className="msg-list">
-            {shown.map((m) => {
+            {flow.map((item) => {
+              if (item.kind !== 'message') return <ChatFlowSeparator key={item.key} item={item} />;
+              const m = item.message;
               const pending = optimistic.some((o) => o.id === m.id);
               return (
                 <ChatMessageItem
                   key={m.id}
                   message={m}
+                  continued={item.continued}
+                  endsRun={item.endsRun}
                   context={context}
                   conversationKind={conversationKind}
                   conversationMode={conversationMode}

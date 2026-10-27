@@ -217,6 +217,8 @@ export interface ChatConversationSummary {
   parentTitle: string | null;
   /** A system group (Inbox, department group): members follow the org chart, nobody edits them by hand. */
   system: boolean;
+  /** When the caller last read this conversation (ISO), or null if never. */
+  lastReadAt: string | null;
 }
 
 /** "chat": quote and thread replies; "topic": every new top-level message starts a topic. */
@@ -280,7 +282,8 @@ export interface ChatTaskDraft {
 export interface ChatManualTaskDraft {
   title: string;
   description: string;
-  assigneeUserId: null;
+  /** The one member the source mentions, when it mentions exactly one. */
+  assigneeUserId: string | null;
   memberUserIds: string[];
   dueDate: null;
   source: ChatTaskSource;
@@ -347,7 +350,8 @@ export interface Dashboard {
   pipeline: { stage: StageCode; count: number; value: number }[];
   bySale: { id: string; name: string; active: number; overdue: number; stale: number; won: number; lost: number; value: number }[];
   attention: LeadItem[];
-  upcoming: (TaskItem & { lead: NonNullable<TaskItem['lead']> })[];
+  /** Lead tasks and internal tasks (no lead), as /tasks lists them. */
+  upcoming: TaskItem[];
   lostReasons: { code: string; count: number }[];
 }
 

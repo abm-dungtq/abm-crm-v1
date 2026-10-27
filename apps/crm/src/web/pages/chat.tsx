@@ -1,19 +1,21 @@
-import { useEffect, useId, useMemo, useRef, useState, type MouseEvent } from 'react';
+import { useEffect, useId, useMemo, useState, type MouseEvent } from 'react';
 import { Link, useNavigate, useParams, useSearch } from '@tanstack/react-router';
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useActor } from '../actor-context';
 import { ApiFailure, api, useApi } from '../api';
 import { chatLink, formatThreadTime, parseChatSearch } from '../chat-links';
 import { useChatSocketConnected } from '../chat-socket';
-import { buildChatTree, canCreateSubgroup, sumUnread } from '../chat-tree';
+import { buildChatTree, canCreateSubgroup, filterConversations, hasUnread, sumUnread } from '../chat-tree';
 import { ChatGroupSettingsDialog } from '../components/chat-group-settings';
 import { ChatThread, ConversationAgentsDialog } from '../components/chat-thread';
 import { ChatThreadPanel } from '../components/chat-thread-panel';
 import { ChatTopicList } from '../components/chat-topic-list';
+import { Combobox, MultiCombobox } from '../components/combobox';
 import { Icon } from '../components/icons';
 import { fmtShortTime } from '../components/inbox-thread';
 import { roleLabel } from '../components/layout';
 import { foldDiacritics, formatMentionText } from '../components/mention-input';
+import { userOption } from '../components/task-form-dialog';
 import {
   Avatar,
   Badge,
@@ -23,6 +25,7 @@ import {
   FormError,
   Loading,
   Modal,
+  OverflowMenu,
   fieldErrors,
   useToast,
 } from '../components/ui';
@@ -35,6 +38,16 @@ import type {
 } from '../types';
 
 const THREADS_PAGE_SIZE = 50;
+/** The server accepts 1 to 50 members when a group is created. */
+const GROUP_MEMBER_PICK_MAX = 50;
+
+/**
+ * The conversation list search and "Chưa đọc" filter for this tab. Kept outside React so they survive the page
+ * remounting when the route switches between `/chat` and `/chat/:id`; a reload starts clean.
+ */
+const listFilterMemory = { query: '', unreadOnly: false };
+/** Group chats are always open to the agents members have connected; direct chats follow their own switch. */
+const AGENT_NOTICE = 'Agent mà thành viên đã kết nối có thể đọc tin nhắn trong nhóm này.';
 
 /** A department group chosen as the parent of a new subgroup. */
 interface SubgroupParent {
@@ -97,7 +110,21 @@ export function ChatPage() {
   });
   const openCreateGroup = (parent: SubgroupParent | null = null) => setCreateGroup({ open: true, parent });
   const [newDirectOpen, setNewDirectOpen] = useState(false);
-  const [listTab, setListTab] = useState<'all' | 'threads'>('all');
+  // The list choice lives in the URL so a reload or a shared link keeps it, and Back returns to "Tất cả".
+  const listTab: 'all' | 'threads' = search.list === 'threads' ? 'threads' : 'all';
+  const setListTab = (next: 'all' | 'threads') => {
+    if (next === listTab) return;
+    const list = next === 'threads' ? ('threads' as const) : undefined;
+    if (conversationId) {
+      void navigate({
+        to: '/chat/$conversationId',
+        params: { conversationId },
+        search: { thread: search.thread, message: search.message, list },
+      });
+    } else {
+      void navigate({ to: '/chat', search: { list } });
+    }
+  };
 
   const conversationsQuery = useQuery<ChatConversationSummary[], ApiFailure>({
     queryKey: ['chat', 'conversations'],
@@ -124,22 +151,47 @@ export function ChatPage() {
     void navigate({
       to: '/chat/$conversationId',
       params: { conversationId },
-      search: messageId ? { thread: rootId, message: messageId } : { thread: rootId },
+      search: { thread: rootId, message: messageId, list: search.list },
     });
   };
   // A new history entry, so Back reopens the panel the same way Back closes it.
   const closeThread = () => {
     if (!conversationId) return;
-    void navigate({ to: '/chat/$conversationId', params: { conversationId }, search: {}, replace: false });
+    void navigate({ to: '/chat/$conversationId', params: { conversationId }, search: { list: search.list }, replace: false });
   };
 
-  const tree = useMemo(() => buildChatTree(conversationsQuery.data ?? []), [conversationsQuery.data]);
+  const [listQuery, setListQueryState] = useState(listFilterMemory.query);
+  const [unreadOnly, setUnreadOnlyState] = useState(listFilterMemory.unreadOnly);
+  const setListQuery = (query: string) => {
+    listFilterMemory.query = query;
+    setListQueryState(query);
+  };
+  const setUnreadOnly = (next: boolean) => {
+    listFilterMemory.unreadOnly = next;
+    setUnreadOnlyState(next);
+  };
+  const filtering = unreadOnly || listQuery.trim() !== '';
+  const allConversations = conversationsQuery.data ?? [];
+  const unreadConversations = allConversations.filter(hasUnread).length;
+
+  const fullTree = useMemo(() => buildChatTree(conversationsQuery.data ?? []), [conversationsQuery.data]);
+  const tree = useMemo(
+    () =>
+      filtering
+        ? buildChatTree(
+            filterConversations(conversationsQuery.data ?? [], { query: listQuery, unreadOnly, keepId: conversationId }),
+          )
+        : fullTree,
+    [filtering, fullTree, conversationsQuery.data, listQuery, unreadOnly, conversationId],
+  );
+  const filteredEmpty =
+    filtering && tree.departments.length + tree.groups.length + tree.system.length + tree.directs.length === 0;
   const subgroupParents = useMemo<SubgroupParent[]>(
     () =>
-      tree.departments
+      fullTree.departments
         .filter((d) => canCreateSubgroup(d.group, actor))
         .map((d) => ({ id: d.parentId, title: d.title })),
-    [tree, actor],
+    [fullTree, actor],
   );
 
   const departmentUnread = tree.departments.reduce(
@@ -154,7 +206,7 @@ export function ChatPage() {
     <div className="inbox-workspace">
       <h1 className="visually-hidden">Chat nội bộ</h1>
       <div
-        className={isPhoneWidth ? 'inbox' : 'inbox inbox-channels-collapsed'}
+        className={isPhoneWidth ? 'inbox chat-inbox' : 'inbox chat-inbox inbox-channels-collapsed'}
         data-view={conversationId ? (threadRootId ? 'thread-panel' : 'thread') : 'list'}
       >
         <section className="inbox-list" aria-label="Danh sách hội thoại chat">
@@ -179,14 +231,50 @@ export function ChatPage() {
                 <span>Nhắn riêng</span>
               </button>
             </div>
+            {listTab === 'all' && (
+              <input
+                type="search"
+                className="chat-list-search"
+                aria-label="Tìm hội thoại theo tên"
+                placeholder="Tìm hội thoại…"
+                value={listQuery}
+                maxLength={80}
+                onChange={(e) => setListQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape' && listQuery) {
+                    e.preventDefault();
+                    setListQuery('');
+                  }
+                }}
+              />
+            )}
             <div className="chips" role="group" aria-label="Chọn danh sách">
               <button
                 type="button"
                 className="chip"
-                aria-pressed={listTab === 'all'}
-                onClick={() => setListTab('all')}
+                aria-pressed={listTab === 'all' && !unreadOnly}
+                onClick={() => {
+                  setUnreadOnly(false);
+                  setListTab('all');
+                }}
               >
                 Tất cả
+              </button>
+              <button
+                type="button"
+                className="chip"
+                aria-pressed={listTab === 'all' && unreadOnly}
+                onClick={() => {
+                  setUnreadOnly(true);
+                  setListTab('all');
+                }}
+              >
+                Chưa đọc
+                {unreadConversations > 0 && (
+                  <span className="conv-unread-badge" aria-label={`${unreadConversations} hội thoại chưa đọc`}>
+                    {unreadConversations}
+                  </span>
+                )}
               </button>
               <button
                 type="button"
@@ -257,7 +345,26 @@ export function ChatPage() {
                 <ErrorState error={conversationsQuery.error} onRetry={() => conversationsQuery.refetch()} />
               </div>
             )}
-            {conversationsQuery.data && (
+            {conversationsQuery.data && filteredEmpty && (
+              <div className="chat-list-empty" role="status">
+                <span className="small muted">
+                  {unreadOnly && !listQuery.trim()
+                    ? 'Bạn đã đọc hết tin nhắn.'
+                    : `Không có hội thoại nào${listQuery.trim() ? ` tên “${listQuery.trim()}”` : ''}${unreadOnly ? ' chưa đọc' : ''}.`}
+                </span>
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  onClick={() => {
+                    setListQuery('');
+                    setUnreadOnly(false);
+                  }}
+                >
+                  Xóa bộ lọc
+                </button>
+              </div>
+            )}
+            {conversationsQuery.data && !filteredEmpty && (
               <>
                 {tree.departments.length > 0 && (
                   <>
@@ -299,12 +406,14 @@ export function ChatPage() {
                   </>
                 )}
 
-                <ChatSectionHeader
-                  label="Nhóm"
-                  unread={groupUnread}
-                  unreadLabel={`${groupUnread} tin chưa đọc trong nhóm`}
-                />
-                {tree.groups.length === 0 ? (
+                {!(filtering && tree.groups.length === 0) && (
+                  <ChatSectionHeader
+                    label="Nhóm"
+                    unread={groupUnread}
+                    unreadLabel={`${groupUnread} tin chưa đọc trong nhóm`}
+                  />
+                )}
+                {filtering && tree.groups.length === 0 ? null : tree.groups.length === 0 ? (
                   <div className="small muted" style={{ padding: '10px 12px', borderBottom: '1px solid var(--border)' }}>
                     Chưa có nhóm nào. Bấm &ldquo;Tạo nhóm&rdquo; để bắt đầu.
                   </div>
@@ -331,12 +440,14 @@ export function ChatPage() {
                   </>
                 )}
 
-                <ChatSectionHeader
-                  label="Tin riêng"
-                  unread={directUnread}
-                  unreadLabel={`${directUnread} tin riêng chưa đọc`}
-                />
-                {tree.directs.length === 0 ? (
+                {!(filtering && tree.directs.length === 0) && (
+                  <ChatSectionHeader
+                    label="Tin riêng"
+                    unread={directUnread}
+                    unreadLabel={`${directUnread} tin riêng chưa đọc`}
+                  />
+                )}
+                {filtering && tree.directs.length === 0 ? null : tree.directs.length === 0 ? (
                   <div className="small muted" style={{ padding: '10px 12px' }}>
                     Chưa có hội thoại riêng. Bấm &ldquo;Nhắn riêng&rdquo; để chọn đồng nghiệp.
                   </div>
@@ -407,7 +518,7 @@ function ChatSectionHeader({ label, unread, unreadLabel }: { label: string; unre
   );
 }
 
-/** A department group row: the conversation link with a "Phòng ban" chip, and a "⋯" menu to create a subgroup. */
+/** A department group row (under the "Phòng ban" heading): the conversation link and a "⋯" menu to create a subgroup. */
 function ChatDepartmentRow({
   item,
   selected,
@@ -419,63 +530,15 @@ function ChatDepartmentRow({
   canCreateSubgroup: boolean;
   onCreateSubgroup: () => void;
 }) {
-  const [menuOpen, setMenuOpen] = useState(false);
-  const boxRef = useRef<HTMLDivElement>(null);
-  const buttonRef = useRef<HTMLButtonElement>(null);
-
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onDown = (e: PointerEvent) => {
-      if (!boxRef.current?.contains(e.target as Node)) setMenuOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setMenuOpen(false);
-        buttonRef.current?.focus();
-      }
-    };
-    document.addEventListener('pointerdown', onDown);
-    document.addEventListener('keydown', onKey);
-    boxRef.current?.querySelector<HTMLButtonElement>('.menu-item')?.focus();
-    return () => {
-      document.removeEventListener('pointerdown', onDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [menuOpen]);
-
   return (
     <div className="chat-tree-row" data-has-menu={allowSubgroup ? 'true' : undefined}>
-      <ChatConversationLink item={item} selected={selected} chip="Phòng ban" />
+      <ChatConversationLink item={item} selected={selected} />
       {allowSubgroup && (
-        <div className="dropdown chat-tree-menu" ref={boxRef}>
-          <button
-            ref={buttonRef}
-            type="button"
-            className="btn btn-ghost btn-sm icon-btn"
-            aria-label={`Thao tác với ${item.title}`}
-            title="Thao tác"
-            aria-haspopup="menu"
-            aria-expanded={menuOpen}
-            onClick={() => setMenuOpen((v) => !v)}
-          >
-            <span aria-hidden="true">⋯</span>
-          </button>
-          {menuOpen && (
-            <div className="menu-pop" role="menu">
-              <button
-                type="button"
-                role="menuitem"
-                className="menu-item"
-                onClick={() => {
-                  setMenuOpen(false);
-                  onCreateSubgroup();
-                }}
-              >
-                Tạo nhóm nhỏ
-              </button>
-            </div>
-          )}
-        </div>
+        <OverflowMenu
+          label={`Thao tác với ${item.title}`}
+          className="chat-tree-menu"
+          items={[{ label: 'Tạo nhóm nhỏ', icon: 'plus', onSelect: onCreateSubgroup }]}
+        />
       )}
     </div>
   );
@@ -497,65 +560,52 @@ function ChatConversationRow({
   );
 }
 
-function ChatConversationLink({
-  item,
-  selected,
-  chip,
-}: {
-  item: ChatConversationSummary;
-  selected: boolean;
-  chip?: string;
-}) {
+/**
+ * One conversation in the list: the name and preview take the free width; the time and the unread mark sit in a
+ * fixed trailing column so they never squeeze the name.
+ */
+function ChatConversationLink({ item, selected }: { item: ChatConversationSummary; selected: boolean }) {
   const title = item.title || (item.kind === 'group' ? 'Nhóm chat' : 'Tin riêng');
   const preview = formatMentionText(item.lastMessage) || 'Chưa có tin nhắn';
   const time = fmtShortTime(item.lastMessageAt ?? item.updatedAt);
+  const unread = item.unread > 0;
 
   return (
-      <Link
-        to="/chat/$conversationId"
-        params={{ conversationId: item.id }}
-        className="conv-row"
-        aria-current={selected ? 'true' : undefined}
-      >
-        <div className="row" style={{ gap: 8 }}>
-          <Avatar name={title} />
-          <div className="truncate" style={{ flex: 1, minWidth: 0 }}>
-            <div className="row" style={{ gap: 6 }}>
-              <span
-                className="conv-name truncate"
-                style={{ flex: 1, fontWeight: item.unread > 0 ? 700 : 600 }}
-              >
-                {title}
-              </span>
-              {chip && <span className="chat-dept-chip">{chip}</span>}
-              {time && <span className="small muted nowrap">{time}</span>}
-              {item.unread > 0 && (
-                <span className="conv-unread-badge" aria-label={`${item.unread} tin chưa đọc`}>
-                  {item.unread}
-                </span>
-              )}
-              {item.unread === 0 && item.threadUnread > 0 && (
-                <span className="chat-unread-dot" role="img" aria-label="Có trả lời chưa đọc trong chuỗi" />
-              )}
-            </div>
-            <div
-              className="small truncate"
-              style={{
-                color: item.unread > 0 ? 'var(--text)' : 'var(--muted)',
-                fontWeight: item.unread > 0 ? 500 : 400,
-              }}
-            >
-              {preview}
-            </div>
-          </div>
+    <Link
+      to="/chat/$conversationId"
+      params={{ conversationId: item.id }}
+      className="conv-row"
+      data-unread={unread ? 'true' : undefined}
+      aria-current={selected ? 'true' : undefined}
+    >
+      <div className="conv-row-grid">
+        <Avatar name={title} />
+        <div className="conv-row-main">
+          <span className="conv-name truncate" title={title}>
+            {title}
+          </span>
+          <span className="conv-preview small truncate">{preview}</span>
         </div>
-      </Link>
+        <div className="conv-row-trail">
+          {time && <span className="small muted nowrap">{time}</span>}
+          {unread ? (
+            <span className="conv-unread-badge" aria-label={`${item.unread} tin chưa đọc`}>
+              {item.unread}
+            </span>
+          ) : (
+            item.threadUnread > 0 && (
+              <span className="chat-unread-dot" role="img" aria-label="Có trả lời chưa đọc trong chuỗi" />
+            )
+          )}
+        </div>
+      </div>
+    </Link>
   );
 }
 
 function ChatFollowedThreadRow({ item, selected }: { item: ChatFollowedThread; selected: boolean }) {
   const navigate = useNavigate();
-  const href = chatLink({ conversationId: item.conversationId, threadRootId: item.rootId });
+  const href = chatLink({ conversationId: item.conversationId, threadRootId: item.rootId, list: 'threads' });
   const title = item.conversationTitle || (item.conversationKind === 'group' ? 'Nhóm chat' : 'Tin riêng');
   const unread = !item.muted && item.unread > 0;
   const onClick = (e: MouseEvent<HTMLAnchorElement>) => {
@@ -686,70 +736,80 @@ function ChatConversationPane({
           <Icon name="arrow" style={{ transform: 'rotate(180deg)' }} />
         </Link>
         <Avatar name={displayTitle} />
-        <div className="truncate" style={{ flex: '1 1 160px', minWidth: 0 }}>
-          <div className="row" style={{ gap: 6 }}>
-            <span className="truncate" style={{ fontWeight: 600 }} title={displayTitle}>
-              {displayTitle}
+        <div className="chat-head-title">
+          <span className="chat-head-name truncate" title={displayTitle}>
+            {displayTitle}
+          </span>
+          {conv.kind === 'group' && (
+            <span className="chat-head-meta small muted">
+              <span className="truncate" title={memberNames}>
+                {[
+                  conv.departmentId ? 'Nhóm phòng ban' : 'Nhóm',
+                  `${conv.members.length} thành viên`,
+                  isTopicMode ? 'Chủ đề' : null,
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
+              </span>
+              <span className="chat-head-info" role="img" aria-label={AGENT_NOTICE} title={AGENT_NOTICE}>
+                <Icon name="bot" />
+              </span>
             </span>
-            <Badge tone={conv.kind === 'group' ? 'info' : 'neutral'}>
-              {conv.kind === 'group' ? `Nhóm · ${conv.members.length} thành viên` : 'Tin riêng'}
-            </Badge>
-            {conv.departmentId && <span className="chat-dept-chip">Phòng ban</span>}
-            {isTopicMode && <Badge tone="accent">Chủ đề</Badge>}
-          </div>
-          <div className="small muted truncate" title={memberNames}>
-            Thành viên: {memberNames || '—'}
-          </div>
+          )}
         </div>
 
-        {conv.kind === 'direct' && (
-          <label
-            className="row small"
-            style={{
-              cursor: toggleAgentMutation.isPending ? 'not-allowed' : 'pointer',
-              gap: 6,
-              padding: '4px 8px',
-              borderRadius: 'var(--radius-sm)',
-              background: 'var(--surface-2)',
-              border: '1px solid var(--border)',
-              userSelect: 'none',
-            }}
-          >
-            <input
-              type="checkbox"
-              role="switch"
-              checked={conv.agentReadable}
-              disabled={toggleAgentMutation.isPending}
-              onChange={(e) => toggleAgentMutation.mutate(e.target.checked)}
-              style={{ width: 16, height: 16, minHeight: 16, margin: 0 }}
-            />
-            <span>Cho agent đọc hội thoại này</span>
-          </label>
-        )}
-
         {conv.kind === 'group' && (
-          <div className="row" style={{ gap: 6 }}>
+          <div className="chat-head-actions">
             {canManageGroup && (
               <button
                 type="button"
                 className="btn btn-sm"
+                aria-label="Thêm trợ lý"
+                title="Thêm trợ lý"
                 onClick={() => setAgentsModalOpen(true)}
               >
                 <Icon name="bot" />
-                <span>Thêm trợ lý</span>
+                <span className="chat-head-btn-label">Thêm trợ lý</span>
               </button>
             )}
             <button
               type="button"
               className="btn btn-sm"
+              aria-label="Cài đặt nhóm"
+              title="Cài đặt nhóm"
               onClick={() => setSettingsModalOpen(true)}
             >
               <Icon name="users" />
-              <span>Cài đặt nhóm</span>
+              <span className="chat-head-btn-label">Cài đặt nhóm</span>
             </button>
           </div>
         )}
       </header>
+
+      {conv.kind === 'direct' && (
+        <div className="chat-agent-switch-row">
+          <label className="switch">
+            <input
+              type="checkbox"
+              role="switch"
+              checked={conv.agentReadable}
+              disabled={toggleAgentMutation.isPending}
+              aria-describedby={`${conv.id}-agent-hint`}
+              onChange={(e) => toggleAgentMutation.mutate(e.target.checked)}
+            />
+            <span className="switch-track" aria-hidden="true" />
+            <span className="switch-label">Cho agent đọc hội thoại này</span>
+          </label>
+          <span id={`${conv.id}-agent-hint`} className="small muted chat-agent-switch-hint">
+            Agent mà hai bạn đã kết nối được đọc tin ở đây để hỗ trợ.
+          </span>
+        </div>
+      )}
+      {toggleAgentMutation.error && (
+        <div style={{ padding: '0 14px' }}>
+          <FormError error={toggleAgentMutation.error} />
+        </div>
+      )}
 
       {isTopicMode ? (
         <ChatTopicList conversation={conv} onOpenThread={(rootId) => onOpenThread(rootId)} />
@@ -761,17 +821,6 @@ function ChatConversationPane({
           focusMessageId={threadRootId ? undefined : messageId}
         />
       )}
-
-      <div
-        className="small muted"
-        style={{
-          padding: '6px 14px',
-          borderTop: '1px solid var(--border)',
-          background: 'var(--surface-2)',
-        }}
-      >
-        Tin nhắn có thể được agent mà thành viên đã kết nối đọc.
-      </div>
 
       {conv.kind === 'group' && (
         <>
@@ -832,14 +881,12 @@ function CreateGroupDialog({
   const directory = useApi<DirectoryUser[]>(open ? '/directory' : null);
 
   const [title, setTitle] = useState('');
-  const [search, setSearch] = useState('');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [parentId, setParentId] = useState('');
 
   useEffect(() => {
     if (!open) {
       setTitle('');
-      setSearch('');
       setSelectedIds([]);
       setParentId('');
     } else {
@@ -880,21 +927,11 @@ function CreateGroupDialog({
   });
 
   const errors = fieldErrors(createGroupMutation.error);
-  const candidates = useMemo(() => {
-    const users = (directory.data ?? []).filter((u) => u.id !== actor.id);
-    const q = foldDiacritics(search.trim());
-    return q ? users.filter((u) => foldDiacritics(u.name).includes(q)) : users;
-  }, [directory.data, actor.id, search]);
-
-  const toggleMember = (userId: string) => {
-    setSelectedIds((prev) =>
-      prev.includes(userId)
-        ? prev.filter((id) => id !== userId)
-        : prev.length < 50
-          ? [...prev, userId]
-          : prev,
-    );
-  };
+  const candidates = useMemo(
+    () => (directory.data ?? []).filter((u) => u.id !== actor.id).map(userOption),
+    [directory.data, actor.id],
+  );
+  const parentChoices = useMemo(() => parents.map((p) => ({ value: p.id, label: p.title })), [parents]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -949,55 +986,39 @@ function CreateGroupDialog({
             hint="Để trống nếu là nhóm thường. Nhóm nhỏ mời được người ở phòng ban khác."
             htmlFor={`${formId}-parent`}
           >
-            <select id={`${formId}-parent`} value={parentId} onChange={(e) => setParentId(e.target.value)}>
-              <option value="">— Nhóm thường —</option>
-              {parents.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.title}
-                </option>
-              ))}
-            </select>
+            <Combobox
+              id={`${formId}-parent`}
+              value={parentId}
+              onChange={setParentId}
+              options={parentChoices}
+              placeholder="Nhóm thường"
+              clearLabel="Bỏ phòng ban, tạo nhóm thường"
+              invalid={Boolean(errors.parentConversationId)}
+            />
           </Field>
         )}
 
         <Field
-          label={`Thành viên (${selectedIds.length} đã chọn)`}
+          label={`Thành viên (${selectedIds.length}/${GROUP_MEMBER_PICK_MAX} đã chọn)`}
           required
           error={errors.memberUserIds}
-          htmlFor={`${formId}-search`}
+          htmlFor={`${formId}-members`}
         >
-          <input
-            id={`${formId}-search`}
-            type="search"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Tìm đồng nghiệp theo tên…"
-          />
+          {directory.isLoading ? (
+            <Loading rows={2} />
+          ) : (
+            <MultiCombobox
+              id={`${formId}-members`}
+              values={selectedIds}
+              onChange={setSelectedIds}
+              options={candidates}
+              max={GROUP_MEMBER_PICK_MAX}
+              placeholder="Tìm đồng nghiệp theo tên…"
+              emptyText="Không tìm thấy đồng nghiệp phù hợp."
+              tagListLabel="Thành viên đã chọn"
+            />
+          )}
         </Field>
-
-        {directory.isLoading ? (
-          <Loading rows={3} />
-        ) : (
-          <div className="chips" style={{ maxHeight: 220, overflowY: 'auto' }}>
-            {candidates.map((u) => {
-              const pressed = selectedIds.includes(u.id);
-              return (
-                <button
-                  key={u.id}
-                  type="button"
-                  className="chip"
-                  aria-pressed={pressed}
-                  onClick={() => toggleMember(u.id)}
-                >
-                  {u.name} · {roleLabel(u.role)}
-                </button>
-              );
-            })}
-            {candidates.length === 0 && (
-              <span className="small muted">Không tìm thấy đồng nghiệp phù hợp.</span>
-            )}
-          </div>
-        )}
       </form>
     </Modal>
   );

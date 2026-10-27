@@ -1,11 +1,13 @@
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useRef, useState, type RefObject } from 'react';
 import {
   ACTIVITY_TYPES, LOST_REASONS, activityLabel, allowedTransitions, stageLabel,
   type ChangeStageInput, type CompleteTaskInput, type DecideApprovalInput, type LogActivityInput, type LostReasonCode, type StageCode,
 } from '@abm/contracts';
 import { useCommand } from '../api';
-import { fmtDateTime, fmtMoney, fromLocalInput, parseWonAmount, toLocalInput } from '../format';
+import { quickDueValue } from '../date-time';
+import { fmtDateTime, fmtMoney, fromLocalInput, parseWonAmount } from '../format';
 import type { ApprovalItem, Member } from '../types';
+import { DateTimeField } from './date-time-field';
 import { Icon, type IconName } from './icons';
 import { ACTIVITY_MAX_CHARS, ACTIVITY_MAX_LINES, clampActivityText } from './note-format';
 import { Alert, Field, FormError, Modal, fieldErrors, useToast } from './ui';
@@ -16,42 +18,27 @@ export { ACTIVITY_MAX_CHARS, ACTIVITY_MAX_LINES, clampActivityText };
 
 export interface NextActionDraft { title: string; due: string }
 
-const at = (days: number, hour: number, minute = 0) => {
-  const d = new Date(Date.now() + 7 * 3600_000);
-  d.setUTCDate(d.getUTCDate() + days);
-  d.setUTCHours(hour, minute, 0, 0);
-  return toLocalInput(new Date(d.getTime() - 7 * 3600_000));
-};
-const QUICK_DUE = [
-  { label: 'Hôm nay 17:00', value: () => at(0, 17) },
-  { label: 'Sáng mai 9:00', value: () => at(1, 9) },
-  { label: '+3 ngày', value: () => at(3, 9) },
-  { label: '+1 tuần', value: () => at(7, 9) },
-];
+export const emptyNextAction = (title = ''): NextActionDraft => ({ title, due: quickDueValue(1, 9) });
+// An empty due is sent as is, so the server's field error shows under the field instead of a crash here.
+export const nextActionPayload = (draft: NextActionDraft) => ({ title: draft.title.trim(), dueAt: draft.due ? fromLocalInput(draft.due) : '' });
 
-export const emptyNextAction = (title = ''): NextActionDraft => ({ title, due: at(1, 9) });
-export const nextActionPayload = (draft: NextActionDraft) => ({ title: draft.title.trim(), dueAt: fromLocalInput(draft.due) });
-
-export function NextActionFields({ value, onChange, errors, legend = 'Next Action tiếp theo' }: {
+export function NextActionFields({ value, onChange, errors, legend = 'Việc tiếp theo', titleRef }: {
   value: NextActionDraft; onChange: (v: NextActionDraft) => void; errors?: Record<string, string>; legend?: string;
+  /** Lets the parent move focus to "Việc cần làm" when it is missing. */
+  titleRef?: RefObject<HTMLInputElement | null>;
 }) {
   const id = useId();
   return (
     <fieldset className="stack-sm" style={{ border: 0, padding: 0, margin: 0 }}>
       <legend className="field-label" style={{ marginBottom: 6 }}>{legend} <span className="req" style={{ color: 'var(--danger)' }}>*</span></legend>
       <Field label="Việc cần làm" htmlFor={`${id}-t`} error={errors?.['nextAction.title']}>
-        <input id={`${id}-t`} type="text" value={value.title} placeholder="VD: Gọi lại xác nhận lịch demo" required
+        <input ref={titleRef} id={`${id}-t`} type="text" value={value.title} placeholder="VD: Gọi lại xác nhận lịch demo" required
           aria-invalid={Boolean(errors?.['nextAction.title'])} onChange={(e) => onChange({ ...value, title: e.target.value })} />
       </Field>
       <Field label="Hạn (giờ Việt Nam)" htmlFor={`${id}-d`} error={errors?.['nextAction.dueAt']}>
-        <input id={`${id}-d`} type="datetime-local" value={value.due} required onChange={(e) => onChange({ ...value, due: e.target.value })} />
+        <DateTimeField id={`${id}-d`} value={value.due} required invalid={Boolean(errors?.['nextAction.dueAt'])}
+          onChange={(due) => onChange({ ...value, due })} quickPicks />
       </Field>
-      <div className="chips" aria-label="Chọn nhanh hạn">
-        {QUICK_DUE.map((q) => {
-          const v = q.value();
-          return <button type="button" key={q.label} className="chip" aria-pressed={value.due === v} onClick={() => onChange({ ...value, due: v })}>{q.label}</button>;
-        })}
-      </div>
     </fieldset>
   );
 }
@@ -228,25 +215,42 @@ export function CompleteTaskDialog({ open, onClose, task, requiresNext, leadCode
   const [addNext, setAddNext] = useState(requiresNext);
   const mutation = useCommand<CompleteTaskInput>('completeTask');
   const toast = useToast();
-  const errors = fieldErrors(mutation.error);
-  useEffect(() => { if (open) { setOutcome(''); setNext(emptyNextAction()); setAddNext(requiresNext); mutation.reset(); } }, [open]);
-  const submit = () => mutation.mutate(
-    { taskId: task.id, expectedVersion: task.version, outcome: outcome || undefined, nextAction: addNext ? nextActionPayload(next) : undefined },
-    { onSuccess: () => { toast(`Đã hoàn thành: ${task.title}`); onClose(); } },
-  );
+  // A missing next-action title is caught here, next to the field, before anything is sent.
+  const [missingTitle, setMissingTitle] = useState(false);
+  const titleRef = useRef<HTMLInputElement>(null);
+  const serverErrors = fieldErrors(mutation.error);
+  const errors = missingTitle && addNext
+    ? { ...serverErrors, 'nextAction.title': 'Nhập việc cần làm tiếp theo' }
+    : serverErrors;
+  useEffect(() => { if (open) { setOutcome(''); setNext(emptyNextAction()); setAddNext(requiresNext); setMissingTitle(false); mutation.reset(); } }, [open]);
+  const submit = () => {
+    if (addNext && !next.title.trim()) {
+      setMissingTitle(true);
+      titleRef.current?.focus();
+      return;
+    }
+    mutation.mutate(
+      { taskId: task.id, expectedVersion: task.version, outcome: outcome || undefined, nextAction: addNext ? nextActionPayload(next) : undefined },
+      { onSuccess: () => { toast(`Đã hoàn thành: ${task.title}`); onClose(); } },
+    );
+  };
+  const changeNext = (value: NextActionDraft) => {
+    setNext(value);
+    if (value.title.trim()) setMissingTitle(false);
+  };
   return (
     <Modal open={open} onClose={onClose} title="Hoàn thành việc" footer={<>
       <button className="btn" onClick={onClose}>Hủy</button>
-      <button className="btn btn-primary" disabled={mutation.isPending || (addNext && !next.title.trim())} onClick={submit}>{mutation.isPending ? 'Đang lưu…' : 'Hoàn thành'}</button>
+      <button className="btn btn-primary" disabled={mutation.isPending} onClick={submit}>{mutation.isPending ? 'Đang lưu…' : 'Hoàn thành'}</button>
     </>}>
       <div><div className="muted small">{leadCode}</div><strong>{task.title}</strong></div>
       <Field label="Kết quả" htmlFor="task-outcome">
         <textarea id="task-outcome" value={outcome} onChange={(e) => setOutcome(e.target.value)} placeholder="Đã làm gì, khách phản hồi ra sao…" />
       </Field>
       {requiresNext
-        ? <Alert tone="info">Đây là Next Action của lead đang mở. Lead luôn phải có Owner + Next Action + Deadline (QĐ13), nên cần đặt việc tiếp theo.</Alert>
+        ? <Alert tone="info">Lead đang mở luôn cần một việc tiếp theo có hạn.</Alert>
         : <label className="row"><input type="checkbox" checked={addNext} onChange={(e) => setAddNext(e.target.checked)} /> Tạo việc tiếp theo</label>}
-      {addNext && <NextActionFields value={next} onChange={setNext} errors={errors} />}
+      {addNext && <NextActionFields value={next} onChange={changeNext} errors={errors} titleRef={titleRef} />}
       <FormError error={mutation.error && !errors['nextAction.title'] ? mutation.error : null} />
     </Modal>
   );

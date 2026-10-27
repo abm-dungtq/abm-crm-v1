@@ -12,6 +12,7 @@ import { useApi, useCommand } from '../api';
 import {
   Alert,
   Badge,
+  ConfirmDialog,
   Empty,
   ErrorState,
   Field,
@@ -49,6 +50,7 @@ export function LearnerAccountsPage() {
   const [classId, setClassId] = useState('');
   const [passwordState, setPasswordState] = useState<'' | 'default' | 'changed'>('');
   const [accessTarget, setAccessTarget] = useState<LearnerAccountRow | null>(null);
+  const [resetTarget, setResetTarget] = useState<LearnerAccountRow | null>(null);
 
   const settings = useApi<LearnerAccountSettings>(canRead ? '/lms/settings' : null);
   const programs = useApi<LmsProgramOption[]>(canRead ? '/lms/programs' : null);
@@ -74,14 +76,15 @@ export function LearnerAccountsPage() {
   const classOptions = (programs.data ?? []).filter((p) => p.classId);
 
   const handleResetPassword = (acc: LearnerAccountRow) => {
-    if (!window.confirm('Đưa tài khoản về mật khẩu mặc định?')) return;
     resetPwCmd.mutate(
       { accountId: acc.id, version: acc.version },
       {
         onSuccess: () => {
           toast('Đã đặt lại mật khẩu về mặc định');
+          setResetTarget(null);
           void accounts.refetch();
         },
+        onError: () => setResetTarget(null),
       },
     );
   };
@@ -259,7 +262,7 @@ export function LearnerAccountsPage() {
                                   type="button"
                                   className="btn btn-sm"
                                   disabled={resetPwCmd.isPending}
-                                  onClick={() => handleResetPassword(acc)}
+                                  onClick={() => setResetTarget(acc)}
                                 >
                                   Đặt lại MK
                                 </button>
@@ -302,6 +305,21 @@ export function LearnerAccountsPage() {
             void accounts.refetch();
           }}
         />
+      )}
+
+      {resetTarget && canWrite && (
+        <ConfirmDialog
+          open
+          title="Đặt lại mật khẩu?"
+          confirmLabel="Đặt lại mật khẩu"
+          tone="primary"
+          pending={resetPwCmd.isPending}
+          onConfirm={() => handleResetPassword(resetTarget)}
+          onCancel={() => setResetTarget(null)}
+        >
+          Đưa tài khoản của <strong>{resetTarget.displayName}</strong> về mật khẩu mặc định? Học viên sẽ đăng nhập
+          bằng mật khẩu mặc định cho tới khi tự đổi.
+        </ConfirmDialog>
       )}
     </>
   );

@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest';
 import { canViewAudit } from '../src/web/actor-context';
-import { parseWonAmount } from '../src/web/format';
+import { fmtDueRelative, parseWonAmount } from '../src/web/format';
 import { leadListPath, accountListPath } from '../src/web/list-query';
 
 test('lead filters are sent to the API rather than applied to a limited response', () => {
@@ -26,4 +26,14 @@ test('Won amounts accept comma thousands and reject decimal or malformed amounts
 test('audit visibility excludes Sale and includes the roles allowed by the API', () => {
   expect(canViewAudit('sale')).toBe(false);
   for (const role of ['leader', 'head', 'director', 'admin'] as const) expect(canViewAudit(role)).toBe(true);
+});
+
+test('an overdue task reads as days late, or the missed time when it was due earlier today', () => {
+  // 27/10/2026 14:00 in Vietnam.
+  const now = new Date('2026-10-27T07:00:00Z');
+  expect(fmtDueRelative('2026-10-05T02:00:00Z', now)).toBe('Quá 22 ngày');
+  expect(fmtDueRelative('2026-10-26T16:30:00Z', now)).toBe('Quá 1 ngày');
+  expect(fmtDueRelative('2026-10-27T02:00:00Z', now)).toBe('Quá hạn 09:00');
+  expect(fmtDueRelative(null, now)).toBe('—');
+  expect(fmtDueRelative('not a date', now)).toBe('—');
 });

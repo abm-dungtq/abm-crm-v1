@@ -7,6 +7,7 @@ import {
 } from '@abm/contracts';
 import { useApi, useCommand } from '../api';
 import { ClassOnlineProgram } from '../components/class-online-program';
+import { DateTimeField } from '../components/date-time-field';
 import { Badge, Empty, ErrorState, Field, FormError, Loading, useToast, type Tone } from '../components/ui';
 import { fmtDate, fmtDateTime, fromLocalInput } from '../format';
 import type { Member } from '../types';
@@ -155,7 +156,7 @@ function Sessions({ data }: { data: ClassPayload }) {
       )}
       <form className="card-body stack" style={{ borderTop: '1px solid var(--border)' }} onSubmit={(e) => { e.preventDefault(); submit(); }}>
         <div className="grid-2">
-          <Field label="Bắt đầu" htmlFor="ss-start" required><input id="ss-start" type="datetime-local" value={form.startsAt} onChange={(e) => setForm({ ...form, startsAt: e.target.value })} required /></Field>
+          <Field label="Bắt đầu" htmlFor="ss-start" required><DateTimeField id="ss-start" value={form.startsAt} onChange={(startsAt) => setForm({ ...form, startsAt })} required /></Field>
           <Field label="Phút" htmlFor="ss-min" required><input id="ss-min" type="number" min={1} max={1440} value={form.durationMinutes} onChange={(e) => setForm({ ...form, durationMinutes: e.target.value })} required /></Field>
         </div>
         <Field label="Loại" htmlFor="ss-kind">
@@ -189,7 +190,7 @@ function MakeupLine({ absence, studentName }: { absence: AbsenceRow; studentName
   return (
     <form className="row-wrap" onSubmit={(e) => { e.preventDefault(); submit(); }}>
       <span className="small">{studentName} · {attendanceStatusLabel(absence.status)}</span>
-      <input type="datetime-local" aria-label={`Giờ học bù của ${studentName}`} value={startsAt} onChange={(e) => setStartsAt(e.target.value)} required />
+      <DateTimeField ariaLabel={`Giờ học bù của ${studentName}`} value={startsAt} onChange={setStartsAt} required />
       <input type="number" aria-label={`Phút học bù của ${studentName}`} min={1} max={1440} value={durationMinutes} onChange={(e) => setDurationMinutes(e.target.value)} required />
       <button className="btn btn-sm" disabled={create.isPending}>Tạo buổi học bù</button>
       <FormError error={create.error} />

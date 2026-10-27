@@ -12,10 +12,11 @@ import type {
   ChatThreadSummary,
 } from '../types';
 import { ChatComposer, useAgentThinking, useDebouncedMarkRead } from './chat-composer';
-import { ChatMessageItem, scrollToMessage } from './chat-message-item';
+import { buildThreadFlow } from '../chat-flow';
+import { ChatFlowSeparator, ChatMessageItem, scrollToMessage } from './chat-message-item';
 import { useTaskDraftRequest } from './chat-task-cards';
 import { Icon } from './icons';
-import { ErrorState, FormError, Loading } from './ui';
+import { ConfirmDialog, ErrorState, FormError, Loading, OverflowMenu, type OverflowMenuItem } from './ui';
 
 const HIGHLIGHT_MS = 2000;
 
@@ -80,6 +81,8 @@ export function ChatThreadPanel({
     const seen = new Set(stored.map((m) => m.id));
     return [...stored, ...optimistic.filter((m) => !seen.has(m.id))].sort(byTime);
   }, [stored, optimistic]);
+  const root = data?.root;
+  const threadFlow = useMemo(() => (root ? buildThreadFlow(root, replies) : null), [root, replies]);
   const hasMore = older ? older.hasMore : (data?.hasMore ?? false);
   const newestReply = replies.at(-1);
   const newestStoredAt = stored.at(-1)?.createdAt ?? data?.root.createdAt ?? null;
@@ -184,19 +187,37 @@ export function ChatThreadPanel({
   const showCloseTopic = conv ? canCloseTopic(thread, rootAuthorUserId, conv, actor) : false;
   const taskDraftRequest = useTaskDraftRequest();
   const canMakeTask = Boolean(data && !data.root.deleted && (conv?.kind === 'group' || conv?.kind === 'direct'));
-  const toggleTopicClosed = () => {
-    const nextClosed = !closed;
-    const question = nextClosed
-      ? 'Đóng chủ đề này? Mọi người vẫn đọc được nhưng không trả lời thêm.'
-      : 'Mở lại chủ đề này để mọi người trả lời tiếp?';
-    if (!window.confirm(question)) return;
-    closeTopicMutation.mutate(nextClosed);
-  };
+  const [confirmTopicClose, setConfirmTopicClose] = useState(false);
+  const isTopic = thread?.isTopic ?? conversationMode === 'topic';
+  const kindLabel = isTopic ? 'Chủ đề' : 'Chuỗi';
+  const menuItems: OverflowMenuItem[] = data
+    ? [
+        {
+          label: following ? 'Bỏ theo dõi' : 'Theo dõi',
+          disabled: subscriptionMutation.isPending,
+          onSelect: () => subscriptionMutation.mutate(following ? 'none' : 'following'),
+        },
+        {
+          label: following && muted ? 'Bật thông báo' : 'Tắt thông báo',
+          disabled: subscriptionMutation.isPending,
+          onSelect: () => subscriptionMutation.mutate(following && muted ? 'following' : 'muted'),
+        },
+        ...(showCloseTopic
+          ? [{
+              label: closed ? 'Mở lại chủ đề' : 'Đóng chủ đề',
+              disabled: closeTopicMutation.isPending,
+              onSelect: () => setConfirmTopicClose(true),
+            }]
+          : []),
+      ]
+    : [];
 
-  const renderMessage = (m: ChatMessage) => (
+  const renderMessage = (m: ChatMessage, continued = false, endsRun = true) => (
     <ChatMessageItem
       key={m.id}
       message={m}
+      continued={continued}
+      endsRun={endsRun}
       context="thread"
       conversationKind={conversationKind}
       conversationMode={conversationMode}
@@ -209,7 +230,11 @@ export function ChatThreadPanel({
   );
 
   return (
-    <aside className="chat-thread-panel" role="complementary" aria-label="Chuỗi trả lời">
+    <aside
+      className="chat-thread-panel"
+      role="complementary"
+      aria-label={isTopic ? 'Chủ đề và trả lời' : 'Chuỗi trả lời'}
+    >
       <header className="chat-thread-panel-head">
         {isPhone && (
           <button
@@ -222,51 +247,29 @@ export function ChatThreadPanel({
             <Icon name="arrow" style={{ transform: 'rotate(180deg)' }} />
           </button>
         )}
-        <div className="truncate" style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontWeight: 600 }}>{thread?.isTopic ? 'Chủ đề' : 'Chuỗi'}</div>
+        <div className="chat-panel-title">
+          <div className="chat-panel-kind">{kindLabel}</div>
           <div className="small muted truncate" title={conversationTitle}>
             {conversationTitle}
           </div>
         </div>
-        {data && (
-          <>
-            <button
-              type="button"
-              className="btn btn-sm"
-              disabled={subscriptionMutation.isPending}
-              onClick={() => subscriptionMutation.mutate(following ? 'none' : 'following')}
-            >
-              {following ? 'Bỏ theo dõi' : 'Theo dõi'}
-            </button>
-            <button
-              type="button"
-              className="btn btn-sm"
-              disabled={subscriptionMutation.isPending}
-              onClick={() => subscriptionMutation.mutate(following && muted ? 'following' : 'muted')}
-            >
-              {following && muted ? 'Bật thông báo' : 'Tắt thông báo'}
-            </button>
-            {showCloseTopic && (
-              <button
-                type="button"
-                className="btn btn-sm"
-                disabled={closeTopicMutation.isPending}
-                onClick={toggleTopicClosed}
-              >
-                {closed ? 'Mở lại' : 'Đóng chủ đề'}
-              </button>
-            )}
-            {canMakeTask && (
-              <button
-                type="button"
-                className="btn btn-sm"
-                disabled={taskDraftRequest.pending}
-                onClick={() => taskDraftRequest.requestTaskDraft({ conversationId, messageId: rootId, scope: 'thread' })}
-              >
-                Tạo việc từ chuỗi
-              </button>
-            )}
-          </>
+        {data && canMakeTask && (
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={taskDraftRequest.pending}
+            aria-label={isTopic ? 'Tạo việc từ chủ đề' : 'Tạo việc từ chuỗi'}
+            title={isTopic ? 'Tạo việc từ chủ đề' : 'Tạo việc từ chuỗi'}
+            onClick={() =>
+              taskDraftRequest.requestTaskDraft({ conversationId, messageId: rootId, scope: 'thread', excerpt: data.root.body })
+            }
+          >
+            <Icon name="check" />
+            <span>Tạo việc</span>
+          </button>
+        )}
+        {menuItems.length > 0 && (
+          <OverflowMenu label={isTopic ? 'Thao tác với chủ đề' : 'Thao tác với chuỗi'} items={menuItems} />
         )}
         {taskDraftRequest.dialog}
         {!isPhone && (
@@ -274,13 +277,29 @@ export function ChatThreadPanel({
             type="button"
             className="btn btn-ghost btn-sm icon-btn"
             onClick={onClose}
-            aria-label="Đóng chuỗi"
-            title="Đóng chuỗi"
+            aria-label={isTopic ? 'Ẩn khung chủ đề' : 'Ẩn khung chuỗi'}
+            title={isTopic ? 'Ẩn khung chủ đề' : 'Ẩn khung chuỗi'}
           >
             <Icon name="close" />
           </button>
         )}
       </header>
+
+      {confirmTopicClose && (
+        <ConfirmDialog
+          open
+          tone="primary"
+          title={closed ? 'Mở lại chủ đề?' : 'Đóng chủ đề?'}
+          confirmLabel={closed ? 'Mở lại chủ đề' : 'Đóng chủ đề'}
+          pending={closeTopicMutation.isPending}
+          onCancel={() => setConfirmTopicClose(false)}
+          onConfirm={() => closeTopicMutation.mutate(!closed, { onSettled: () => setConfirmTopicClose(false) })}
+        >
+          {closed
+            ? 'Mọi người sẽ trả lời tiếp được trong chủ đề này.'
+            : 'Mọi người vẫn đọc được chủ đề nhưng không trả lời thêm. Bạn có thể mở lại sau.'}
+        </ConfirmDialog>
+      )}
 
       {threadQuery.isLoading ? (
         <div style={{ padding: 12 }}>
@@ -295,7 +314,9 @@ export function ChatThreadPanel({
           <div ref={bodyRef} className="inbox-messages" aria-label="Tin gốc và các trả lời">
             <FormError error={subscriptionMutation.error ?? closeTopicMutation.error ?? loadOlderMutation.error} />
             <ol className="msg-list">
-              {renderMessage(data.root)}
+              {(threadFlow?.rootItems ?? []).map((item) =>
+                item.kind === 'message' ? renderMessage(item.message) : <ChatFlowSeparator key={item.key} item={item} />,
+              )}
             </ol>
             <div className="chat-thread-divider small muted">
               {thread && thread.replyCount > 0 ? `${thread.replyCount} trả lời` : 'Chưa có trả lời'}
@@ -312,7 +333,15 @@ export function ChatThreadPanel({
                 </button>
               </div>
             )}
-            <ol className="msg-list">{replies.map(renderMessage)}</ol>
+            <ol className="msg-list">
+              {(threadFlow?.replyItems ?? []).map((item) =>
+                item.kind === 'message' ? (
+                  renderMessage(item.message, item.continued, item.endsRun)
+                ) : (
+                  <ChatFlowSeparator key={item.key} item={item} />
+                ),
+              )}
+            </ol>
           </div>
 
           {closed && (
@@ -333,6 +362,7 @@ export function ChatThreadPanel({
             thinking={agentThinking.thinking}
             onAgentAsked={agentThinking.start}
             disabled={closed}
+            placeholder={isTopic ? 'Trả lời chủ đề…' : 'Trả lời trong chuỗi…'}
             autoFocus
             onPending={onPending}
             onSent={onSent}

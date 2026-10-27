@@ -1,5 +1,14 @@
 import { describe, expect, test } from 'vitest';
-import { chatLink, formatThreadTime, parseChatSearch, replierInitials } from '../src/web/chat-links';
+import {
+  chatDraftKey,
+  chatLink,
+  clearChatDrafts,
+  formatThreadTime,
+  parseChatSearch,
+  readChatDraft,
+  replierInitials,
+  writeChatDraft,
+} from '../src/web/chat-links';
 import {
   buildChatTree,
   canCloseTopic,
@@ -29,6 +38,10 @@ describe('chatLink', () => {
     expect(Object.fromEntries(both.searchParams)).toEqual({ thread: 'r', message: 'm' });
   });
 
+  test('keeps the followed-threads list open when asked', () => {
+    expect(chatLink({ conversationId: 'g-1', threadRootId: 'r', list: 'threads' })).toBe('/chat/g-1?thread=r&list=threads');
+  });
+
   test('ignores empty or null targets', () => {
     expect(chatLink({ conversationId: 'g-1', threadRootId: '', messageId: null })).toBe('/chat/g-1');
   });
@@ -44,6 +57,74 @@ describe('parseChatSearch', () => {
     expect(parseChatSearch({ thread: 42, message: ['m'] })).toEqual({});
     expect(parseChatSearch({ thread: 'x'.repeat(65), message: 'y'.repeat(64) })).toEqual({ message: 'y'.repeat(64) });
     expect(parseChatSearch(undefined)).toEqual({});
+  });
+
+  test('keeps the followed-threads list only for the exact value "threads"', () => {
+    expect(parseChatSearch({ list: 'threads' })).toEqual({ list: 'threads' });
+    expect(parseChatSearch({ list: 'all' })).toEqual({});
+    expect(parseChatSearch({ list: 1 })).toEqual({});
+  });
+});
+
+describe('composer drafts', () => {
+  const memoryStore = () => {
+    const map = new Map<string, string>();
+    return {
+      map,
+      getItem: (k: string) => map.get(k) ?? null,
+      setItem: (k: string, v: string) => void map.set(k, v),
+      removeItem: (k: string) => void map.delete(k),
+    };
+  };
+
+  test('keeps one draft per person, per conversation main flow and per thread', () => {
+    expect(chatDraftKey('u-lan', 'g-1')).toBe('chat-draft:u-lan:g-1:main');
+    expect(chatDraftKey('u-lan', 'g-1', 'm-root')).toBe('chat-draft:u-lan:g-1:m-root');
+    expect(chatDraftKey('u-lan', 'g-1', null)).toBe('chat-draft:u-lan:g-1:main');
+    const store = memoryStore();
+    writeChatDraft(chatDraftKey('u-lan', 'g-1'), 'Chào cả nhóm', store);
+    writeChatDraft(chatDraftKey('u-lan', 'g-1', 'm-root'), 'Trả lời chuỗi', store);
+    expect(readChatDraft(chatDraftKey('u-lan', 'g-1'), store)).toBe('Chào cả nhóm');
+    expect(readChatDraft(chatDraftKey('u-lan', 'g-1', 'm-root'), store)).toBe('Trả lời chuỗi');
+    expect(readChatDraft(chatDraftKey('u-lan', 'g-2'), store)).toBe('');
+    // The next person on the same device sees none of it.
+    expect(readChatDraft(chatDraftKey('u-huy', 'g-1'), store)).toBe('');
+  });
+
+  test('clearing drafts removes every chat draft and nothing else', () => {
+    const map = new Map<string, string>([
+      ['chat-draft:u-lan:g-1:main', 'a'],
+      ['chat-draft:u-lan:g-1:m-root', 'b'],
+      ['chat-draft:u-huy:g-2:main', 'c'],
+      ['other-key', 'd'],
+    ]);
+    const store = {
+      get length() { return map.size; },
+      key: (i: number) => [...map.keys()][i] ?? null,
+      removeItem: (k: string) => void map.delete(k),
+    };
+    clearChatDrafts(store);
+    expect([...map.keys()]).toEqual(['other-key']);
+    expect(() => clearChatDrafts({ length: 1, key: () => { throw new Error('blocked'); }, removeItem: () => {} })).not.toThrow();
+    expect(() => clearChatDrafts(null)).not.toThrow();
+  });
+
+  test('a blank draft (after sending) removes the saved one', () => {
+    const store = memoryStore();
+    writeChatDraft('k', 'Nháp', store);
+    writeChatDraft('k', '   ', store);
+    expect(store.map.has('k')).toBe(false);
+  });
+
+  test('a storage that throws never breaks the composer', () => {
+    const broken = {
+      getItem: () => { throw new Error('blocked'); },
+      setItem: () => { throw new Error('quota'); },
+      removeItem: () => { throw new Error('blocked'); },
+    };
+    expect(readChatDraft('k', broken)).toBe('');
+    expect(() => writeChatDraft('k', 'Nháp', broken)).not.toThrow();
+    expect(readChatDraft(null, broken)).toBe('');
   });
 });
 
@@ -89,6 +170,7 @@ function summary(overrides: Partial<ChatConversationSummary> & { id: string }): 
     parentConversationId: null,
     parentTitle: null,
     system: false,
+    lastReadAt: null,
     ...overrides,
   };
 }

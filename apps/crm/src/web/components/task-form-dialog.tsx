@@ -2,9 +2,13 @@ import { useEffect, useId, useState } from 'react';
 import type { CreateTaskInput } from '@abm/contracts';
 import { useActor } from '../actor-context';
 import { useApi, useCommand } from '../api';
-import { unresolvedNamesHint, type TaskFormInitialValues } from '../chat-task-draft';
-import { fromLocalInput, toLocalInput } from '../format';
+import { taskSourceSummary, unresolvedNamesHint, type TaskFormInitialValues } from '../chat-task-draft';
+import { quickDueValue } from '../date-time';
+import { fromLocalInput } from '../format';
 import type { DirectoryUser, LeadItem, TaskPriority } from '../types';
+import { Combobox, MultiCombobox, type ComboOption } from './combobox';
+import { DateTimeField } from './date-time-field';
+import { Icon } from './icons';
 import { roleLabel } from './layout';
 import { Badge, Field, FormError, Modal, SegmentedControl, fieldErrors, useDebounced, useToast, type Tone } from './ui';
 
@@ -18,7 +22,22 @@ export const PRIORITY_OPTIONS: { code: TaskPriority; label: string; tone: Tone }
 export const priorityLabel = (p: TaskPriority | string) =>
   PRIORITY_OPTIONS.find((o) => o.code === p)?.label ?? p;
 
+/** The four priorities side by side: one press to pick, every choice visible. */
+export function PriorityControl({ value, onChange }: { value: TaskPriority; onChange: (value: TaskPriority) => void }) {
+  return (
+    <SegmentedControl
+      ariaLabel="Độ ưu tiên"
+      className="seg-fill"
+      value={value}
+      onChange={onChange}
+      options={PRIORITY_OPTIONS.map((p) => ({ value: p.code, label: p.label }))}
+    />
+  );
+}
+
+/** Nothing for "Bình thường": a badge on almost every task carries no information. */
 export function PriorityBadge({ priority }: { priority: TaskPriority | string }) {
+  if (priority === 'normal') return null;
   const opt = PRIORITY_OPTIONS.find((o) => o.code === priority);
   return <Badge tone={opt?.tone ?? 'neutral'}>{opt?.label ?? priority}</Badge>;
 }
@@ -35,19 +54,14 @@ export function TaskStatusBadge({ status }: { status: string }) {
   return <Badge tone={meta.tone} dot>{meta.label}</Badge>;
 }
 
-const at = (days: number, hour: number, minute = 0) => {
-  const d = new Date(Date.now() + 7 * 3600_000);
-  d.setUTCDate(d.getUTCDate() + days);
-  d.setUTCHours(hour, minute, 0, 0);
-  return toLocalInput(new Date(d.getTime() - 7 * 3600_000));
-};
+/** A person as a picker option: the name, with role and team on the second line. */
+export const userOption = (u: DirectoryUser): ComboOption => ({
+  value: u.id,
+  label: u.name,
+  hint: `${roleLabel(u.role)}${u.teamName ? ` · ${u.teamName}` : ''}`,
+});
 
-const QUICK_DUE = [
-  { label: 'Hôm nay 17:00', value: () => at(0, 17) },
-  { label: 'Sáng mai 9:00', value: () => at(1, 9) },
-  { label: '+3 ngày', value: () => at(3, 9) },
-  { label: '+1 tuần', value: () => at(7, 9) },
-];
+const leadLabel = (l: LeadItem) => `${l.code} · ${l.contactName}${l.account?.name ? ` · ${l.account.name}` : ''}`;
 
 const CRM_ROLES = ['sale', 'leader', 'head', 'director', 'admin'];
 
@@ -70,11 +84,14 @@ export function TaskFormDialog({
   const source = parentTask ? undefined : initialValues?.source;
   const draftRef = source ? initialValues?.draft : undefined;
   const unresolvedHint = unresolvedNamesHint(initialValues?.unresolvedNames);
+  const sourceSummary = source ? taskSourceSummary(source, initialValues?.sourceExcerpt) : null;
   const canCreateCrm = !parentTask && !source && CRM_ROLES.includes(actor.role);
   const [kind, setKind] = useState<'internal' | 'crm'>('internal');
   const [leadQuery, setLeadQuery] = useState('');
   const debouncedLeadQ = useDebounced(leadQuery.trim(), 200);
   const [leadId, setLeadId] = useState('');
+  // Kept apart from the search results, which change as the person types a new query.
+  const [selectedLead, setSelectedLead] = useState<LeadItem | null>(null);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [priority, setPriority] = useState<TaskPriority>('normal');
@@ -99,6 +116,7 @@ export function TaskFormDialog({
       setKind('internal');
       setLeadQuery('');
       setLeadId('');
+      setSelectedLead(null);
       setTitle(initialValues?.title ?? '');
       setDescription(initialValues?.description ?? '');
       setPriority('normal');
@@ -119,27 +137,21 @@ export function TaskFormDialog({
   const handleKindChange = (nextKind: 'internal' | 'crm') => {
     setKind(nextKind);
     if (nextKind === 'crm') {
-      if (!due) setDue(at(1, 9));
+      if (!due) setDue(quickDueValue(1, 9));
       setMemberUserIds([]);
     } else {
       setLeadId('');
+      setSelectedLead(null);
     }
   };
-
-  const selectedLead = leads.data?.find((l) => l.id === leadId);
 
   const handleLeadSelect = (nextLeadId: string) => {
     setLeadId(nextLeadId);
-    const found = leads.data?.find((l) => l.id === nextLeadId);
+    const found = leads.data?.find((l) => l.id === nextLeadId) ?? null;
+    setSelectedLead(found);
     if (found?.owner?.id) {
       setAssigneeUserId(found.owner.id);
     }
-  };
-
-  const toggleMember = (uid: string) => {
-    setMemberUserIds((prev) =>
-      prev.includes(uid) ? prev.filter((id) => id !== uid) : prev.length < 20 ? [...prev, uid] : prev,
-    );
   };
 
   const users = directory.data ?? [];
@@ -177,7 +189,10 @@ export function TaskFormDialog({
       },
       {
         onSuccess: (res) => {
-          toast(parentTask ? 'Đã thêm việc con' : 'Đã tạo công việc');
+          toast(parentTask ? 'Đã thêm việc con' : 'Đã tạo công việc', undefined, {
+            label: 'Mở việc',
+            to: `/tasks/${encodeURIComponent(res.taskId)}`,
+          });
           onCreated?.(res.taskId);
           onClose();
         },
@@ -196,7 +211,7 @@ export function TaskFormDialog({
     <Modal
       open={open}
       onClose={onClose}
-      title={parentTask ? 'Thêm việc con' : 'Tạo việc mới'}
+      title={parentTask ? 'Thêm việc con' : source ? 'Tạo việc từ chat' : 'Tạo việc mới'}
       footer={
         <>
           <button type="button" className="btn" onClick={onClose}>Hủy</button>
@@ -226,10 +241,15 @@ export function TaskFormDialog({
         </Field>
       ) : null}
 
-      {source && (
-        <div className="small text-2">
-          Tạo từ chat · việc sẽ được gửi lại vào {source.scope === 'thread' ? 'chuỗi' : 'tin gốc'}
-        </div>
+      {sourceSummary && (
+        <section className="task-source" aria-label="Nguồn của việc">
+          <div className="task-source-head">
+            <Icon name="message" />
+            <strong>{sourceSummary.label}</strong>
+          </div>
+          {sourceSummary.quote && <blockquote className="task-source-quote">{sourceSummary.quote}</blockquote>}
+          <div className="small muted">{sourceSummary.note}</div>
+        </section>
       )}
       {unresolvedHint && (
         <div className="chat-task-hint small" role="note">
@@ -238,35 +258,21 @@ export function TaskFormDialog({
       )}
 
       {!parentTask && kind === 'crm' && (
-        <div className="stack-sm">
-          <Field label="Tìm và chọn lead" required error={errors.leadId} htmlFor={`${formId}-lead-q`}>
-            <input
-              id={`${formId}-lead-q`}
-              type="search"
-              value={leadQuery}
-              onChange={(e) => setLeadQuery(e.target.value)}
-              placeholder="Tìm mã L-…, tên khách, công ty, SĐT…"
-              autoComplete="off"
-            />
-          </Field>
-          <Field label="Lead" required htmlFor={`${formId}-lead`}>
-            <select
-              id={`${formId}-lead`}
-              value={leadId}
-              onChange={(e) => handleLeadSelect(e.target.value)}
-              aria-invalid={Boolean(errors.leadId)}
-            >
-              <option value="">
-                {leads.isLoading ? 'Đang tải danh sách lead…' : 'Chọn lead đang mở…'}
-              </option>
-              {(leads.data ?? []).map((l) => (
-                <option key={l.id} value={l.id}>
-                  {l.code} · {l.contactName}{l.account?.name ? ` · ${l.account.name}` : ''}
-                </option>
-              ))}
-            </select>
-          </Field>
-        </div>
+        <Field label="Lead" required error={errors.leadId} htmlFor={`${formId}-lead`}>
+          <Combobox
+            id={`${formId}-lead`}
+            value={leadId}
+            selectedLabel={selectedLead ? leadLabel(selectedLead) : undefined}
+            onChange={handleLeadSelect}
+            options={(leads.data ?? []).map((l) => ({ value: l.id, label: leadLabel(l), hint: l.owner?.name ?? undefined }))}
+            filter={false}
+            onQueryChange={setLeadQuery}
+            loading={leads.isLoading || leadQuery.trim() !== debouncedLeadQ}
+            placeholder="Tìm mã L-…, tên khách, công ty, SĐT…"
+            emptyText="Không có lead đang mở"
+            invalid={Boolean(errors.leadId)}
+          />
+        </Field>
       )}
 
       <Field label="Tiêu đề" required error={errors.title} htmlFor={`${formId}-title`}>
@@ -292,103 +298,59 @@ export function TaskFormDialog({
         />
       </Field>
 
-      <div className="grid-2">
-        <Field label="Độ ưu tiên" htmlFor={`${formId}-priority`} error={errors.priority}>
-          <select
-            id={`${formId}-priority`}
-            value={priority}
-            onChange={(e) => setPriority(e.target.value as TaskPriority)}
-          >
-            {PRIORITY_OPTIONS.map((p) => (
-              <option key={p.code} value={p.code}>{p.label}</option>
-            ))}
-          </select>
-        </Field>
+      <Field label="Độ ưu tiên" error={errors.priority}>
+        <PriorityControl value={priority} onChange={setPriority} />
+      </Field>
 
-        <Field label="Người phụ trách" required htmlFor={`${formId}-assignee`} error={errors.assigneeUserId}>
-          <select
-            id={`${formId}-assignee`}
-            value={assigneeUserId}
-            onChange={(e) => {
-              const next = e.target.value;
-              setAssigneeUserId(next);
-              setMemberUserIds((prev) => prev.filter((id) => id !== next));
-            }}
-          >
-            {assignableUsers.map((u) => (
-              <option key={u.id} value={u.id}>
-                {u.name} ({roleLabel(u.role)}{u.teamName ? ` · ${u.teamName}` : ''})
-              </option>
-            ))}
-          </select>
-        </Field>
-      </div>
+      <Field label="Người phụ trách" required htmlFor={`${formId}-assignee`} error={errors.assigneeUserId}>
+        <Combobox
+          id={`${formId}-assignee`}
+          value={assigneeUserId}
+          onChange={(next) => {
+            setAssigneeUserId(next);
+            setMemberUserIds((prev) => prev.filter((id) => id !== next));
+          }}
+          options={assignableUsers.map(userOption)}
+          loading={directory.isLoading}
+          placeholder="Tìm người phụ trách…"
+          invalid={Boolean(errors.assigneeUserId)}
+        />
+      </Field>
 
-      <div className="stack-sm">
-        <Field
-          label="Hạn hoàn thành (giờ Việt Nam)"
+      <Field
+        label="Hạn hoàn thành (giờ Việt Nam)"
+        required={kind === 'crm'}
+        error={errors.dueAt}
+        htmlFor={`${formId}-due`}
+        hint={kind === 'internal' ? 'Có thể bỏ trống nếu việc nội bộ chưa có hạn.' : undefined}
+      >
+        <DateTimeField
+          id={`${formId}-due`}
+          value={due}
+          onChange={setDue}
           required={kind === 'crm'}
-          error={errors.dueAt}
-          htmlFor={`${formId}-due`}
-          hint={kind === 'internal' ? 'Có thể bỏ trống nếu việc nội bộ chưa có hạn.' : undefined}
-        >
-          <div className="row">
-            <input
-              id={`${formId}-due`}
-              type="datetime-local"
-              value={due}
-              required={kind === 'crm'}
-              onChange={(e) => setDue(e.target.value)}
-            />
-            {kind === 'internal' && due && (
-              <button type="button" className="btn btn-sm btn-ghost" onClick={() => setDue('')}>
-                Bỏ hạn
-              </button>
-            )}
-          </div>
-        </Field>
-        <div className="chips" aria-label="Chọn nhanh hạn">
-          {QUICK_DUE.map((q) => {
-            const v = q.value();
-            return (
-              <button
-                type="button"
-                key={q.label}
-                className="chip"
-                aria-pressed={due === v}
-                onClick={() => setDue(v)}
-              >
-                {q.label}
-              </button>
-            );
-          })}
-        </div>
-      </div>
+          invalid={Boolean(errors.dueAt)}
+          clearLabel={kind === 'internal' ? 'Bỏ hạn' : undefined}
+          quickPicks
+        />
+      </Field>
 
       {!parentTask && kind === 'internal' && (
         <Field
           label="Người cùng làm"
           error={errors.memberUserIds}
+          htmlFor={`${formId}-members`}
           hint="Người cùng làm được xem việc và trao đổi trong bình luận."
         >
-          <div className="chips" role="group" aria-label="Chọn người cùng làm" style={{ maxHeight: 140, overflowY: 'auto' }}>
-            {users
-              .filter((u) => u.id !== assigneeUserId)
-              .map((u) => {
-                const selected = memberUserIds.includes(u.id);
-                return (
-                  <button
-                    type="button"
-                    key={u.id}
-                    className="chip"
-                    aria-pressed={selected}
-                    onClick={() => toggleMember(u.id)}
-                  >
-                    {u.name}
-                  </button>
-                );
-              })}
-          </div>
+          <MultiCombobox
+            id={`${formId}-members`}
+            values={memberUserIds}
+            onChange={setMemberUserIds}
+            options={users.filter((u) => u.id !== assigneeUserId).map(userOption)}
+            max={20}
+            placeholder="Tìm và thêm người cùng làm…"
+            tagListLabel="Người cùng làm đã chọn"
+          />
         </Field>
       )}
 

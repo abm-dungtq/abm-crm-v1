@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
 import { PASSWORD_MIN_LENGTH } from '@abm/contracts';
 import { ApiFailure, api } from '../api';
+import { clearChatDrafts } from '../chat-links';
 import { Alert, Field, fieldErrors, useToast } from '../components/ui';
 import { forgetPushSubscriptionOnLogout } from './notification-settings';
 
@@ -65,6 +66,8 @@ export function LogoutButton({ className = 'btn' }: { className?: string }) {
   const logout = useMutation({
     mutationFn: () => {
       forgetPushSubscriptionOnLogout();
+      // sessionStorage survives the reload after logout; the next person must not see or send these drafts.
+      clearChatDrafts();
       return api.post('/auth/logout');
     },
     onSettled: () => { client.clear(); window.location.assign('/'); },

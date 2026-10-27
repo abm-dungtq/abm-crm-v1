@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ChangeEvent } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useActor } from '../actor-context';
 import { ApiFailure, api, currentAuthMode, currentDemoUser } from '../api';
+import { chatDraftKey, readChatDraft, writeChatDraft } from '../chat-links';
 import { AGENT_THINKING_EVENT } from '../chat-socket';
 import type { ChatAttachment, ChatMessage } from '../types';
 import { fmtFileSize } from './chat-message-item';
@@ -12,7 +13,7 @@ import { FormError } from './ui';
 const MAX_ATTACHMENTS = 5;
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const AGENT_THINKING_TTL_MS = 2 * 60 * 1000;
-const AGENT_MENTION_RE = /@\[[^\]]+\]\(agent:[^)\s]+\)/;
+const AGENT_MENTION_RE = /@\[[^\]]{1,200}\]\(agent:[^)\s]{1,128}\)/;
 const READ_DELAY_MS = 2000;
 const QUOTE_SNIPPET_MAX = 120;
 
@@ -155,6 +156,12 @@ export interface ChatComposerProps {
   /** Closed topic: the composer stays visible but cannot send. */
   disabled?: boolean;
   autoFocus?: boolean;
+  /** Short field hint; keyboard tips show under the field on devices with a pointer. */
+  placeholder?: string;
+  /** Label of the send button ("Gửi" by default). */
+  sendLabel?: string;
+  /** Shorter label shown when the conversation column is narrow; must be a prefix of `sendLabel`. */
+  sendShortLabel?: string;
   onPending: (message: ChatMessage) => void;
   onSent: (saved: ChatMessage, pending: ChatMessage) => void;
   onFailed: (messageId: string) => void;
@@ -173,13 +180,21 @@ export function ChatComposer({
   onAgentAsked,
   disabled = false,
   autoFocus = false,
+  placeholder,
+  sendLabel = 'Gửi',
+  sendShortLabel,
   onPending,
   onSent,
   onFailed,
 }: ChatComposerProps) {
   const actor = useActor();
   const client = useQueryClient();
-  const [text, setText] = useState('');
+  // Callers key the composer by conversation (and thread), so the draft is read once per place.
+  const draftKey = conversationId ? chatDraftKey(actor.id, conversationId, threadRootId) : null;
+  const [text, setText] = useState(() => readChatDraft(draftKey));
+  useEffect(() => {
+    writeChatDraft(draftKey, text);
+  }, [draftKey, text]);
   const [alsoSend, setAlsoSend] = useState(false);
   const [attachments, setAttachments] = useState<PendingAttachmentItem[]>([]);
   const [uploadError, setUploadError] = useState<ApiFailure | null>(null);
@@ -278,6 +293,7 @@ export function ChatComposer({
     .map((a) => a.uploaded);
   const isUploading = attachments.some((a) => a.status === 'uploading');
   const canSend = Boolean(conversationId) && !disabled;
+  const fieldPlaceholder = placeholder ?? (threadRootId ? 'Trả lời trong chuỗi…' : 'Nhập tin nhắn…');
 
   const handleSend = () => {
     if (!conversationId || !canSend || sendMutation.isPending || isUploading) return;
@@ -419,7 +435,7 @@ export function ChatComposer({
           <Icon name="paperclip" />
         </button>
         <label className="visually-hidden" htmlFor={inputId}>
-          {threadRootId ? 'Trả lời trong chuỗi' : 'Nhập tin nhắn'}
+          {fieldPlaceholder.replace(/…$/, '')}
         </label>
         <MentionInput
           id={inputId}
@@ -428,19 +444,28 @@ export function ChatComposer({
           onSubmit={handleSend}
           disabled={!canSend}
           agents={agents}
-          placeholder={
-            threadRootId
-              ? 'Trả lời trong chuỗi… Gõ @ để nhắc tên (Enter gửi, Shift+Enter xuống dòng)'
-              : 'Nhập tin nhắn… Gõ @ để nhắc tên (Enter gửi, Shift+Enter xuống dòng)'
-          }
+          placeholder={fieldPlaceholder}
         />
         <button
           type="submit"
           className="btn btn-primary composer-send-btn"
+          aria-label={sendShortLabel && !sendMutation.isPending ? sendLabel : undefined}
           disabled={!canSend || (!text.trim() && uploadedAttachments.length === 0) || isUploading || sendMutation.isPending}
         >
-          {sendMutation.isPending ? 'Đang gửi…' : 'Gửi'}
+          {sendMutation.isPending ? (
+            'Đang gửi…'
+          ) : sendShortLabel ? (
+            <>
+              <span className="composer-send-full">{sendLabel}</span>
+              <span className="composer-send-short">{sendShortLabel}</span>
+            </>
+          ) : (
+            sendLabel
+          )}
         </button>
+      </div>
+      <div className="composer-hint small muted" aria-hidden="true">
+        Enter để gửi · Shift+Enter xuống dòng · @ để nhắc tên
       </div>
     </form>
   );

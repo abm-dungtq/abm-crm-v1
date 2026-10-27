@@ -5,13 +5,22 @@ import { useActor } from '../actor-context';
 import { ApiFailure, api, useApi } from '../api';
 import { chatLink } from '../chat-links';
 import { canCreateSubgroup, canManageMembers, canSwitchMode } from '../chat-tree';
-import type { ChatConversationDetail, ChatConversationMode, DirectoryUser } from '../types';
-import { roleLabel } from './layout';
-import { Avatar, Badge, FormError, Modal, useToast } from './ui';
+import type { ChatConversationDetail, ChatConversationMode, ChatMember, DirectoryUser } from '../types';
+import { Combobox } from './combobox';
+import { userOption } from './task-form-dialog';
+import { Avatar, Badge, ConfirmDialog, FormError, Modal, useToast } from './ui';
 
-const MODE_CONFIRM: Record<ChatConversationMode, string> = {
-  topic: 'Chuyển sang Chủ đề: mỗi tin mới sẽ là một chủ đề, mọi người trả lời trong chủ đề. Tin cũ giữ nguyên.',
-  chat: 'Chuyển về Trò chuyện: tin mới hiện trong luồng chat chung, trả lời trích dẫn hoặc theo chuỗi như trước. Chủ đề cũ giữ nguyên.',
+const MODE_CONFIRM: Record<ChatConversationMode, { title: string; body: string; action: string }> = {
+  topic: {
+    title: 'Chuyển nhóm sang Chủ đề?',
+    body: 'Mỗi tin mới sẽ là một chủ đề, mọi người trả lời trong chủ đề. Tin cũ giữ nguyên.',
+    action: 'Chuyển sang Chủ đề',
+  },
+  chat: {
+    title: 'Chuyển nhóm về Trò chuyện?',
+    body: 'Tin mới hiện trong luồng chat chung, trả lời trích dẫn hoặc theo chuỗi như trước. Chủ đề cũ giữ nguyên.',
+    action: 'Chuyển về Trò chuyện',
+  },
 };
 
 /**
@@ -50,10 +59,16 @@ export function ChatGroupSettingsDialog({
 
   const [title, setTitle] = useState(conversation.title);
   const [addUserId, setAddUserId] = useState('');
+  /** The mode change waiting for confirmation. */
+  const [pendingMode, setPendingMode] = useState<ChatConversationMode | null>(null);
+  /** The member about to be removed (or the reader, about to leave), waiting for confirmation. */
+  const [removing, setRemoving] = useState<ChatMember | null>(null);
 
   useEffect(() => {
     setTitle(conversation.title);
     setAddUserId('');
+    setPendingMode(null);
+    setRemoving(null);
   }, [conversation.title, open]);
 
   const invalidateConversation = () => {
@@ -109,8 +124,7 @@ export function ChatGroupSettingsDialog({
 
   const chooseMode = (mode: ChatConversationMode) => {
     if (mode === conversation.mode || modeMutation.isPending) return;
-    if (!window.confirm(MODE_CONFIRM[mode])) return;
-    modeMutation.mutate(mode);
+    setPendingMode(mode);
   };
 
   const openSubgroup = (e: MouseEvent<HTMLAnchorElement>, href: string) => {
@@ -120,6 +134,7 @@ export function ChatGroupSettingsDialog({
     void navigate({ href });
   };
 
+  const groupName = conversation.title || 'Nhóm chat';
   const existingIds = new Set(conversation.members.map((m) => m.id));
   const nonMembers = (directory.data ?? []).filter((u) => !existingIds.has(u.id));
   const syncNote = isDepartmentGroup
@@ -208,18 +223,16 @@ export function ChatGroupSettingsDialog({
                 if (addUserId) addMemberMutation.mutate(addUserId);
               }}
             >
-              <select
-                aria-label="Chọn thành viên thêm vào nhóm"
-                value={addUserId}
-                onChange={(e) => setAddUserId(e.target.value)}
-              >
-                <option value="">— Chọn đồng nghiệp để thêm —</option>
-                {nonMembers.map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.name} ({roleLabel(u.role)})
-                  </option>
-                ))}
-              </select>
+              <div className="chat-settings-add">
+                <Combobox
+                  ariaLabel="Chọn thành viên thêm vào nhóm"
+                  value={addUserId}
+                  onChange={setAddUserId}
+                  options={nonMembers.map(userOption)}
+                  placeholder="Tìm đồng nghiệp để thêm…"
+                  emptyText="Không tìm thấy đồng nghiệp phù hợp."
+                />
+              </div>
               <button
                 type="submit"
                 className="btn btn-sm btn-primary"
@@ -245,7 +258,7 @@ export function ChatGroupSettingsDialog({
                       type="button"
                       className="btn btn-sm btn-ghost"
                       disabled={removeMemberMutation.isPending}
-                      onClick={() => removeMemberMutation.mutate(m.id)}
+                      onClick={() => setRemoving(m)}
                     >
                       {m.id === actor.id ? 'Rời nhóm' : 'Xóa'}
                     </button>
@@ -292,6 +305,43 @@ export function ChatGroupSettingsDialog({
           </section>
         )}
       </div>
+
+      {pendingMode && (
+        <ConfirmDialog
+          open
+          tone="primary"
+          title={MODE_CONFIRM[pendingMode].title}
+          confirmLabel={MODE_CONFIRM[pendingMode].action}
+          pending={modeMutation.isPending}
+          onCancel={() => setPendingMode(null)}
+          onConfirm={() => modeMutation.mutate(pendingMode, { onSettled: () => setPendingMode(null) })}
+        >
+          {MODE_CONFIRM[pendingMode].body}
+        </ConfirmDialog>
+      )}
+
+      {removing && (
+        <ConfirmDialog
+          open
+          title={removing.id === actor.id ? 'Rời nhóm?' : 'Xóa thành viên?'}
+          confirmLabel={removing.id === actor.id ? 'Rời nhóm' : 'Xóa khỏi nhóm'}
+          pending={removeMemberMutation.isPending}
+          onCancel={() => setRemoving(null)}
+          onConfirm={() => removeMemberMutation.mutate(removing.id, { onSettled: () => setRemoving(null) })}
+        >
+          {removing.id === actor.id ? (
+            <>
+              Rời nhóm <strong>{groupName}</strong>? Bạn sẽ không nhận và không xem được tin mới của nhóm, cho đến khi
+              được thêm lại.
+            </>
+          ) : (
+            <>
+              Xóa <strong>{removing.name}</strong> khỏi nhóm <strong>{groupName}</strong>? Người này sẽ không xem được tin
+              mới của nhóm.
+            </>
+          )}
+        </ConfirmDialog>
+      )}
     </Modal>
   );
 }

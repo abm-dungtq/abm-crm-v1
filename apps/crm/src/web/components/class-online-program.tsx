@@ -19,7 +19,20 @@ import type {
   LmsProgramInfo,
   LmsProgramOption,
 } from '../types';
-import { Alert, Badge, Empty, ErrorState, Field, FormError, Loading, Modal, SegmentedControl, fieldErrors, useToast } from './ui';
+import {
+  Alert,
+  Badge,
+  ConfirmDialog,
+  Empty,
+  ErrorState,
+  Field,
+  FormError,
+  Loading,
+  Modal,
+  SegmentedControl,
+  fieldErrors,
+  useToast,
+} from './ui';
 
 export function ClassOnlineProgram({ classId }: { classId: string }) {
   const actor = useActor();
@@ -41,6 +54,7 @@ export function ClassOnlineProgram({ classId }: { classId: string }) {
   const [editingProgram, setEditingProgram] = useState(false);
   const [addingVideoLesson, setAddingVideoLesson] = useState<LmsLessonItem | null>(null);
   const [editingVideoId, setEditingVideoId] = useState<string | null>(null);
+  const [deletingVideo, setDeletingVideo] = useState<LmsLessonVideo | null>(null);
   const [emailDrafts, setEmailDrafts] = useState<Record<string, string>>({});
   const [batchSkipped, setBatchSkipped] = useState<{ noEmail: string[]; emailTaken: string[] } | null>(null);
   const [previewPending, setPreviewPending] = useState(false);
@@ -170,14 +184,15 @@ export function ClassOnlineProgram({ classId }: { classId: string }) {
   };
 
   const runDeleteVideo = (video: LmsLessonVideo) => {
-    if (!window.confirm('Xoá video này khỏi phần?')) return;
     deleteVideoCmd.mutate(
       { videoId: video.id, version: video.version },
       {
         onSuccess: () => {
           toast('Đã xoá video');
+          setDeletingVideo(null);
           void q.refetch();
         },
+        onError: () => setDeletingVideo(null),
       },
     );
   };
@@ -355,7 +370,7 @@ export function ClassOnlineProgram({ classId }: { classId: string }) {
                                       type="button"
                                       className="btn btn-sm btn-danger"
                                       disabled={deleteVideoCmd.isPending}
-                                      onClick={() => runDeleteVideo(v)}
+                                      onClick={() => setDeletingVideo(v)}
                                     >
                                       Xoá
                                     </button>
@@ -417,6 +432,19 @@ export function ClassOnlineProgram({ classId }: { classId: string }) {
             void q.refetch();
           }}
         />
+      )}
+
+      {deletingVideo && can.manageVideos && (
+        <ConfirmDialog
+          open
+          title="Xoá video?"
+          confirmLabel="Xoá video"
+          pending={deleteVideoCmd.isPending}
+          onConfirm={() => runDeleteVideo(deletingVideo)}
+          onCancel={() => setDeletingVideo(null)}
+        >
+          Xoá video <strong>{deletingVideo.title}</strong> khỏi phần này? Học viên sẽ không xem được video này nữa.
+        </ConfirmDialog>
       )}
     </section>
   );

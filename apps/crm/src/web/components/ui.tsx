@@ -1,9 +1,14 @@
-import { createContext, useCallback, useContext, useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import {
+  createContext, useCallback, useContext, useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from 'react';
+import { createPortal } from 'react-dom';
 import { Link } from '@tanstack/react-router';
 import { ACTIVE_STAGES, LEARNER_STAGES, stageLabel, type StageCode } from '@abm/contracts';
 import { ApiFailure } from '../api';
 import { fmtHours, fmtMoney, initials } from '../format';
 import type { LeadHealth } from '../types';
+import { useFloatingStyle } from './floating';
 import { Icon, type IconName } from './icons';
 
 export type Tone = 'neutral' | 'accent' | 'ok' | 'warn' | 'danger' | 'info' | 'agent';
@@ -120,14 +125,50 @@ export function Alert({ tone, children }: { tone: 'danger' | 'warn' | 'info' | '
 export function Modal({ open, title, onClose, children, footer }: { open: boolean; title: string; onClose: () => void; children: ReactNode; footer?: ReactNode }) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
+  // What had focus when the dialog opened; focus goes back there on close, also when the caller unmounts the dialog.
+  const openerRef = useRef<HTMLElement | null>(null);
+  // A close made by the cleanup below is not the person closing the dialog: its "close" event must not call onClose.
+  // (React's development double run of effects closes and reopens a dialog that mounts open.)
+  const silentCloseRef = useRef(false);
   useEffect(() => {
     const dialog = ref.current;
     if (!dialog) return;
-    if (open && !dialog.open) dialog.showModal();
+    if (open && !dialog.open) {
+      openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      dialog.showModal();
+    }
     if (!open && dialog.open) dialog.close();
   }, [open]);
+  useEffect(() => {
+    if (!open) return;
+    const dialog = ref.current;
+    return () => {
+      // Close first: while the modal is open everything outside it is inert and cannot take focus.
+      if (dialog?.open) {
+        silentCloseRef.current = true;
+        dialog.close();
+      }
+      const opener = openerRef.current;
+      openerRef.current = null;
+      if (opener && opener.isConnected && opener !== document.body) opener.focus({ preventScroll: true });
+    };
+  }, [open]);
   return (
-    <dialog ref={ref} className="modal" aria-labelledby={titleId} onClose={onClose} onCancel={(e) => { e.preventDefault(); onClose(); }}>
+    // React passes close/cancel up its own tree, so a dialog opened inside this one (a confirm step) must not close it.
+    <dialog
+      ref={ref}
+      className="modal"
+      aria-labelledby={titleId}
+      onClose={(e) => {
+        if (e.target !== e.currentTarget) return;
+        if (silentCloseRef.current) {
+          silentCloseRef.current = false;
+          return;
+        }
+        onClose();
+      }}
+      onCancel={(e) => { if (e.target !== e.currentTarget) return; e.preventDefault(); onClose(); }}
+    >
       {open && (
         <>
           <div className="modal-head">
@@ -184,23 +225,266 @@ export function FormError({ error }: { error: unknown }) {
   return <Alert tone="danger">{error instanceof ApiFailure ? error.message : 'Không thực hiện được. Thử lại.'}</Alert>;
 }
 
+/**
+ * A confirm step for a destructive or far-reaching action. The body names the object and the consequence; the confirm
+ * button repeats the verb. Focus starts on "Hủy", so Enter alone never confirms.
+ */
+export function ConfirmDialog({
+  open,
+  title,
+  children,
+  confirmLabel,
+  tone = 'danger',
+  pending = false,
+  onConfirm,
+  onCancel,
+}: {
+  open: boolean;
+  title: string;
+  children: ReactNode;
+  confirmLabel: string;
+  tone?: 'danger' | 'primary';
+  pending?: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  // Runs after Modal's own effect has called showModal(), so the button is focusable.
+  useEffect(() => {
+    if (open) cancelRef.current?.focus();
+  }, [open]);
+  return (
+    <Modal
+      open={open}
+      title={title}
+      onClose={onCancel}
+      footer={
+        <>
+          <button ref={cancelRef} type="button" className="btn" onClick={onCancel}>Hủy</button>
+          <button
+            type="button"
+            className={`btn ${tone === 'danger' ? 'btn-danger-solid' : 'btn-primary'}`}
+            disabled={pending}
+            onClick={onConfirm}
+          >
+            {pending ? 'Đang thực hiện…' : confirmLabel}
+          </button>
+        </>
+      }
+    >
+      <div className="text-2">{children}</div>
+    </Modal>
+  );
+}
+
+export interface OverflowMenuItem {
+  label: string;
+  icon?: IconName;
+  disabled?: boolean;
+  /** Shown last, after a divider, in the danger colour. */
+  danger?: boolean;
+  onSelect: () => void;
+}
+
+/** An item's height on a touch screen plus the gap, so the height cap never cuts a short menu. */
+const MENU_ITEM_PX = 46;
+
+/**
+ * The "⋯" button and its menu. The menu renders in a portal (inside the open dialog, when there is one) at a fixed
+ * position under the button, or above it when there is no room below, so a scrolling list never clips it. Arrow keys,
+ * Home and End move between items. It closes on a choice, an outside press, Tab or Escape; after a choice or Escape
+ * focus is back on the button, so a dialog opened from an item can return focus there. Pass `open`/`onOpenChange` to
+ * control it, e.g. to open it from a long-press.
+ */
+export function OverflowMenu({
+  label,
+  items,
+  align = 'right',
+  className,
+  buttonClassName = 'btn btn-ghost btn-sm icon-btn',
+  open: controlledOpen,
+  onOpenChange,
+}: {
+  label: string;
+  items: OverflowMenuItem[];
+  align?: 'left' | 'right';
+  className?: string;
+  buttonClassName?: string;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+}) {
+  const [ownOpen, setOwnOpen] = useState(false);
+  const open = controlledOpen ?? ownOpen;
+  const setOpen = useCallback((next: boolean) => {
+    if (controlledOpen === undefined) setOwnOpen(next);
+    onOpenChange?.(next);
+  }, [controlledOpen, onOpenChange]);
+  const boxRef = useRef<HTMLSpanElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLSpanElement>(null);
+  const menuId = useId();
+  const regular = items.filter((i) => !i.danger);
+  const danger = items.filter((i) => i.danger);
+  const style = useFloatingStyle(buttonRef, open, {
+    minWidth: 180,
+    maxHeight: Math.min(320, items.length * MENU_ITEM_PX + 24),
+    align: align === 'right' ? 'end' : 'start',
+    matchWidth: false,
+  });
+
+  useEffect(() => {
+    if (!open) return;
+    // Capture phase: a parent that stops propagation (a draggable card) cannot hide the press from this menu, and
+    // opening another menu closes this one.
+    const onDown = (e: PointerEvent) => {
+      const target = e.target as Node;
+      if (!boxRef.current?.contains(target) && !popRef.current?.contains(target)) setOpen(false);
+    };
+    document.addEventListener('pointerdown', onDown, true);
+    popRef.current?.querySelector<HTMLButtonElement>('.menu-item:not(:disabled)')?.focus({ preventScroll: true });
+    return () => document.removeEventListener('pointerdown', onDown, true);
+  }, [open, setOpen]);
+
+  const closeToButton = () => {
+    setOpen(false);
+    buttonRef.current?.focus({ preventScroll: true });
+  };
+
+  const onMenuKey = (e: ReactKeyboardEvent) => {
+    if (e.key === 'Escape') {
+      // Handled here, not on the document: a parent that stops key events would hide it, and a dialog must stay open.
+      e.preventDefault();
+      e.stopPropagation();
+      closeToButton();
+      return;
+    }
+    if (e.key === 'Tab') {
+      // Focus goes to the button first, so Tab moves on from there.
+      closeToButton();
+      return;
+    }
+    const enabled = [...(popRef.current?.querySelectorAll<HTMLButtonElement>('.menu-item:not(:disabled)') ?? [])];
+    if (!enabled.length) return;
+    const at = enabled.indexOf(document.activeElement as HTMLButtonElement);
+    const next = e.key === 'ArrowDown' ? (at + 1) % enabled.length
+      : e.key === 'ArrowUp' ? (at - 1 + enabled.length) % enabled.length
+        : e.key === 'Home' ? 0
+          : e.key === 'End' ? enabled.length - 1
+            : -1;
+    if (next < 0) return;
+    e.preventDefault();
+    enabled[next]!.focus({ preventScroll: true });
+  };
+
+  const renderItem = (item: OverflowMenuItem) => (
+    <button
+      key={item.label}
+      type="button"
+      role="menuitem"
+      className="menu-item"
+      data-tone={item.danger ? 'danger' : undefined}
+      disabled={item.disabled}
+      onClick={() => {
+        closeToButton();
+        item.onSelect();
+      }}
+    >
+      {item.icon && <Icon name={item.icon} />}
+      {item.label}
+    </button>
+  );
+
+  const host = open && buttonRef.current ? (buttonRef.current.closest('dialog') ?? document.body) : null;
+
+  return (
+    <span
+      className={`dropdown${className ? ` ${className}` : ''}`}
+      data-align={align}
+      data-open={open ? 'true' : undefined}
+      ref={boxRef}
+    >
+      <button
+        ref={buttonRef}
+        type="button"
+        className={buttonClassName}
+        aria-label={label}
+        title={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
+        onClick={() => setOpen(!open)}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape' && open) {
+            e.preventDefault();
+            e.stopPropagation();
+            setOpen(false);
+          } else if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && !open) {
+            e.preventDefault();
+            setOpen(true);
+          }
+        }}
+      >
+        <Icon name="more" />
+      </button>
+      {host && createPortal(
+        <span
+          ref={popRef}
+          id={menuId}
+          className="menu-pop menu-floating"
+          role="menu"
+          aria-label={label}
+          // The placed style lands before paint; it is never hidden meanwhile, so the first item can take focus.
+          style={style ?? { position: 'fixed' }}
+          onKeyDown={onMenuKey}
+        >
+          {regular.map(renderItem)}
+          {regular.length > 0 && danger.length > 0 && <span className="menu-sep" role="separator" />}
+          {danger.map(renderItem)}
+        </span>,
+        host,
+      )}
+    </span>
+  );
+}
+
 // ---------- toast ----------
-type ToastItem = { id: number; text: ReactNode; tone?: 'danger' };
-const ToastContext = createContext<(text: ReactNode, tone?: 'danger') => void>(() => {});
+/** An optional link inside a toast, e.g. "Mở việc" after creating a task. */
+export interface ToastAction { label: string; to: string }
+type ToastTone = 'danger';
+type ToastItem = { id: number; text: ReactNode; tone?: ToastTone; action?: ToastAction };
+type PushToast = (text: ReactNode, tone?: ToastTone, action?: ToastAction) => void;
+const ToastContext = createContext<PushToast>(() => {});
 export const useToast = () => useContext(ToastContext);
+
+const TOAST_MS = 4500;
+/** A toast with a link stays longer so there is time to reach it. */
+const TOAST_ACTION_MS = 8000;
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([]);
-  const push = useCallback((text: ReactNode, tone?: 'danger') => {
+  const push = useCallback<PushToast>((text, tone, action) => {
     const id = Date.now() + Math.random();
-    setItems((list) => [...list, { id, text, tone }]);
-    setTimeout(() => setItems((list) => list.filter((t) => t.id !== id)), 4500);
+    setItems((list) => [...list, { id, text, tone, action }]);
+    setTimeout(() => setItems((list) => list.filter((t) => t.id !== id)), action ? TOAST_ACTION_MS : TOAST_MS);
   }, []);
   return (
     <ToastContext.Provider value={push}>
       {children}
       <div className="toast-stack" role="status" aria-live="polite">
-        {items.map((t) => <div key={t.id} className="toast" data-tone={t.tone}>{t.text}</div>)}
+        {items.map((t) => (
+          <div key={t.id} className="toast" data-tone={t.tone}>
+            <span>{t.text}</span>
+            {t.action && (
+              <Link
+                className="toast-action"
+                to={t.action.to as '/'}
+                onClick={() => setItems((list) => list.filter((x) => x.id !== t.id))}
+              >
+                {t.action.label}
+              </Link>
+            )}
+          </div>
+        ))}
       </div>
     </ToastContext.Provider>
   );
@@ -301,15 +585,17 @@ export function SegmentedControl<T extends string>({
   options,
   size = 'md',
   ariaLabel,
+  className,
 }: {
   value: T;
   onChange: (value: T) => void;
   options: SegmentedOption<T>[];
   size?: 'sm' | 'md';
   ariaLabel?: string;
+  className?: string;
 }) {
   return (
-    <div className={`seg-control seg-${size}`} role="group" aria-label={ariaLabel}>
+    <div className={`seg-control seg-${size}${className ? ` ${className}` : ''}`} role="group" aria-label={ariaLabel}>
       {options.map((opt) => {
         const active = opt.value === value;
         return (
@@ -317,7 +603,7 @@ export function SegmentedControl<T extends string>({
             key={opt.value}
             type="button"
             className={`seg-btn${active ? ' active' : ''}`}
-            data-tone={active ? (opt.tone ?? 'brand') : undefined}
+            data-tone={active ? (opt.tone ?? 'neutral') : undefined}
             aria-pressed={active}
             disabled={opt.disabled}
             onClick={() => onChange(opt.value)}

@@ -6,6 +6,7 @@ import {
 } from '@abm/contracts';
 import { useActor } from '../actor-context';
 import { useApi, useCommand } from '../api';
+import { DateTimeField } from '../components/date-time-field';
 import { Badge, Empty, ErrorState, Field, FormError, Loading, Modal, fieldErrors, useToast } from '../components/ui';
 import { fmtDateTime, fmtMoney, fromLocalInput, toLocalInput } from '../format';
 
@@ -222,7 +223,7 @@ function PaymentForm() {
           <input id="pay-amount" type="number" min={1} step={1} value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} required />
         </Field>
         <Field label="Thời điểm nhận" htmlFor="pay-at" required error={errors.receivedAt}>
-          <input id="pay-at" type="datetime-local" value={form.receivedAt} onChange={(e) => setForm({ ...form, receivedAt: e.target.value })} required />
+          <DateTimeField id="pay-at" value={form.receivedAt} onChange={(receivedAt) => setForm({ ...form, receivedAt })} required invalid={Boolean(errors.receivedAt)} />
         </Field>
         <Field label="Nội dung" htmlFor="pay-memo" hint="Đúng một mã HP###### thì tiền vào tự phân bổ khi khoản còn đủ." error={errors.memo}>
           <input id="pay-memo" value={form.memo} onChange={(e) => setForm({ ...form, memo: e.target.value })} maxLength={500} />

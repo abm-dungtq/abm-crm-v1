@@ -3,24 +3,18 @@ import { useApi } from '../api';
 import { roleLabel } from './layout';
 import { Avatar } from './ui';
 import type { DirectoryUser } from '../types';
+import { foldDiacritics } from '../text-search';
 
-const MENTION_TOKEN_RE = /(@\[[^\]]+\]\((?:user|agent):[^)\s]+\))/g;
-const MENTION_PARTS_RE = /^@\[([^\]]+)\]\((user|agent):([^)\s]+)\)$/;
+// The name and id are length-bounded (as on the server), so text full of unclosed `@[` is scanned in linear time.
+const MENTION_TOKEN_RE = /(@\[[^\]]{1,200}\]\((?:user|agent):[^)\s]{1,128}\))/g;
+const MENTION_PARTS_RE = /^@\[([^\]]{1,200})\]\((user|agent):([^)\s]{1,128})\)$/;
 
-/** Folds Vietnamese diacritics using NFD normalization so typing `@lan` or `@dat` matches `Lân` or `Đạt`. */
-export function foldDiacritics(input: string): string {
-  return input
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/đ/g, 'd')
-    .replace(/Đ/g, 'd')
-    .toLowerCase();
-}
+export { foldDiacritics };
 
 /** Converts `@[Name](user:<id>)` and `@[Name](agent:<id>)` tokens into plain `@Name` for previews and quotes. */
 export function formatMentionText(body: string): string {
   if (!body) return '';
-  return body.replace(/@\[([^\]]+)\]\((?:user|agent):[^)\s]+\)/g, '@$1');
+  return body.replace(/@\[([^\]]{1,200})\]\((?:user|agent):[^)\s]{1,128}\)/g, '@$1');
 }
 
 /** Renders message text with `@[Name](user:<id>)` and `@[Name](agent:<id>)` tokens highlighted as `@Name`. */

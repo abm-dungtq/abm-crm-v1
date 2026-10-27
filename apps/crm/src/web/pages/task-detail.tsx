@@ -1,17 +1,19 @@
-import { useEffect, useId, useState } from 'react';
+import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { Link, useNavigate, useParams } from '@tanstack/react-router';
 import type { CancelTaskInput, CreateTaskInput, UpdateTaskInput } from '@abm/contracts';
 import { useActor } from '../actor-context';
 import { useApi, useCommand } from '../api';
 import { ChatThread } from '../components/chat-thread';
+import { Combobox, MultiCombobox } from '../components/combobox';
+import { DateTimeField } from '../components/date-time-field';
 import { Icon } from '../components/icons';
-import { roleLabel } from '../components/layout';
 import { CompleteTaskDialog } from '../components/lead-actions';
 import {
-  PRIORITY_OPTIONS,
   PriorityBadge,
+  PriorityControl,
   TaskFormDialog,
   TaskStatusBadge,
+  userOption,
 } from '../components/task-form-dialog';
 import {
   Avatar,
@@ -22,6 +24,7 @@ import {
   FormError,
   Loading,
   PipelineBadge,
+  SegmentedControl,
   StageBadge,
   fieldErrors,
   useToast,
@@ -55,8 +58,48 @@ export function TaskDetailPage() {
   const q = useApi<TaskDetail>(`/tasks/${taskId}`);
   if (q.isLoading) return <Loading rows={6} />;
   if (q.error || !q.data) return <ErrorState error={q.error} onRetry={() => q.refetch()} />;
-  return <TaskDetailView task={q.data} />;
+  // A new key per task: moving to a subtask or the parent starts a fresh form.
+  return <TaskDetailView key={q.data.id} task={q.data} />;
 }
+
+/** The editable fields of a task, as the form holds them. */
+interface TaskDraft {
+  title: string;
+  description: string;
+  priority: TaskPriority;
+  due: string;
+  assigneeUserId: string;
+  memberIds: string[];
+}
+
+const draftOf = (task: TaskDetail): TaskDraft => ({
+  title: task.title,
+  description: task.description ?? '',
+  priority: task.priority,
+  due: task.dueAt ? toLocalInput(new Date(task.dueAt)) : '',
+  assigneeUserId: task.assignee.id,
+  memberIds: task.members.map((m) => m.id),
+});
+
+const memberKey = (ids: string[]) => [...ids].sort().join(',');
+
+/**
+ * After the task reloads (a status change, someone else's edit, our own save), fields the person has not touched take
+ * the new values and fields they changed keep their edits.
+ */
+function rebaseDraft(draft: TaskDraft, before: TaskDraft, after: TaskDraft): TaskDraft {
+  const pick = <T,>(cur: T, was: T, next: T) => (cur === was ? next : cur);
+  return {
+    title: pick(draft.title, before.title, after.title),
+    description: pick(draft.description, before.description, after.description),
+    priority: pick(draft.priority, before.priority, after.priority),
+    due: pick(draft.due, before.due, after.due),
+    assigneeUserId: pick(draft.assigneeUserId, before.assigneeUserId, after.assigneeUserId),
+    memberIds: memberKey(draft.memberIds) === memberKey(before.memberIds) ? after.memberIds : draft.memberIds,
+  };
+}
+
+type DetailTab = 'details' | 'comments';
 
 function TaskDetailView({ task }: { task: TaskDetail }) {
   const actor = useActor();
@@ -64,31 +107,26 @@ function TaskDetailView({ task }: { task: TaskDetail }) {
   const formId = useId();
   const directory = useApi<DirectoryUser[]>('/directory');
   const updateTask = useCommand<UpdateTaskInput>('updateTask');
+  const setStatus = useCommand<UpdateTaskInput>('updateTask');
   const cancelTask = useCommand<CancelTaskInput>('cancelTask');
   const createSubtask = useCommand<CreateTaskInput, { taskId: string }>('createTask');
 
-  const [title, setTitle] = useState(task.title);
-  const [description, setDescription] = useState(task.description ?? '');
-  const [priority, setPriority] = useState<TaskPriority>(task.priority);
-  const [due, setDue] = useState(task.dueAt ? toLocalInput(new Date(task.dueAt)) : '');
-  const [assigneeUserId, setAssigneeUserId] = useState(task.assignee.id);
-  const [status, setStatus] = useState<'open' | 'in_progress'>(
-    task.status === 'in_progress' ? 'in_progress' : 'open',
-  );
-  const [memberIds, setMemberIds] = useState<string[]>(task.members.map((m) => m.id));
+  const [draft, setDraft] = useState<TaskDraft>(() => draftOf(task));
+  const savedRef = useRef<TaskDraft>(draftOf(task));
   const [subtaskTitle, setSubtaskTitle] = useState('');
   const [subtaskDialogOpen, setSubtaskDialogOpen] = useState(false);
   const [completing, setCompleting] = useState(false);
+  const [tab, setTab] = useState<DetailTab>('details');
 
-  useEffect(() => {
-    setTitle(task.title);
-    setDescription(task.description ?? '');
-    setPriority(task.priority);
-    setDue(task.dueAt ? toLocalInput(new Date(task.dueAt)) : '');
-    setAssigneeUserId(task.assignee.id);
-    setStatus(task.status === 'in_progress' ? 'in_progress' : 'open');
-    setMemberIds(task.members.map((m) => m.id));
+  // Before paint, so a reload never flashes the save bar for fields that only changed on the server.
+  useLayoutEffect(() => {
+    const before = savedRef.current;
+    const after = draftOf(task);
+    savedRef.current = after;
+    setDraft((cur) => rebaseDraft(cur, before, after));
   }, [task]);
+
+  const set = <K extends keyof TaskDraft>(key: K, value: TaskDraft[K]) => setDraft((d) => ({ ...d, [key]: value }));
 
   const isOpen = task.status === 'open' || task.status === 'in_progress';
   const canEdit = isOpen && (
@@ -102,40 +140,35 @@ function TaskDetailView({ task }: { task: TaskDetail }) {
     && task.kind === 'internal'
     && (actor.id === task.createdBy?.id || actor.role === 'director' || actor.role === 'admin');
 
-  const currentDueLocal = task.dueAt ? toLocalInput(new Date(task.dueAt)) : '';
-  const currentMemberKey = task.members.map((m) => m.id).sort().join(',');
-  const nextMemberKey = [...memberIds].sort().join(',');
-
+  const saved = draftOf(task);
   const isDirty =
-    title.trim() !== task.title
-    || description.trim() !== (task.description ?? '')
-    || priority !== task.priority
-    || due !== currentDueLocal
-    || assigneeUserId !== task.assignee.id
-    || (task.kind === 'internal' && status !== task.status)
-    || (task.kind === 'internal' && nextMemberKey !== currentMemberKey);
+    draft.title.trim() !== task.title
+    || draft.description.trim() !== (task.description ?? '')
+    || draft.priority !== task.priority
+    || draft.due !== saved.due
+    || draft.assigneeUserId !== task.assignee.id
+    || (task.kind === 'internal' && memberKey(draft.memberIds) !== memberKey(saved.memberIds));
+  const blockReason = !draft.title.trim()
+    ? 'Nhập tiêu đề để lưu.'
+    : task.kind === 'crm' && !draft.due
+      ? 'Việc gắn lead cần có hạn.'
+      : null;
 
   const errors = fieldErrors(updateTask.error);
   const users = directory.data ?? [];
 
-  const toggleMember = (uid: string) => {
-    setMemberIds((prev) =>
-      prev.includes(uid) ? prev.filter((id) => id !== uid) : prev.length < 20 ? [...prev, uid] : prev,
-    );
-  };
-
   const handleSave = () => {
-    if (!title.trim() || (task.kind === 'crm' && !due)) return;
+    if (blockReason || updateTask.isPending) return;
     updateTask.mutate(
       {
         taskId: task.id,
         expectedVersion: task.version,
-        title: title.trim(),
-        description: description.trim() ? description.trim() : null,
-        priority,
-        dueAt: due ? fromLocalInput(due) : null,
-        assigneeUserId,
-        ...(task.kind === 'internal' ? { status, memberUserIds: memberIds.filter((id) => id !== assigneeUserId) } : {}),
+        title: draft.title.trim(),
+        description: draft.description.trim() ? draft.description.trim() : null,
+        priority: draft.priority,
+        dueAt: draft.due ? fromLocalInput(draft.due) : null,
+        assigneeUserId: draft.assigneeUserId,
+        ...(task.kind === 'internal' ? { memberUserIds: draft.memberIds.filter((id) => id !== draft.assigneeUserId) } : {}),
       },
       {
         onSuccess: () => toast('Đã lưu cập nhật công việc'),
@@ -143,11 +176,18 @@ function TaskDetailView({ task }: { task: TaskDetail }) {
     );
   };
 
-  const handleQuickStatus = (nextStatus: 'open' | 'in_progress') => {
-    updateTask.mutate(
+  const discard = () => {
+    setDraft(draftOf(task));
+    updateTask.reset();
+  };
+
+  const handleStatus = (nextStatus: 'open' | 'in_progress') => {
+    if (nextStatus === task.status) return;
+    setStatus.mutate(
       { taskId: task.id, expectedVersion: task.version, status: nextStatus },
       {
         onSuccess: () => toast(nextStatus === 'in_progress' ? 'Đã chuyển sang Đang làm' : 'Đã chuyển về Cần làm'),
+        onError: (err) => toast(err.message, 'danger'),
       },
     );
   };
@@ -183,6 +223,31 @@ function TaskDetailView({ task }: { task: TaskDetail }) {
     );
   };
 
+  const tabIds = { details: `${formId}-tab-details`, comments: `${formId}-tab-comments` };
+  const onTabKey = (e: KeyboardEvent) => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    const next: DetailTab = tab === 'details' ? 'comments' : 'details';
+    setTab(next);
+    document.getElementById(tabIds[next])?.focus();
+  };
+
+  // Only an open internal task the reader may edit has a status to switch; everything else shows its status.
+  const statusControl = isOpen && task.kind === 'internal' && canEdit ? (
+    <SegmentedControl
+      ariaLabel="Trạng thái công việc"
+      size="sm"
+      value={task.status === 'in_progress' ? 'in_progress' : 'open'}
+      onChange={handleStatus}
+      options={[
+        { value: 'open', label: 'Cần làm', disabled: setStatus.isPending },
+        { value: 'in_progress', label: 'Đang làm', disabled: setStatus.isPending },
+      ]}
+    />
+  ) : (
+    <TaskStatusBadge status={task.status} />
+  );
+
   return (
     <>
       <div className="page-head" style={{ alignItems: 'flex-start' }}>
@@ -207,25 +272,16 @@ function TaskDetailView({ task }: { task: TaskDetail }) {
             ) : (
               <Badge tone="info">Việc gắn lead</Badge>
             )}
-            <TaskStatusBadge status={task.status} />
+            {statusControl}
             <PriorityBadge priority={task.priority} />
-            {task.isNextAction && <Badge tone="accent">Next Action</Badge>}
+            {task.isNextAction && <Badge tone="neutral">Việc tiếp theo</Badge>}
           </div>
         </div>
 
         <div className="row-wrap">
-          {isOpen && task.kind === 'internal' && canEdit && (
-            <button
-              type="button"
-              className="btn"
-              disabled={updateTask.isPending}
-              onClick={() => handleQuickStatus(task.status === 'in_progress' ? 'open' : 'in_progress')}
-            >
-              {task.status === 'in_progress' ? 'Chuyển về Cần làm' : 'Bắt đầu làm'}
-            </button>
-          )}
           {isOpen && (
-            <button type="button" className="btn btn-primary" onClick={() => setCompleting(true)}>
+            // While edits are unsaved, "Lưu thay đổi" is the one primary action on the page.
+            <button type="button" className={`btn${isDirty ? '' : ' btn-primary'}`} onClick={() => setCompleting(true)}>
               <Icon name="check" />
               Hoàn thành
             </button>
@@ -242,23 +298,38 @@ function TaskDetailView({ task }: { task: TaskDetail }) {
           )}
         </div>
       </div>
+      <FormError error={cancelTask.error} />
 
-      <div className="cols-main">
+      <div className="tabs task-detail-tabs" role="tablist" aria-label="Nội dung công việc" onKeyDown={onTabKey}>
+        <button
+          type="button"
+          role="tab"
+          id={tabIds.details}
+          aria-selected={tab === 'details'}
+          aria-controls={`${formId}-pane-details`}
+          tabIndex={tab === 'details' ? 0 : -1}
+          onClick={() => setTab('details')}
+        >
+          Chi tiết
+        </button>
+        <button
+          type="button"
+          role="tab"
+          id={tabIds.comments}
+          aria-selected={tab === 'comments'}
+          aria-controls={`${formId}-pane-comments`}
+          tabIndex={tab === 'comments' ? 0 : -1}
+          onClick={() => setTab('comments')}
+        >
+          Bình luận
+        </button>
+      </div>
+
+      <div className="cols-main task-detail" data-tab={tab}>
         <div className="grid">
-          <section className="card" aria-labelledby="detail-h">
+          <section className="card task-pane-details" id={`${formId}-pane-details`} aria-labelledby="detail-h">
             <div className="card-head">
               <h2 id="detail-h">Chi tiết công việc</h2>
-              <span className="spacer" />
-              {canEdit && (
-                <button
-                  type="button"
-                  className="btn btn-sm btn-primary"
-                  disabled={!isDirty || !title.trim() || (task.kind === 'crm' && !due) || updateTask.isPending}
-                  onClick={handleSave}
-                >
-                  {updateTask.isPending ? 'Đang lưu…' : 'Lưu thay đổi'}
-                </button>
-              )}
             </div>
             <div className="card-body stack">
               {canEdit ? (
@@ -268,102 +339,55 @@ function TaskDetailView({ task }: { task: TaskDetail }) {
                       id={`${formId}-title`}
                       type="text"
                       maxLength={200}
-                      value={title}
-                      onChange={(e) => setTitle(e.target.value)}
+                      value={draft.title}
+                      aria-invalid={Boolean(errors.title) || !draft.title.trim() || undefined}
+                      onChange={(e) => set('title', e.target.value)}
                     />
                   </Field>
                   <Field label="Mô tả" error={errors.description} htmlFor={`${formId}-desc`}>
                     <textarea
                       id={`${formId}-desc`}
                       maxLength={5000}
-                      value={description}
-                      onChange={(e) => setDescription(e.target.value)}
+                      value={draft.description}
+                      onChange={(e) => set('description', e.target.value)}
                       placeholder="Thêm mô tả chi tiết cho công việc…"
                     />
                   </Field>
-                  <div className="grid-2">
-                    <Field label="Độ ưu tiên" htmlFor={`${formId}-priority`} error={errors.priority}>
-                      <select
-                        id={`${formId}-priority`}
-                        value={priority}
-                        onChange={(e) => setPriority(e.target.value as TaskPriority)}
-                      >
-                        {PRIORITY_OPTIONS.map((p) => (
-                          <option key={p.code} value={p.code}>{p.label}</option>
-                        ))}
-                      </select>
-                    </Field>
-                    {task.kind === 'internal' ? (
-                      <Field label="Trạng thái" htmlFor={`${formId}-status`} error={errors.status}>
-                        <select
-                          id={`${formId}-status`}
-                          value={status}
-                          onChange={(e) => setStatus(e.target.value as 'open' | 'in_progress')}
-                        >
-                          <option value="open">Cần làm</option>
-                          <option value="in_progress">Đang làm</option>
-                        </select>
-                      </Field>
-                    ) : (
-                      <Field label="Người phụ trách" htmlFor={`${formId}-assignee`} error={errors.assigneeUserId}>
-                        <select
-                          id={`${formId}-assignee`}
-                          value={assigneeUserId}
-                          onChange={(e) => setAssigneeUserId(e.target.value)}
-                        >
-                          {users.map((u) => (
-                            <option key={u.id} value={u.id}>
-                              {u.name} ({roleLabel(u.role)})
-                            </option>
-                          ))}
-                        </select>
-                      </Field>
-                    )}
-                  </div>
-                  <div className="grid-2">
-                    <Field
-                      label="Hạn hoàn thành (giờ Việt Nam)"
+                  <Field label="Độ ưu tiên" error={errors.priority}>
+                    <PriorityControl value={draft.priority} onChange={(p) => set('priority', p)} />
+                  </Field>
+                  <Field label="Người phụ trách" htmlFor={`${formId}-assignee`} error={errors.assigneeUserId}>
+                    <Combobox
+                      id={`${formId}-assignee`}
+                      value={draft.assigneeUserId}
+                      selectedLabel={task.assignee.id === draft.assigneeUserId ? task.assignee.name : undefined}
+                      onChange={(next) => setDraft((d) => ({
+                        ...d,
+                        assigneeUserId: next,
+                        memberIds: d.memberIds.filter((id) => id !== next),
+                      }))}
+                      options={users.map(userOption)}
+                      loading={directory.isLoading}
+                      placeholder="Tìm người phụ trách…"
+                      invalid={Boolean(errors.assigneeUserId)}
+                    />
+                  </Field>
+                  <Field
+                    label="Hạn hoàn thành (giờ Việt Nam)"
+                    required={task.kind === 'crm'}
+                    error={errors.dueAt}
+                    htmlFor={`${formId}-due`}
+                  >
+                    <DateTimeField
+                      id={`${formId}-due`}
+                      value={draft.due}
+                      onChange={(due) => set('due', due)}
                       required={task.kind === 'crm'}
-                      error={errors.dueAt}
-                      htmlFor={`${formId}-due`}
-                    >
-                      <div className="row">
-                        <input
-                          id={`${formId}-due`}
-                          type="datetime-local"
-                          value={due}
-                          required={task.kind === 'crm'}
-                          onChange={(e) => setDue(e.target.value)}
-                        />
-                        {task.kind === 'internal' && due && (
-                          <button type="button" className="btn btn-sm btn-ghost" onClick={() => setDue('')}>
-                            Bỏ hạn
-                          </button>
-                        )}
-                      </div>
-                    </Field>
-                    {task.kind === 'internal' && (
-                      <Field label="Người phụ trách" htmlFor={`${formId}-assignee-int`} error={errors.assigneeUserId}>
-                        <select
-                          id={`${formId}-assignee-int`}
-                          value={assigneeUserId}
-                          onChange={(e) => {
-                            const next = e.target.value;
-                            setAssigneeUserId(next);
-                            setMemberIds((prev) => prev.filter((id) => id !== next));
-                          }}
-                        >
-                          {users.map((u) => (
-                            <option key={u.id} value={u.id}>
-                              {u.name} ({roleLabel(u.role)}{u.teamName ? ` · ${u.teamName}` : ''})
-                            </option>
-                          ))}
-                        </select>
-                      </Field>
-                    )}
-                  </div>
-                  <FormError error={updateTask.error} />
-                  <FormError error={cancelTask.error} />
+                      invalid={Boolean(errors.dueAt)}
+                      clearLabel={task.kind === 'internal' ? 'Bỏ hạn' : undefined}
+                      quickPicks
+                    />
+                  </Field>
                 </>
               ) : (
                 <dl className="dl">
@@ -384,7 +408,7 @@ function TaskDetailView({ task }: { task: TaskDetail }) {
             </div>
           </section>
 
-          <section className="card" aria-labelledby="subtasks-h">
+          <section className="card task-pane-details" aria-labelledby="subtasks-h">
             <div className="card-head">
               <h2 id="subtasks-h">Việc con</h2>
               <Badge tone="neutral">{task.subtasks.length}</Badge>
@@ -409,7 +433,7 @@ function TaskDetailView({ task }: { task: TaskDetail }) {
                 />
                 <button
                   type="submit"
-                  className="btn btn-sm btn-primary"
+                  className="btn btn-sm"
                   disabled={!subtaskTitle.trim() || createSubtask.isPending}
                 >
                   {createSubtask.isPending ? 'Đang thêm…' : 'Thêm'}
@@ -441,7 +465,7 @@ function TaskDetailView({ task }: { task: TaskDetail }) {
             </div>
           </section>
 
-          <section className="card" aria-labelledby="comments-h">
+          <section className="card task-pane-comments" id={`${formId}-pane-comments`} aria-labelledby="comments-h">
             <div className="card-head">
               <h2 id="comments-h">Bình luận</h2>
             </div>
@@ -455,7 +479,7 @@ function TaskDetailView({ task }: { task: TaskDetail }) {
           </section>
         </div>
 
-        <div className="grid">
+        <div className="grid task-pane-details">
           {task.lead && (
             <section className="card" aria-labelledby="lead-h">
               <div className="card-head">
@@ -497,10 +521,22 @@ function TaskDetailView({ task }: { task: TaskDetail }) {
             <section className="card" aria-labelledby="members-h">
               <div className="card-head">
                 <h2 id="members-h">Người cùng làm</h2>
-                <Badge tone="neutral">{memberIds.length}</Badge>
+                <Badge tone="neutral">{canEdit ? draft.memberIds.length : task.members.length}</Badge>
               </div>
               <div className="card-body stack-sm">
-                {task.members.length === 0 ? (
+                {canEdit ? (
+                  <Field label="Chọn người cùng làm" htmlFor={`${formId}-members`} error={errors.memberUserIds}>
+                    <MultiCombobox
+                      id={`${formId}-members`}
+                      values={draft.memberIds}
+                      onChange={(ids) => set('memberIds', ids)}
+                      options={users.filter((u) => u.id !== draft.assigneeUserId).map(userOption)}
+                      max={20}
+                      placeholder="Tìm và thêm người cùng làm…"
+                      tagListLabel="Người cùng làm đã chọn"
+                    />
+                  </Field>
+                ) : task.members.length === 0 ? (
                   <div className="small muted">Chưa có người cùng làm.</div>
                 ) : (
                   <div className="row-wrap">
@@ -510,29 +546,6 @@ function TaskDetailView({ task }: { task: TaskDetail }) {
                         {m.name}
                       </span>
                     ))}
-                  </div>
-                )}
-                {canEdit && (
-                  <div className="stack-sm" style={{ marginTop: 6 }}>
-                    <span className="field-label">Chọn người cùng làm</span>
-                    <div className="chips" style={{ maxHeight: 160, overflowY: 'auto' }}>
-                      {users
-                        .filter((u) => u.id !== assigneeUserId)
-                        .map((u) => {
-                          const active = memberIds.includes(u.id);
-                          return (
-                            <button
-                              type="button"
-                              key={u.id}
-                              className="chip"
-                              aria-pressed={active}
-                              onClick={() => toggleMember(u.id)}
-                            >
-                              {u.name}
-                            </button>
-                          );
-                        })}
-                    </div>
                   </div>
                 )}
               </div>
@@ -581,6 +594,29 @@ function TaskDetailView({ task }: { task: TaskDetail }) {
           </section>
         </div>
       </div>
+
+      {canEdit && isDirty && (
+        <div className="save-bar" role="region" aria-label="Thay đổi chưa lưu">
+          <div className="save-bar-text">
+            <strong>Có thay đổi chưa lưu</strong>
+            {blockReason && <span className="small">{blockReason}</span>}
+            <FormError error={updateTask.error} />
+          </div>
+          <div className="save-bar-actions">
+            <button type="button" className="btn" disabled={updateTask.isPending} onClick={discard}>
+              Hủy thay đổi
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={Boolean(blockReason) || updateTask.isPending}
+              onClick={handleSave}
+            >
+              {updateTask.isPending ? 'Đang lưu…' : 'Lưu thay đổi'}
+            </button>
+          </div>
+        </div>
+      )}
 
       <TaskFormDialog
         open={subtaskDialogOpen}

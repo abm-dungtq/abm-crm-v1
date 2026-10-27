@@ -1,6 +1,7 @@
 import { Outlet, createRootRoute, createRoute, createRouter, type ErrorComponentProps } from '@tanstack/react-router';
 import { ActorContext } from './actor-context';
 import { parseChatSearch, type ChatSearch } from './chat-links';
+import { parseTaskSearch, type TaskSearch } from './task-filters';
 import { ApiFailure, currentDemoUser, useApi, useAuthMode } from './api';
 import { RolePicker, Shell } from './components/layout';
 import { Alert, ErrorState, Loading, ToastProvider } from './components/ui';
@@ -158,14 +159,16 @@ const routes = [
     getParentRoute: () => rootRoute,
     path: '/tasks',
     component: TasksPage,
-    validateSearch: (s: Record<string, unknown>): { view?: 'list' | 'board'; status?: 'open' | 'completed'; mine?: '1' } => ({
-      view: s.view === 'board' ? 'board' : s.view === 'list' ? 'list' : undefined,
-      status: s.status === 'completed' || s.view === 'completed' ? 'completed' : undefined,
-      mine: s.mine === '1' ? '1' : undefined,
-    }),
+    validateSearch: (s: Record<string, unknown>): TaskSearch => parseTaskSearch(s),
+
   }),
   createRoute({ getParentRoute: () => rootRoute, path: '/tasks/$taskId', component: TaskDetailPage }),
-  createRoute({ getParentRoute: () => rootRoute, path: '/chat', component: ChatPage }),
+  createRoute({
+    getParentRoute: () => rootRoute,
+    path: '/chat',
+    component: ChatPage,
+    validateSearch: (s: Record<string, unknown>): Pick<ChatSearch, 'list'> => ({ list: parseChatSearch(s).list }),
+  }),
   createRoute({
     getParentRoute: () => rootRoute,
     path: '/chat/$conversationId',

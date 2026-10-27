@@ -99,8 +99,8 @@ export function Shell({ actor, children }: { actor: Actor; children: ReactNode }
     { label: 'Chat', icon: 'message', items: [
       { to: '/chat', label: 'Chat', roles: ALL_ROLES, badge: unreadChat, badgeLabel: `${unreadChat} tin nhắn chưa đọc` },
     ] },
-    { label: actor.role === 'admin' ? 'Công việc' : 'Việc của tôi', icon: 'check', items: [
-      { to: '/tasks', label: actor.role === 'admin' ? 'Công việc' : 'Việc của tôi', roles: B2B_ROLES },
+    { label: 'Công việc', icon: 'check', items: [
+      { to: '/tasks', label: 'Công việc', roles: B2B_ROLES },
     ] },
   ];
   const adminItems: NavLeaf[] = [

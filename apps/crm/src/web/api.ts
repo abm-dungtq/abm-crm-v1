@@ -6,6 +6,7 @@ import type {
   GroupScheduleInput, InboxContactCrm, InboxConversation, InboxMessage, InboxSettings, InboxSettingsUpdate, IntakeField, IntakePipeline, IntakeStatus,
   IntakeValues, LeadIntake, LeaveZaloGroupResult, RegistrationPolicyUpdate, RosterMember, SendMessageResult, SetModeResult, UploadedInboxMedia, ZaloGroup, ZaloGroupMember, ZaloGroupUpdate,
 } from './types';
+import { clearChatDrafts } from './chat-links';
 import { buildClassifyPayload } from './components/note-format';
 import { fmtDateTime } from './format';
 import { conversationsPath } from './inbox-format';
@@ -16,6 +17,8 @@ export function getDemoUser(): string | null {
   try { return localStorage.getItem(USER_KEY); } catch { return null; }
 }
 export function setDemoUser(id: string | null) {
+  // Another person takes over this tab: their composer must not open with the previous person's unsent text.
+  if (id !== memoryUser) clearChatDrafts();
   try {
     if (id) localStorage.setItem(USER_KEY, id);
     else localStorage.removeItem(USER_KEY);
