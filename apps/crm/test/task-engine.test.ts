@@ -186,4 +186,25 @@ describe('task engine', () => {
       { id: subId, title: 'Đặt phòng hội thảo', status: 'open' },
     ]);
   });
+
+  test('a sale sees their internal task on the dashboard, without a lead, and in its task counts', async () => {
+    const created = await command('u-lan', 'createTask', {
+      kind: 'internal',
+      title: 'Chuẩn bị tài liệu buổi đào tạo',
+      assigneeUserId: 'u-lan',
+    });
+    expect(created.status).toBe(200);
+    const taskId = created.json.data.taskId as string;
+    // Overdue sorts first, so the task is inside the ten upcoming items whatever the seed holds.
+    await db.prepare("UPDATE task SET due_at = '2000-01-01T01:00:00Z' WHERE id = ?").bind(taskId).run();
+
+    const dashboard = await call('u-lan', 'GET', '/dashboard');
+    expect(dashboard.status).toBe(200);
+    const upcoming = dashboard.json.data.upcoming as any[];
+    expect(upcoming.find((t) => t.id === taskId)).toMatchObject({ kind: 'internal', lead: null, bucket: 'overdue' });
+
+    const open = (await call('u-lan', 'GET', '/tasks?status=open')).json.data as any[];
+    expect(dashboard.json.data.kpi.overdueTasks).toBe(open.filter((t) => t.bucket === 'overdue').length);
+    expect(dashboard.json.data.kpi.tasksToday).toBe(open.filter((t) => t.bucket === 'today').length);
+  });
 });

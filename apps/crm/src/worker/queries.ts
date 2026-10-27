@@ -335,7 +335,7 @@ export async function dashboard(db: D1Database, actor: Actor) {
     db.prepare(`SELECT COUNT(*) AS total,
       COALESCE(SUM(tk.due_at < ?), 0) AS overdue,
       COALESCE(SUM(tk.due_at >= ? AND tk.due_at >= ? AND tk.due_at < ?), 0) AS today
-      FROM task tk JOIN lead l ON l.id = tk.lead_id WHERE ${taskFilter.sql} AND tk.status = 'open'`)
+      FROM task tk LEFT JOIN lead l ON l.id = tk.lead_id WHERE ${taskFilter.sql} AND tk.status = 'open'`)
       .bind(now.toISOString(), now.toISOString(), today, tomorrow, ...taskFilter.binds).first<{ total: number; overdue: number; today: number }>(),
   ]);
   const active = leads.filter((l) => l.status === 'active');
@@ -399,6 +399,7 @@ export async function dashboard(db: D1Database, actor: Actor) {
     }),
     bySale: actor.role === 'sale' ? [] : [...owners.values()].sort((a, b) => b.active - a.active),
     attention: attention.slice(0, 12),
+    // Same list as /tasks: lead tasks and internal tasks (`lead: null`) alike.
     upcoming: tasks.filter((t) => t.bucket !== 'done').slice(0, 10),
     lostReasons: [...lostReasons.entries()].map(([code, count]) => ({ code, count })),
     truncated: {

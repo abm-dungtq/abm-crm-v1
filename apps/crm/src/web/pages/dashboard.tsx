@@ -134,19 +134,21 @@ function DashboardBody({ data, isSale, canQueue }: { data: Dashboard; isSale: bo
           </section>
 
           <section className="card" aria-labelledby="up-h">
-            <div className="card-head"><h2 id="up-h">Next Action sắp tới</h2><span className="spacer" /><Link to="/tasks" className="small">Tất cả việc</Link></div>
+            <div className="card-head"><h2 id="up-h">Việc sắp tới</h2><span className="spacer" /><Link to="/tasks" className="small">Tất cả việc</Link></div>
             {data.upcoming.length === 0 ? <Empty title="Không có việc đang mở" /> : (
               <ul className="list">
                 {data.upcoming.map((t) => (
                   <li key={t.id}>
                     <div className="row">
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div className="truncate" style={{ fontWeight: 500 }}>{t.title}</div>
-                        {t.lead.pipeline === 'learner'
-                          ? <Link to="/learners/$contactId" params={{ contactId: t.lead.contactId }} className="small truncate" style={{ display: 'block' }}>{t.lead.code} · {t.lead.contactName}</Link>
-                          : <Link to="/leads/$leadId" params={{ leadId: t.lead.id }} className="small truncate" style={{ display: 'block' }}>{t.lead.code} · {t.lead.contactName}</Link>}
+                        <Link to="/tasks/$taskId" params={{ taskId: t.id }} className="truncate" style={{ display: 'block', fontWeight: 500 }}>{t.title}</Link>
+                        {!t.lead
+                          ? <Badge tone="neutral">Việc nội bộ</Badge>
+                          : t.lead.pipeline === 'learner'
+                            ? <Link to="/learners/$contactId" params={{ contactId: t.lead.contactId }} className="small truncate" style={{ display: 'block' }}>{t.lead.code} · {t.lead.contactName}</Link>
+                            : <Link to="/leads/$leadId" params={{ leadId: t.lead.id }} className="small truncate" style={{ display: 'block' }}>{t.lead.code} · {t.lead.contactName}</Link>}
                       </div>
-                      <Badge tone={t.bucket === 'overdue' ? 'danger' : t.bucket === 'today' ? 'warn' : 'neutral'}>{fmtDue(t.dueAt)}</Badge>
+                      <Badge tone={t.bucket === 'overdue' ? 'danger' : t.bucket === 'today' ? 'warn' : 'neutral'}>{t.dueAt ? fmtDue(t.dueAt) : 'Chưa đặt hạn'}</Badge>
                     </div>
                   </li>
                 ))}
