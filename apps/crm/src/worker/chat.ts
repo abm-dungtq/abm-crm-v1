@@ -19,7 +19,10 @@ export interface ChatMessageItem {
   authorUserId: string | null;
   authorAgentId: string | null;
   authorName: string | null;
-  parentMessageId: string | null;
+  replyToMessageId: string | null;
+  replyTo: ChatQuotePreview | null;
+  threadRootId: string | null;
+  alsoInMain: boolean;
   body: string;
   mentions: string[];
   meta: Record<string, unknown> | null;
@@ -29,6 +32,23 @@ export interface ChatMessageItem {
   attachments?: ChatAttachmentItem[];
 }
 
+/** The quoted message shown above a quote reply. `snippet` is empty when the quoted message was recalled. */
+export interface ChatQuotePreview {
+  id: string;
+  authorName: string | null;
+  snippet: string;
+  deleted: boolean;
+  threadRootId: string | null;
+}
+
+/** The main-flow window around one message, used to jump to an older message or open a deep link. */
+export interface ChatMessageContext {
+  conversationId: string;
+  messageId: string;
+  threadRootId: string | null;
+  messages: ChatMessageItem[];
+}
+
 export interface InsertMessageInput {
   id: string;
   conversationId: string;
@@ -36,7 +56,7 @@ export interface InsertMessageInput {
   authorUserId?: string | null;
   authorAgentId?: string | null;
   body: string;
-  parentMessageId?: string | null;
+  replyToMessageId?: string | null;
   mentions?: string[];
   meta?: Record<string, unknown> | null;
 }
@@ -105,6 +125,11 @@ export function parseAgentMentions(body: string): string[] {
 
 export function renderMentionText(body: string): string {
   return body.replace(/@\[([^\]]+)\]\((?:user|agent):[^)\s]+\)/g, '@$1');
+}
+
+/** Display name of a message author, with the generic names for agents and the system when no row is joined. */
+function authorNameOrDefault(name: string | null, kind: 'user' | 'agent' | 'system'): string | null {
+  return name ?? (kind === 'agent' ? 'Trợ lý' : kind === 'system' ? 'Hệ thống' : null);
 }
 
 export async function filterMentions(
@@ -242,7 +267,8 @@ export async function listConversations(db: D1Database, actor: Actor): Promise<C
        WHERE um.conversation_id = c.id
          AND um.created_at > COALESCE(cm.last_read_at, '')
          AND um.author_user_id IS NOT ?1
-         AND um.deleted_at IS NULL) AS unread
+         AND um.deleted_at IS NULL
+         AND (um.thread_root_id IS NULL OR um.also_in_main = 1)) AS unread
     FROM chat_conversation c
     JOIN chat_member cm ON cm.conversation_id = c.id AND cm.user_id = ?1
     WHERE c.organization_id = ?2
@@ -284,7 +310,8 @@ export async function unreadTotal(db: D1Database, actor: Actor): Promise<number>
       AND c.kind IN ('group', 'direct', 'task')
       AND m.created_at > COALESCE(cm.last_read_at, '')
       AND m.author_user_id IS NOT ?1
-      AND m.deleted_at IS NULL`)
+      AND m.deleted_at IS NULL
+      AND (m.thread_root_id IS NULL OR m.also_in_main = 1)`)
     .bind(actor.id, actor.organizationId)
     .first<{ total: number }>();
   return row?.total ?? 0;
@@ -369,35 +396,55 @@ export async function ensureTaskConversation(db: D1Database, actor: Actor, taskI
 export async function listMessages(
   db: D1Database,
   conversationId: string,
-  opts: { before?: string; limit?: number } = {},
+  opts: { before?: string; after?: string; limit?: number } = {},
 ): Promise<ChatMessageItem[]> {
   const limit = Math.min(Math.max(opts.limit ?? 50, 1), 100);
-  const before = opts.before;
+  const where = ['m.conversation_id = ?', '(m.thread_root_id IS NULL OR m.also_in_main = 1)'];
+  const binds: unknown[] = [conversationId];
+  if (opts.before) { where.push('m.created_at < ?'); binds.push(opts.before); }
+  if (opts.after) { where.push('m.created_at > ?'); binds.push(opts.after); }
+  // With `after` the oldest messages past that time are taken; the result is still returned newest first.
+  const order = opts.after ? 'ASC' : 'DESC';
   const rows = await db.prepare(`
     SELECT m.id, m.conversation_id, m.author_kind, m.author_user_id, m.author_agent_id,
-      m.parent_message_id, m.body, m.mentions_json, m.meta_json, m.created_at, m.deleted_at,
-      COALESCE(u.display_name, a.display_name) AS author_name
+      m.reply_to_message_id, m.thread_root_id, m.also_in_main,
+      m.body, m.mentions_json, m.meta_json, m.created_at, m.deleted_at,
+      COALESCE(u.display_name, a.display_name) AS author_name,
+      q.id AS q_id, q.author_kind AS q_author_kind, q.body AS q_body, q.deleted_at AS q_deleted_at,
+      q.thread_root_id AS q_thread_root_id, COALESCE(qu.display_name, qa.display_name) AS q_author_name
     FROM chat_message m
     LEFT JOIN app_user u ON u.id = m.author_user_id
     LEFT JOIN chat_agent a ON a.id = m.author_agent_id
-    WHERE m.conversation_id = ?${before ? ' AND m.created_at < ?' : ''}
-    ORDER BY m.created_at DESC, m.id DESC
+    LEFT JOIN chat_message q ON q.id = m.reply_to_message_id
+    LEFT JOIN app_user qu ON qu.id = q.author_user_id
+    LEFT JOIN chat_agent qa ON qa.id = q.author_agent_id
+    WHERE ${where.join(' AND ')}
+    ORDER BY m.created_at ${order}, m.id ${order}
     LIMIT ?`)
-    .bind(conversationId, ...(before ? [before] : []), limit)
+    .bind(...binds, limit)
     .all<{
       id: string;
       conversation_id: string;
       author_kind: 'user' | 'agent' | 'system';
       author_user_id: string | null;
       author_agent_id: string | null;
-      parent_message_id: string | null;
+      reply_to_message_id: string | null;
+      thread_root_id: string | null;
+      also_in_main: number;
       body: string;
       mentions_json: string | null;
       meta_json: string | null;
       created_at: string;
       deleted_at: string | null;
       author_name: string | null;
+      q_id: string | null;
+      q_author_kind: 'user' | 'agent' | 'system' | null;
+      q_body: string | null;
+      q_deleted_at: string | null;
+      q_thread_root_id: string | null;
+      q_author_name: string | null;
     }>();
+  if (opts.after) rows.results.reverse();
 
   const messageIds = rows.results.map((r) => r.id);
   const attRows = messageIds.length > 0
@@ -418,14 +465,26 @@ export async function listMessages(
 
   return rows.results.map((r) => {
     const deleted = r.deleted_at !== null;
+    const quoteDeleted = r.q_deleted_at !== null;
     return {
       id: r.id,
       conversationId: r.conversation_id,
       authorKind: r.author_kind,
       authorUserId: r.author_user_id,
       authorAgentId: r.author_agent_id,
-      authorName: r.author_name ?? (r.author_kind === 'agent' ? 'Trợ lý' : r.author_kind === 'system' ? 'Hệ thống' : null),
-      parentMessageId: r.parent_message_id,
+      authorName: authorNameOrDefault(r.author_name, r.author_kind),
+      replyToMessageId: r.reply_to_message_id,
+      replyTo: r.q_id && r.q_author_kind
+        ? {
+            id: r.q_id,
+            authorName: authorNameOrDefault(r.q_author_name, r.q_author_kind),
+            snippet: quoteDeleted ? '' : renderMentionText(r.q_body ?? '').slice(0, 120),
+            deleted: quoteDeleted,
+            threadRootId: r.q_thread_root_id,
+          }
+        : null,
+      threadRootId: r.thread_root_id,
+      alsoInMain: r.also_in_main === 1,
       body: deleted ? '' : r.body,
       mentions: deleted || !r.mentions_json ? [] : (JSON.parse(r.mentions_json) as string[]),
       meta: deleted || !r.meta_json ? null : (JSON.parse(r.meta_json) as Record<string, unknown>),
@@ -447,16 +506,16 @@ export async function insertMessage(db: D1Database, input: InsertMessageInput): 
   const now = new Date().toISOString();
   // Only people mention people: agent and system messages are stored without mentions, so they notify nobody.
   const mentions = input.authorKind === 'user' ? (input.mentions ?? parseMentions(text).slice(0, 10)) : [];
-  const parentId = input.parentMessageId ?? null;
+  const replyToId = input.replyToMessageId ?? null;
   const authorUserId = input.authorUserId ?? null;
   const authorAgentId = input.authorAgentId ?? null;
 
   const insertRes = await db.prepare(`
     INSERT OR IGNORE INTO chat_message
-      (id, conversation_id, author_kind, author_user_id, author_agent_id, parent_message_id, body, mentions_json, meta_json, created_at)
+      (id, conversation_id, author_kind, author_user_id, author_agent_id, reply_to_message_id, body, mentions_json, meta_json, created_at)
     SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10
     WHERE ?6 IS NULL OR EXISTS (
-      SELECT 1 FROM chat_message p WHERE p.id = ?6 AND p.conversation_id = ?2
+      SELECT 1 FROM chat_message p WHERE p.id = ?6 AND p.conversation_id = ?2 AND p.deleted_at IS NULL
     )`)
     .bind(
       input.id,
@@ -464,7 +523,7 @@ export async function insertMessage(db: D1Database, input: InsertMessageInput): 
       input.authorKind,
       authorUserId,
       authorAgentId,
-      parentId,
+      replyToId,
       text,
       mentions.length ? JSON.stringify(mentions) : null,
       input.meta ? JSON.stringify(input.meta) : null,
@@ -475,7 +534,7 @@ export async function insertMessage(db: D1Database, input: InsertMessageInput): 
   if ((insertRes.meta?.changes ?? 0) === 0) {
     const existing = await db.prepare(`
       SELECT id, conversation_id, author_kind, author_user_id, author_agent_id,
-        parent_message_id, body, mentions_json, meta_json, created_at, deleted_at
+        reply_to_message_id, thread_root_id, also_in_main, body, mentions_json, meta_json, created_at, deleted_at
       FROM chat_message WHERE id = ?`)
       .bind(input.id)
       .first<{
@@ -484,7 +543,9 @@ export async function insertMessage(db: D1Database, input: InsertMessageInput): 
         author_kind: 'user' | 'agent' | 'system';
         author_user_id: string | null;
         author_agent_id: string | null;
-        parent_message_id: string | null;
+        reply_to_message_id: string | null;
+        thread_root_id: string | null;
+        also_in_main: number;
         body: string;
         mentions_json: string | null;
         meta_json: string | null;
@@ -493,8 +554,8 @@ export async function insertMessage(db: D1Database, input: InsertMessageInput): 
       }>();
 
     if (!existing) {
-      return fail('VALIDATION_FAILED', 'Tin nhắn gốc không thuộc hội thoại này', {
-        fields: { parentMessageId: 'Không hợp lệ' },
+      return fail('VALIDATION_FAILED', 'Tin được trả lời không thuộc hội thoại này', {
+        fields: { replyToMessageId: 'Không hợp lệ' },
       });
     }
 
@@ -512,7 +573,10 @@ export async function insertMessage(db: D1Database, input: InsertMessageInput): 
         authorUserId: existing.author_user_id,
         authorAgentId: existing.author_agent_id,
         authorName: null,
-        parentMessageId: existing.parent_message_id,
+        replyToMessageId: existing.reply_to_message_id,
+        replyTo: null,
+        threadRootId: existing.thread_root_id,
+        alsoInMain: existing.also_in_main === 1,
         body: deleted ? '' : existing.body,
         mentions: deleted || !existing.mentions_json ? [] : (JSON.parse(existing.mentions_json) as string[]),
         meta: deleted || !existing.meta_json ? null : (JSON.parse(existing.meta_json) as Record<string, unknown>),
@@ -536,7 +600,10 @@ export async function insertMessage(db: D1Database, input: InsertMessageInput): 
     authorUserId,
     authorAgentId,
     authorName: null,
-    parentMessageId: parentId,
+    replyToMessageId: replyToId,
+    replyTo: null,
+    threadRootId: null,
+    alsoInMain: false,
     body: text,
     mentions,
     meta: input.meta ?? null,
@@ -559,6 +626,45 @@ export async function markRead(db: D1Database, conversationId: string, userId: s
     WHERE conversation_id = ? AND user_id = ?`)
     .bind(safeAt, conversationId, userId)
     .run();
+}
+
+/**
+ * The main-flow window around one message: up to 25 messages on each side of the anchor, newest first. A reply that
+ * lives only in a thread is anchored on its thread root. Null when the message is missing or the actor cannot read
+ * its conversation.
+ */
+export async function messageContext(
+  db: D1Database,
+  actor: Actor,
+  messageId: string,
+): Promise<ChatMessageContext | null> {
+  const msg = await db.prepare(`
+    SELECT m.id, m.conversation_id, m.thread_root_id, m.also_in_main, m.created_at, r.created_at AS root_created_at
+    FROM chat_message m
+    LEFT JOIN chat_message r ON r.id = m.thread_root_id AND r.conversation_id = m.conversation_id
+    WHERE m.id = ?`)
+    .bind(messageId).first<{
+      id: string;
+      conversation_id: string;
+      thread_root_id: string | null;
+      also_in_main: number;
+      created_at: string;
+      root_created_at: string | null;
+    }>();
+  if (!msg) return null;
+  if (!(await loadConversation(db, actor, msg.conversation_id))) return null;
+
+  const anchorAt = msg.thread_root_id && msg.also_in_main === 0 && msg.root_created_at
+    ? msg.root_created_at
+    : msg.created_at;
+  const beforeAnchor = new Date(Date.parse(anchorAt) + 1).toISOString();
+  const [older, newer] = await Promise.all([
+    listMessages(db, msg.conversation_id, { before: beforeAnchor, limit: 26 }),
+    listMessages(db, msg.conversation_id, { after: anchorAt, limit: 25 }),
+  ]);
+  const seen = new Set<string>();
+  const messages = [...newer, ...older].filter((m) => (seen.has(m.id) ? false : (seen.add(m.id), true)));
+  return { conversationId: msg.conversation_id, messageId: msg.id, threadRootId: msg.thread_root_id, messages };
 }
 
 /**
@@ -611,6 +717,7 @@ export async function agentVisibleConversations(db: D1Database, actor: Actor): P
         SELECT COUNT(*) FROM chat_message um
         WHERE um.conversation_id = c.id AND um.created_at > COALESCE(cm.last_read_at, '')
           AND um.author_user_id IS NOT ? AND um.deleted_at IS NULL
+          AND (um.thread_root_id IS NULL OR um.also_in_main = 1)
       ) END AS unread
     FROM chat_conversation c
     LEFT JOIN chat_member cm ON cm.conversation_id = c.id AND cm.user_id = ?
@@ -639,11 +746,13 @@ interface AgentMessageRow {
   author_kind: 'user' | 'agent' | 'system';
   author_name: string | null;
   created_at: string;
-  parent_message_id: string | null;
+  reply_to_message_id: string | null;
+  thread_root_id: string | null;
   body: string;
 }
 
-const AGENT_MESSAGE_SELECT = `SELECT m.id, m.conversation_id, m.author_kind, m.created_at, m.parent_message_id, m.body,
+const AGENT_MESSAGE_SELECT = `SELECT m.id, m.conversation_id, m.author_kind, m.created_at,
+    m.reply_to_message_id, m.thread_root_id, m.body,
     COALESCE(u.display_name, a.display_name) AS author_name
   FROM chat_message m
   LEFT JOIN app_user u ON u.id = m.author_user_id
@@ -653,10 +762,11 @@ function toAgentMessage(r: AgentMessageRow, withConversation: boolean): AgentMes
   return {
     id: r.id,
     ...(withConversation ? { conversation_id: r.conversation_id } : {}),
-    author: r.author_name ?? (r.author_kind === 'agent' ? 'Trợ lý' : r.author_kind === 'system' ? 'Hệ thống' : null),
+    author: authorNameOrDefault(r.author_name, r.author_kind),
     author_kind: r.author_kind,
     at: r.created_at,
-    parent_id: r.parent_message_id,
+    // Lark meaning: the message this one answers, or else the root of its thread.
+    parent_id: r.reply_to_message_id ?? r.thread_root_id,
     text: `[chat] ${renderMentionText(r.body)}`,
   };
 }
@@ -719,7 +829,7 @@ export async function postTaskComment(
   sink: Sink,
   actor: Actor,
   taskId: string,
-  input: { id: string; body: string; parentMessageId?: string | null; meta?: Record<string, unknown> | null },
+  input: { id: string; body: string; replyToMessageId?: string | null; meta?: Record<string, unknown> | null },
 ): Promise<ApiResult<ChatMessageItem>> {
   const conversationId = await ensureTaskConversation(db, actor, taskId);
   const existingMembers = await memberIds(db, conversationId);
@@ -731,7 +841,7 @@ export async function postTaskComment(
     authorKind: 'user',
     authorUserId: actor.id,
     body: input.body,
-    parentMessageId: input.parentMessageId ?? null,
+    replyToMessageId: input.replyToMessageId ?? null,
     mentions,
     meta: input.meta ?? null,
   });

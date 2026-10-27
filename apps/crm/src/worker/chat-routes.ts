@@ -11,6 +11,7 @@ import {
   loadConversation,
   markRead,
   memberIds,
+  messageContext,
   parseUserMentions,
   publish,
   renderMentionText,
@@ -453,6 +454,7 @@ chatRoutes.post('/conversations/:id/messages', async (c) => {
   const body = await c.req.json<{
     id?: unknown;
     body?: unknown;
+    replyToMessageId?: unknown;
     parentMessageId?: unknown;
     attachmentIds?: unknown;
   }>().catch(() => null);
@@ -460,8 +462,10 @@ chatRoutes.post('/conversations/:id/messages', async (c) => {
   if (!body || typeof body.id !== 'string' || typeof body.body !== 'string') {
     return c.json(fail('VALIDATION_FAILED', 'Dữ liệu chưa hợp lệ'), 422);
   }
-  if (body.parentMessageId !== undefined && body.parentMessageId !== null && typeof body.parentMessageId !== 'string') {
-    return c.json(fail('VALIDATION_FAILED', 'Tin nhắn gốc không hợp lệ', { fields: { parentMessageId: 'Không hợp lệ' } }), 422);
+  // parentMessageId is the name an open tab from the previous release still sends.
+  const replyToMessageId = body.replyToMessageId ?? body.parentMessageId ?? null;
+  if (replyToMessageId !== null && typeof replyToMessageId !== 'string') {
+    return c.json(fail('VALIDATION_FAILED', 'Tin được trả lời không hợp lệ', { fields: { replyToMessageId: 'Không hợp lệ' } }), 422);
   }
 
   let attachmentIds: string[] = [];
@@ -482,7 +486,7 @@ chatRoutes.post('/conversations/:id/messages', async (c) => {
     authorKind: 'user',
     authorUserId: actor.id,
     body: body.body,
-    parentMessageId: (body.parentMessageId as string | null | undefined) ?? null,
+    replyToMessageId,
     mentions,
   });
 
@@ -556,6 +560,12 @@ chatRoutes.post('/conversations/:id/messages', async (c) => {
   }
 
   return c.json(result, 200);
+});
+
+chatRoutes.get('/messages/:id/context', async (c) => {
+  const context = await messageContext(c.env.DB, c.get('actor'), c.req.param('id'));
+  if (!context) return c.json(notFound, 404);
+  return c.json(ok(context));
 });
 
 chatRoutes.delete('/messages/:id', async (c) => {

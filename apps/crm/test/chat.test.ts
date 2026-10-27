@@ -422,3 +422,128 @@ describe('internal chat', () => {
     expect(JSON.parse(row?.mentions_json ?? '[]')).toEqual(['u-long']);
   });
 });
+
+describe('quote replies and message context', () => {
+  async function group(title: string, memberUserIds: string[] = ['u-long']) {
+    const created = await call('u-lan', 'POST', '/chat/conversations', { kind: 'group', title, memberUserIds });
+    expect(created.status).toBe(200);
+    return created.json.data.id as string;
+  }
+  async function post(user: string, convId: string, body: string, extra: Record<string, unknown> = {}) {
+    const id = crypto.randomUUID();
+    const res = await call(user, 'POST', `/chat/conversations/${convId}/messages`, { id, body, ...extra });
+    return { id, res };
+  }
+
+  test('a quote reply stays in the main flow and carries a preview of the quoted message', async () => {
+    const convId = await group('Nhóm trích dẫn');
+    const a = await post('u-lan', convId, 'Chiều nay họp lúc 3h nhé');
+    const b = await post('u-long', convId, 'Mình vào đúng giờ', { replyToMessageId: a.id });
+    expect(b.res.status).toBe(200);
+    expect(b.res.json.data.replyToMessageId).toBe(a.id);
+
+    const list = await call('u-lan', 'GET', `/chat/conversations/${convId}/messages`);
+    expect(list.status).toBe(200);
+    const ids = (list.json.data as { id: string }[]).map((m) => m.id);
+    expect(ids).toEqual([b.id, a.id]);
+    const reply = list.json.data[0];
+    expect(reply).toMatchObject({
+      replyToMessageId: a.id,
+      threadRootId: null,
+      alsoInMain: false,
+      replyTo: { id: a.id, authorName: 'Đỗ Ngọc Lan', snippet: 'Chiều nay họp lúc 3h nhé', deleted: false, threadRootId: null },
+    });
+    expect(list.json.data[1]).toMatchObject({ replyToMessageId: null, replyTo: null });
+  });
+
+  test('the old parentMessageId field is stored as the quoted message', async () => {
+    const convId = await group('Nhóm tên cũ');
+    const a = await post('u-lan', convId, 'Tin gốc');
+    const b = await post('u-long', convId, 'Trả lời bằng tên cũ', { parentMessageId: a.id });
+    expect(b.res.status).toBe(200);
+    const row = await db.prepare('SELECT reply_to_message_id FROM chat_message WHERE id = ?')
+      .bind(b.id).first<{ reply_to_message_id: string | null }>();
+    expect(row?.reply_to_message_id).toBe(a.id);
+  });
+
+  test('quoting a message of another conversation or a recalled message is rejected', async () => {
+    const conv1 = await group('Nhóm một');
+    const conv2 = await group('Nhóm hai');
+    const other = await post('u-lan', conv1, 'Tin ở nhóm một');
+    const cross = await post('u-lan', conv2, 'Trích tin nhóm khác', { replyToMessageId: other.id });
+    expect(cross.res.status).toBe(422);
+    expect(cross.res.json.error).toMatchObject({ code: 'VALIDATION_FAILED', fields: { replyToMessageId: 'Không hợp lệ' } });
+
+    const recalled = await post('u-lan', conv2, 'Tin sẽ thu hồi');
+    expect((await call('u-lan', 'DELETE', `/chat/messages/${recalled.id}`)).status).toBe(200);
+    const onRecalled = await post('u-long', conv2, 'Trích tin đã thu hồi', { replyToMessageId: recalled.id });
+    expect(onRecalled.res.status).toBe(422);
+    expect(onRecalled.res.json.error?.code).toBe('VALIDATION_FAILED');
+  });
+
+  test('recalling a quoted message empties the preview and marks it deleted', async () => {
+    const convId = await group('Nhóm thu hồi');
+    const a = await post('u-lan', convId, 'Tin sẽ bị thu hồi');
+    const b = await post('u-long', convId, 'Đã nhận', { replyToMessageId: a.id });
+    expect(b.res.status).toBe(200);
+    expect((await call('u-lan', 'DELETE', `/chat/messages/${a.id}`)).status).toBe(200);
+
+    const list = await call('u-long', 'GET', `/chat/conversations/${convId}/messages`);
+    const reply = (list.json.data as any[]).find((m) => m.id === b.id);
+    expect(reply.replyTo).toMatchObject({ id: a.id, deleted: true, snippet: '' });
+  });
+
+  test('message context returns the main-flow window around a message and hides it from non-members', async () => {
+    const convId = await group('Nhóm lịch sử');
+    const base = Date.parse('2026-10-01T00:00:00.000Z');
+    const ids = Array.from({ length: 60 }, (_, i) => `ctx-${String(i + 1).padStart(2, '0')}`);
+    await db.batch(ids.map((id, i) => db.prepare(`INSERT INTO chat_message
+      (id, conversation_id, author_kind, author_user_id, body, created_at)
+      VALUES (?, ?, 'user', 'u-lan', ?, ?)`)
+      .bind(id, convId, `Tin số ${i + 1}`, new Date(base + i * 60_000).toISOString())));
+    const tenth = ids[9]!;
+
+    const ctx = await call('u-long', 'GET', `/chat/messages/${tenth}/context`);
+    expect(ctx.status).toBe(200);
+    expect(ctx.json.data).toMatchObject({ conversationId: convId, messageId: tenth, threadRootId: null });
+    const windowIds = (ctx.json.data.messages as { id: string }[]).map((m) => m.id);
+    // Nine older messages, the tenth itself and the 25 that follow it, newest first.
+    expect(windowIds).toEqual(ids.slice(0, 35).reverse());
+
+    const stranger = await call('u-huy', 'GET', `/chat/messages/${tenth}/context`);
+    expect(stranger.status).toBe(404);
+    expect((await call('u-long', 'GET', '/chat/messages/missing-id/context')).status).toBe(404);
+  });
+
+  test('the schema has the reply, thread and task source columns and accepts chat_thread notifications', async () => {
+    const msgCols = (await db.prepare('PRAGMA table_info(chat_message)').all<{ name: string }>()).results.map((c) => c.name);
+    expect(msgCols).toEqual(expect.arrayContaining(['reply_to_message_id', 'thread_root_id', 'also_in_main']));
+    const taskCols = (await db.prepare('PRAGMA table_info(task)').all<{ name: string }>()).results.map((c) => c.name);
+    expect(taskCols).toEqual(expect.arrayContaining(['source_conversation_id', 'source_message_id', 'source_scope']));
+
+    await db.prepare(`INSERT INTO notification (id, user_id, kind, title, created_at)
+      VALUES ('n-thread', 'u-lan', 'chat_thread', 'Có trả lời mới trong chuỗi', ?)`)
+      .bind(new Date().toISOString()).run();
+    const row = await db.prepare("SELECT kind FROM notification WHERE id = 'n-thread'").first<{ kind: string }>();
+    expect(row?.kind).toBe('chat_thread');
+  });
+
+  test('the data fix copies an old parent_message_id into reply_to_message_id', async () => {
+    const convId = await group('Nhóm dữ liệu cũ');
+    const now = new Date().toISOString();
+    await db.batch([
+      db.prepare(`INSERT INTO chat_message (id, conversation_id, author_kind, author_user_id, body, created_at)
+        VALUES ('old-root', ?, 'user', 'u-lan', 'Tin gốc cũ', ?)`).bind(convId, now),
+      db.prepare(`INSERT INTO chat_message (id, conversation_id, author_kind, author_user_id, parent_message_id, body, created_at)
+        VALUES ('old-reply', ?, 'user', 'u-long', 'old-root', 'Trả lời cũ', ?)`).bind(convId, now),
+    ]);
+    const before = await db.prepare("SELECT reply_to_message_id FROM chat_message WHERE id = 'old-reply'")
+      .first<{ reply_to_message_id: string | null }>();
+    expect(before?.reply_to_message_id).toBeNull();
+
+    await db.prepare('UPDATE chat_message SET reply_to_message_id = parent_message_id WHERE parent_message_id IS NOT NULL').run();
+    const after = await db.prepare("SELECT reply_to_message_id FROM chat_message WHERE id = 'old-reply'")
+      .first<{ reply_to_message_id: string | null }>();
+    expect(after?.reply_to_message_id).toBe('old-root');
+  });
+});

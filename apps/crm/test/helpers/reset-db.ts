@@ -9,7 +9,7 @@ export const TABLES = [
   'payment_allocation', 'payment', 'charge',
   'lms_progress', 'learner_session', 'lms_lesson_video', 'lms_access', 'lms_lesson', 'lms_program', 'learner_account',
   'attendance', 'trial_booking', 'enrollment', 'class_session', 'class_teacher', 'class_group',
-  '_guard', 'idempotency_key', 'outbox', 'audit_log', 'approval', 'activity', 'chat_agent_member', 'chat_attachment', 'chat_message', 'chat_member', 'chat_conversation', 'chat_agent', 'task_member', 'task', 'lead_step', 'lead', 'lead_counter',
+  '_guard', 'idempotency_key', 'outbox', 'audit_log', 'approval', 'activity', 'chat_thread_follower', 'chat_thread', 'chat_agent_member', 'chat_attachment', 'chat_message', 'chat_member', 'chat_conversation', 'chat_agent', 'task_member', 'task', 'lead_step', 'lead', 'lead_counter',
   'course',
   'notification', 'push_subscription', 'agent_token', 'user_session', 'consent', 'customer_product', 'product',
   'partner_contract_step', 'partner_contract',

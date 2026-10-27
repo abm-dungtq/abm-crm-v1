@@ -125,14 +125,16 @@ app.post('/tasks/:id/comments', async (c) => {
   const actor = c.get('actor');
   const taskId = c.req.param('id');
   if (!(await canSeeTask(c.env.DB, actor, taskId))) return c.json(notFound, 404);
-  const body = await c.req.json<{ id?: string; body?: string; parentMessageId?: string }>().catch(() => null);
+  // parentMessageId is the name an open tab from the previous release still sends.
+  const body = await c.req.json<{ id?: string; body?: string; replyToMessageId?: string; parentMessageId?: string }>()
+    .catch(() => null);
   if (!body || typeof body.id !== 'string' || typeof body.body !== 'string') {
     return c.json({ ok: false, error: { code: 'VALIDATION_FAILED', message: 'Dữ liệu chưa hợp lệ' } }, 422);
   }
   const result = await postTaskComment(c.env.DB, sinkFrom(c), actor, taskId, {
     id: body.id,
     body: body.body,
-    parentMessageId: body.parentMessageId ?? null,
+    replyToMessageId: body.replyToMessageId ?? body.parentMessageId ?? null,
   });
   return c.json(result, result.ok ? 200 : STATUS[result.error.code] ?? 400);
 });

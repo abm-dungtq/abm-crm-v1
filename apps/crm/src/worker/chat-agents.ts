@@ -61,7 +61,8 @@ export interface ChatCompletionPayload {
   chatConversationId: string;
   chatAgentId: string;
   requestedByUserId: string;
-  parentMessageId: string | null;
+  /** The question the agent's answer quotes; null in a direct agent chat. */
+  replyToMessageId: string | null;
   commandId?: string;
 }
 
@@ -436,8 +437,7 @@ export async function scheduleAgentTurns(
 
     if (targetAgents.length === 0) return;
 
-    // ONE query to load the last 20 messages of the conversation (or thread when parentMessageId is set)
-    const parentId = message.parentMessageId ?? null;
+    // ONE query to load the last 20 main-flow messages of the conversation
     const recent = await db
       .prepare(
         `SELECT m.id, m.body,
@@ -448,11 +448,11 @@ export async function scheduleAgentTurns(
          WHERE m.conversation_id = ?1
            AND m.deleted_at IS NULL
            AND m.id <> ?2
-           AND (?3 IS NULL OR m.id = ?3 OR m.parent_message_id = ?3)
+           AND (m.thread_root_id IS NULL OR m.also_in_main = 1)
          ORDER BY m.created_at DESC, m.id DESC
          LIMIT 20`,
       )
-      .bind(conversation.id, message.id, parentId)
+      .bind(conversation.id, message.id)
       .all<{ id: string; body: string; author_name: string }>();
 
     const historyLines = recent.results
@@ -479,6 +479,8 @@ export async function scheduleAgentTurns(
 
   if (turns.length === 0) return;
 
+  // In a group or task thread the agent's answer quotes the question; a direct agent chat needs no quote.
+  const replyToMessageId = isDirectAgent ? null : message.id;
   const commandInputs: EnqueueCommandInput[] = turns.map((turn) => ({
     kind: 'run_completion',
     target: 'bridge',
@@ -491,7 +493,7 @@ export async function scheduleAgentTurns(
       chatConversationId: conversation.id,
       chatAgentId: turn.agentId,
       requestedByUserId: actor.id,
-      parentMessageId: message.parentMessageId ?? null,
+      replyToMessageId,
     } satisfies ChatCompletionPayload,
     dedupeKey: `chat-turn:${message.id}:${turn.agentId}`,
   }));
@@ -519,7 +521,7 @@ export async function scheduleAgentTurns(
       conversationId: conversation.id,
       authorKind: 'system',
       body: 'Trợ lý đang offline, sẽ trả lời khi máy chủ agent hoạt động lại.',
-      parentMessageId: message.parentMessageId ?? null,
+      replyToMessageId,
     });
     if (offlineRes.ok && !offlineRes.data.duplicate) {
       publish(sink, actor.organizationId, members, {
@@ -577,8 +579,8 @@ export async function applyChatAgentReply(
   const convId = typeof raw.chatConversationId === 'string' ? raw.chatConversationId : '';
   const agentId = typeof raw.chatAgentId === 'string' ? raw.chatAgentId : null;
   const requestedByUserId = typeof raw.requestedByUserId === 'string' ? raw.requestedByUserId : null;
-  const parentMessageId = typeof raw.parentMessageId === 'string' ? raw.parentMessageId : null;
-  const cmdId = commandId ?? (typeof raw.commandId === 'string' ? raw.commandId : '');
+  const replyToMessageId = typeof raw.replyToMessageId === 'string' ? raw.replyToMessageId : null;
+  const cmdId =commandId ?? (typeof raw.commandId === 'string' ? raw.commandId : '');
   if (!convId || !cmdId) return;
 
   const [convRes, membersRes] = await db.batch([
@@ -620,7 +622,7 @@ export async function applyChatAgentReply(
     conversationId: convId,
     authorKind: 'agent',
     authorAgentId: agentId,
-    parentMessageId,
+    replyToMessageId,
     body,
     meta,
   });
@@ -647,7 +649,7 @@ export async function applyChatAgentFailure(
 ): Promise<void> {
   const raw = (payload ?? {}) as Partial<ChatCompletionPayload>;
   const convId = typeof raw.chatConversationId === 'string' ? raw.chatConversationId : '';
-  const parentMessageId = typeof raw.parentMessageId === 'string' ? raw.parentMessageId : null;
+  const replyToMessageId = typeof raw.replyToMessageId === 'string' ? raw.replyToMessageId : null;
   if (!convId || !commandId) return;
 
   const [convRes, membersRes] = await db.batch([
@@ -664,7 +666,7 @@ export async function applyChatAgentFailure(
     id: msgId,
     conversationId: convId,
     authorKind: 'system',
-    parentMessageId,
+    replyToMessageId,
     body: 'Trợ lý không trả lời được lần này. Thử lại sau.',
   });
 

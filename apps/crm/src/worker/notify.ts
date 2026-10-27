@@ -5,6 +5,7 @@ import type { Sink } from './env';
 export type NotificationKind =
   | 'chat_direct'
   | 'chat_mention'
+  | 'chat_thread'
   | 'task_assigned'
   | 'task_due'
   | 'approval'
