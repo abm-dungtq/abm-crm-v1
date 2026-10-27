@@ -2,6 +2,7 @@ import {
   ACTIVE_STAGES, FIRST_CONTACT_SLA_HOURS, RELEASE_AFTER_HOURS, STAGES, allowedTransitions, foldText, normalizePhone,
   workingDaysBetween, workingMinutesBetween, type StageCode,
 } from '@abm/contracts';
+import { conversationTitleSql } from './chat';
 import type { Actor } from './env';
 import { learnerPhoneVisible } from './learner-queries';
 import { leadScope, mayDecideApproval } from './scope';
@@ -192,7 +193,8 @@ const TASK_SELECT = `
     l.id AS lead_id, l.code AS lead_code, l.stage AS lead_stage, l.status AS lead_status, l.version AS lead_version,
     l.pipeline, l.contact_id,
     (l.next_action_task_id = tk.id) AS is_next_action,
-    c.display_name AS contact_name, a.name AS account_name
+    c.display_name AS contact_name, a.name AS account_name,
+    tk.source_conversation_id, tk.source_message_id, tk.source_scope
   FROM task tk
   LEFT JOIN lead l ON l.id = tk.lead_id
   LEFT JOIN contact c ON c.id = l.contact_id
@@ -261,7 +263,8 @@ export async function taskDetail(db: D1Database, actor: Actor, id: string) {
     .bind(id)
     .first<Record<string, unknown> & { due_at: string | null; is_next_action: number }>();
   if (!row) return null;
-  const [members, subtasks, parent] = await Promise.all([
+  const sourceConversationId = (row.source_conversation_id as string | null) ?? null;
+  const [members, subtasks, parent, sourceConversation] = await Promise.all([
     db.prepare('SELECT u.id, u.display_name AS name FROM task_member tm JOIN app_user u ON u.id = tm.user_id WHERE tm.task_id = ? ORDER BY u.display_name')
       .bind(id).all<{ id: string; name: string }>(),
     db.prepare('SELECT id, title, status FROM task WHERE parent_task_id = ? ORDER BY created_at ASC')
@@ -269,16 +272,43 @@ export async function taskDetail(db: D1Database, actor: Actor, id: string) {
     row.parent_task_id
       ? db.prepare('SELECT id, title FROM task WHERE id = ?').bind(row.parent_task_id).first<{ id: string; title: string }>()
       : Promise.resolve(null),
+    // The source chat opens only for its members while it is not archived; nobody else learns its title.
+    sourceConversationId
+      ? db.prepare(`SELECT ${conversationTitleSql('c', '?')} AS title
+          FROM chat_conversation c
+          JOIN chat_member cm ON cm.conversation_id = c.id AND cm.user_id = ?
+          WHERE c.id = ? AND c.organization_id = ? AND c.archived_at IS NULL`)
+        .bind(actor.id, actor.id, sourceConversationId, actor.organizationId).first<{ title: string }>()
+      : Promise.resolve(null),
   ]);
   const now = new Date();
   const today = vnDate(now);
+  const source: TaskSourceDetail | null = sourceConversationId
+    ? {
+        conversationId: sourceConversationId,
+        messageId: row.source_message_id as string,
+        scope: row.source_scope as 'message' | 'thread',
+        conversationTitle: sourceConversation ? sourceConversation.title : null,
+        canOpen: sourceConversation !== null,
+      }
+    : null;
   return {
     ...toTaskItem(row, now, today),
     createdBy: row.created_by_user_id ? { id: row.created_by_user_id as string, name: row.created_by_name as string } : null,
     members: members.results,
     subtasks: subtasks.results,
     parent: parent ?? null,
+    source,
   };
+}
+
+/** Where a task made from chat came from, as task detail shows it ("Tạo từ chat"). */
+export interface TaskSourceDetail {
+  conversationId: string;
+  messageId: string;
+  scope: 'message' | 'thread';
+  conversationTitle: string | null;
+  canOpen: boolean;
 }
 
 export async function dashboard(db: D1Database, actor: Actor) {

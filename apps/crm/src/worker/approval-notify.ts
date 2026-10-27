@@ -1,5 +1,6 @@
 import type { Context } from 'hono';
 import { sinkFrom, type AppBindings } from './env';
+import { postTaskCard, type TaskSourceRef } from './chat-tasks';
 import type { GuardedTx } from './guarded-tx';
 import { notify } from './notify';
 
@@ -33,6 +34,8 @@ export function notifyCommitted(c: Context<AppBindings>) {
         requesterId?: string | null;
         taskId?: string;
         assigneeUserId?: string;
+        memberUserIds?: string[];
+        source?: TaskSourceRef | null;
       };
       if (event.type === 'approval.requested' && approvalNeedsLeader(payload.kind ?? '', payload.toStage)) {
         if (payload.approvalId) {
@@ -57,24 +60,51 @@ export function notifyCommitted(c: Context<AppBindings>) {
           }
         }
       }
-      if (
-        (event.type === 'task.created' || event.type === 'task.assigned') &&
-        payload.taskId &&
-        payload.assigneeUserId &&
-        payload.assigneeUserId !== actor.id
-      ) {
-        const taskRow = await c.env.DB.prepare('SELECT title FROM task WHERE id = ?')
-          .bind(payload.taskId)
-          .first<{ title: string }>();
-        await notify(sink, {
-          organizationId: actor.organizationId,
-          userIds: [payload.assigneeUserId],
-          kind: 'task_assigned',
-          title: `${actor.displayName} giao việc cho bạn`,
-          body: taskRow?.title ?? undefined,
-          link: `/tasks/${payload.taskId}`,
-          dedupeKey: `task-assigned:${payload.taskId}:${payload.assigneeUserId}`,
-        });
+      if ((event.type === 'task.created' || event.type === 'task.assigned') && payload.taskId) {
+        const taskId = payload.taskId;
+        const assigneeUserId = payload.assigneeUserId && payload.assigneeUserId !== actor.id ? payload.assigneeUserId : null;
+        // Every new task tells its members, not only tasks made from chat; the actor and the assignee are told otherwise.
+        const memberUserIds = event.type === 'task.created'
+          ? (payload.memberUserIds ?? []).filter((uid) => uid !== actor.id && uid !== payload.assigneeUserId)
+          : [];
+        const source = event.type === 'task.created' ? payload.source ?? null : null;
+        if (assigneeUserId || memberUserIds.length > 0 || source) {
+          const taskRow = await c.env.DB.prepare(`SELECT tk.title, tk.due_at, u.display_name AS assignee_name
+            FROM task tk LEFT JOIN app_user u ON u.id = tk.assignee_user_id WHERE tk.id = ?`)
+            .bind(taskId)
+            .first<{ title: string; due_at: string | null; assignee_name: string | null }>();
+          if (assigneeUserId) {
+            await notify(sink, {
+              organizationId: actor.organizationId,
+              userIds: [assigneeUserId],
+              kind: 'task_assigned',
+              title: `${actor.displayName} giao việc cho bạn`,
+              body: taskRow?.title ?? undefined,
+              link: `/tasks/${taskId}`,
+              dedupeKey: `task-assigned:${taskId}:${assigneeUserId}`,
+            });
+          }
+          if (memberUserIds.length > 0) {
+            await notify(sink, {
+              organizationId: actor.organizationId,
+              userIds: memberUserIds,
+              kind: 'task_assigned',
+              title: `${actor.displayName} thêm bạn vào việc`,
+              body: taskRow?.title ?? undefined,
+              link: `/tasks/${taskId}`,
+              dedupeKey: `task-member:${taskId}`,
+            });
+          }
+          if (source && taskRow) {
+            await postTaskCard(sink, c.env.DB, actor, {
+              taskId,
+              title: taskRow.title,
+              assigneeName: taskRow.assignee_name,
+              dueAt: taskRow.due_at,
+              source,
+            });
+          }
+        }
       }
     }
   };

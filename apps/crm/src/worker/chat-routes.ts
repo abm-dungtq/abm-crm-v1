@@ -33,12 +33,14 @@ import {
   startTopicStatements,
 } from './chat-threads';
 import { ensureDepartmentGroups, isDepartmentGroupKey } from './chat-groups';
+import { buildManualTaskDraft } from './chat-tasks';
 import {
   addConversationAgent,
   findOrCreateAgentDirect,
   listEnabledChatAgents,
   removeConversationAgent,
   scheduleAgentTurns,
+  scheduleTaskDraftTurn,
 } from './chat-agents';
 import { asUploadFile } from './inbox/media';
 import { notify } from './notify';
@@ -730,6 +732,47 @@ chatRoutes.post('/conversations/:id/messages', async (c) => {
   }
 
   return c.json(result, 200);
+});
+
+chatRoutes.post('/conversations/:id/task-drafts', async (c) => {
+  const actor = c.get('actor');
+  const db = c.env.DB;
+  const conv = await loadConversation(db, actor, c.req.param('id'));
+  if (!conv) return c.json(notFound, 404);
+  if (conv.kind !== 'group' && conv.kind !== 'direct') {
+    return c.json(fail('VALIDATION_FAILED', 'Chỉ tạo việc từ chat nhóm hoặc chat riêng'), 422);
+  }
+  const body = await c.req.json<{ messageId?: unknown; scope?: unknown; prefer?: unknown }>().catch(() => null);
+  const messageId = typeof body?.messageId === 'string' ? body.messageId.trim() : '';
+  const scope = body?.scope;
+  if (!messageId || messageId.length > 64 || (scope !== 'message' && scope !== 'thread')) {
+    return c.json(fail('VALIDATION_FAILED', 'Dữ liệu chưa hợp lệ', { fields: { messageId: 'Không hợp lệ', scope: 'Không hợp lệ' } }), 422);
+  }
+  if (body?.prefer !== undefined && body.prefer !== 'manual') {
+    return c.json(fail('VALIDATION_FAILED', 'Dữ liệu chưa hợp lệ', { fields: { prefer: 'Không hợp lệ' } }), 422);
+  }
+  const source = await db.prepare('SELECT thread_root_id FROM chat_message WHERE id = ? AND conversation_id = ? AND deleted_at IS NULL')
+    .bind(messageId, conv.id)
+    .first<{ thread_root_id: string | null }>();
+  if (!source) return c.json(notFound, 404);
+  if (scope === 'thread' && source.thread_root_id !== null) {
+    return c.json(fail('VALIDATION_FAILED', 'Chỉ tạo việc từ chuỗi ở tin gốc', { fields: { scope: 'Không hợp lệ' } }), 422);
+  }
+
+  // The group agent drafts when it can ("Tự tạo việc" skips it); otherwise the manual draft comes back at once.
+  if (body?.prefer !== 'manual') {
+    try {
+      if (await scheduleTaskDraftTurn(sinkFrom(c), db, actor, conv, { messageId, scope })) {
+        return c.json(ok({ mode: 'agent' as const }));
+      }
+    } catch {
+      // Falls back to the manual draft. Only the message id is logged: the error may quote chat text.
+      console.error('schedule_task_draft_failed', messageId);
+    }
+  }
+  const draft = await buildManualTaskDraft(db, conv, { messageId, scope }, actor.id);
+  if (!draft) return c.json(notFound, 404);
+  return c.json(ok({ mode: 'manual' as const, draft }));
 });
 
 chatRoutes.get('/messages/:id/context', async (c) => {

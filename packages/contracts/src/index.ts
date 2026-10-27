@@ -330,8 +330,16 @@ export const createTaskInput = z.object({
   dueAt: z.string().datetime().optional(),
   assigneeUserId: z.string().min(1),
   memberUserIds: z.array(z.string().min(1)).max(20).default([]),
+  source: z.object({
+    conversationId: z.string().min(1).max(120),
+    messageId: z.string().min(1).max(64),
+    scope: z.enum(['message', 'thread']),
+  }).optional(),
+  draft: z.object({ messageId: z.string().min(1).max(64), index: z.number().int().min(0).max(2) }).optional(),
 }).refine((v) => v.kind === 'internal' || (v.leadId && v.dueAt), { message: 'Việc CRM cần lead và hạn', path: ['leadId'] })
-  .refine((v) => v.kind === 'crm' || !v.leadId, { message: 'Việc nội bộ không gắn lead', path: ['leadId'] });
+  .refine((v) => v.kind === 'crm' || !v.leadId, { message: 'Việc nội bộ không gắn lead', path: ['leadId'] })
+  .refine((v) => !v.draft || v.source, { message: 'Thiếu nguồn của việc nháp', path: ['draft'] })
+  .refine((v) => !v.source || v.kind === 'internal', { message: 'Việc tạo từ chat là việc nội bộ', path: ['source'] });
 export const updateTaskInput = z.object({
   taskId: z.string().min(1),
   expectedVersion: z.number().int().positive(),

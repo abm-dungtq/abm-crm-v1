@@ -2,7 +2,7 @@ import { env, type D1Migration } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import seedSql from '../seed/demo.sql?raw';
 import { parseMentions } from '../src/worker/chat';
-import { extractTaskSuggestions } from '../src/worker/chat-agents';
+import { extractTaskDrafts } from '../src/worker/chat-task-markers';
 import { claimCommands } from '../src/worker/inbox/dispatcher';
 import app from '../src/worker/index';
 import { resetDb } from './helpers/reset-db';
@@ -255,12 +255,19 @@ describe('GoClaw agents in CRM chat', () => {
     expect(agentMsg?.body).toBe('Ok');
     const parsedMeta = JSON.parse(agentMsg!.meta_json!);
     expect(parsedMeta.requestedByUserId).toBe('u-lan');
-    expect(parsedMeta.taskSuggestions).toEqual([
+    // A legacy line in an answer quoting the question becomes a draft whose source is that question.
+    expect(parsedMeta.taskDrafts).toEqual([
       {
         title: 'Gọi lại khách',
+        description: null,
         assigneeName: 'Vũ Đức Long',
         assigneeUserId: 'u-long',
+        memberNames: [],
+        memberUserIds: [],
+        unresolvedNames: [],
         dueDate: '2026-11-01',
+        source: { conversationId: grpId, messageId: mentionMsgId, scope: 'message' },
+        createdTaskId: null,
       },
     ]);
 
@@ -467,10 +474,10 @@ describe('GoClaw agents in CRM chat: guard rails', () => {
   });
 
   test('a [TASK:] title is capped at 200 characters', () => {
-    const { taskSuggestions } = extractTaskSuggestions(`[TASK: ${'a'.repeat(300)} | @Vũ Đức Long]`, [{ user_id: 'u-long', display_name: 'Vũ Đức Long' }]);
-    expect(taskSuggestions).toHaveLength(1);
-    expect(taskSuggestions[0]!.title).toBe('a'.repeat(200));
-    expect(taskSuggestions[0]!.assigneeUserId).toBe('u-long');
+    const { drafts } = extractTaskDrafts(`[TASK: ${'a'.repeat(300)} | @Vũ Đức Long]`, [{ user_id: 'u-long', display_name: 'Vũ Đức Long' }]);
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0]!.title).toBe('a'.repeat(200));
+    expect(drafts[0]!.assigneeUserId).toBe('u-long');
   });
 
   test('"Trợ lý đang offline" is posted once per conversation per 10 minutes', async () => {
@@ -519,6 +526,29 @@ describe('GoClaw agents in CRM chat: guard rails', () => {
       .toEqual({ reply_count: 3 });
     // The agent answer notifies nobody: the only thread notifications are from the two user replies.
     expect(await db.prepare("SELECT COUNT(*) AS n FROM notification WHERE kind = 'chat_thread'").first()).toEqual({ n: 1 });
+  });
+
+  test('in topic mode a top-level @Trợ lý question is a topic, and the answer goes into that topic', async () => {
+    await setOnline(true);
+    const { agentId, grpId } = await groupWithAgent();
+    expect((await call('u-lan', 'PATCH', `/chat/conversations/${encodeURIComponent(grpId)}`, { mode: 'topic' })).status).toBe(200);
+    await post('u-long', grpId, 'Chủ đề khác không liên quan');
+    const questionId = crypto.randomUUID();
+    expect((await post('u-lan', grpId, `@[Trợ lý](agent:${agentId}) tóm tắt giúp`, questionId)).status).toBe(200);
+
+    const cmd = await db.prepare("SELECT id, payload_json FROM channel_command WHERE kind = 'run_completion'").first<{ id: string; payload_json: string }>();
+    const payload = JSON.parse(cmd!.payload_json) as { text: string; threadRootId: string | null; replyToMessageId: string | null };
+    expect(payload.threadRootId).toBe(questionId);
+    expect(payload.replyToMessageId).toBeNull();
+    // Only the topic is context, and the new topic has nothing before the question.
+    expect(payload.text).not.toContain('Chủ đề khác không liên quan');
+
+    await claimCommands(db, 'bridge', 10);
+    await bridge(`/commands/${cmd!.id}/result`, { body: { attempts: 1, ok: true, text: 'Đây là tóm tắt' } });
+    expect(await db.prepare('SELECT thread_root_id, reply_to_message_id FROM chat_message WHERE id = ?').bind(`agent:${cmd!.id}`).first())
+      .toEqual({ thread_root_id: questionId, reply_to_message_id: null });
+    expect(await db.prepare('SELECT is_topic, reply_count FROM chat_thread WHERE root_message_id = ?').bind(questionId).first())
+      .toEqual({ is_topic: 1, reply_count: 1 });
   });
 
   test('an answer to a question recalled meanwhile is stored without the quote', async () => {

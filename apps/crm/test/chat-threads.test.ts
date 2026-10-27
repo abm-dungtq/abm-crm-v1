@@ -210,6 +210,25 @@ describe('chat threads', () => {
     expect(bad.status).toBe(422);
   });
 
+  test('a manual follow starts read, while an existing follower keeps their unread replies', async () => {
+    const g = await groupG();
+    const root = await post('u-lan', g, 'Tin gốc');
+    for (const text of ['Một', 'Hai', 'Ba']) await post('u-long', g, text, { threadRootId: root.id });
+
+    const follow = await call('u-huy', 'PUT', `/chat/threads/${root.id}/subscription`, { state: 'following' });
+    expect(follow.status).toBe(200);
+    expect((await followedOf('u-huy')).find((t) => t.rootId === root.id)).toMatchObject({ following: true, unread: 0 });
+    // A later reply must not share the follow's millisecond, or it would count as read.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await post('u-long', g, 'Bốn', { threadRootId: root.id });
+    expect((await followedOf('u-huy')).find((t) => t.rootId === root.id).unread).toBe(1);
+
+    // u-lan already follows as the root author: setting the state again leaves the read marker alone.
+    expect((await followedOf('u-lan')).find((t) => t.rootId === root.id).unread).toBe(4);
+    await call('u-lan', 'PUT', `/chat/threads/${root.id}/subscription`, { state: 'following' });
+    expect((await followedOf('u-lan')).find((t) => t.rootId === root.id).unread).toBe(4);
+  });
+
   test('invalid thread targets are rejected with 422', async () => {
     const g = await groupG();
     const root = await post('u-lan', g, 'Tin gốc');

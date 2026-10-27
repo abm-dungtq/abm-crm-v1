@@ -882,6 +882,9 @@ export interface AgentConversationItem {
   title: string;
   unread: number;
   last_message_at: string | null;
+  mode: 'chat' | 'topic';
+  /** Set on a subgroup: its department group. */
+  parent_conversation_id: string | null;
 }
 
 export const AGENT_CONVERSATION_LIMIT = 200;
@@ -890,7 +893,7 @@ export const AGENT_CONVERSATION_LIMIT = 200;
 export async function agentVisibleConversations(db: D1Database, actor: Actor): Promise<AgentConversationItem[]> {
   const visible = agentVisibleConversationSql(actor);
   const rows = await db.prepare(`
-    SELECT c.id, c.kind, c.last_message_at,
+    SELECT c.id, c.kind, c.last_message_at, c.mode, c.parent_conversation_id,
       ${conversationTitleSql('c', '?')} AS title,
       CASE WHEN cm.user_id IS NULL THEN 0 ELSE (
         SELECT COUNT(*) FROM chat_message um
@@ -915,7 +918,14 @@ export interface AgentMessageItem {
   author: string | null;
   author_kind: 'user' | 'agent' | 'system';
   at: string;
+  /** Kept for older callers: the message this one answers, or else the root of its thread. */
   parent_id: string | null;
+  /** The thread this message belongs to: its root's id, or its own id when it is a root with a thread. */
+  thread_id: string | null;
+  /** The quoted message. */
+  reply_to_id: string | null;
+  /** Set only on a thread root. */
+  reply_count?: number;
   text: string;
 }
 
@@ -927,17 +937,22 @@ interface AgentMessageRow {
   created_at: string;
   reply_to_message_id: string | null;
   thread_root_id: string | null;
+  t_root: string | null;
+  t_reply_count: number | null;
   body: string;
 }
 
 const AGENT_MESSAGE_SELECT = `SELECT m.id, m.conversation_id, m.author_kind, m.created_at,
     m.reply_to_message_id, m.thread_root_id, m.body,
-    COALESCE(u.display_name, a.display_name) AS author_name
+    COALESCE(u.display_name, a.display_name) AS author_name,
+    t.root_message_id AS t_root, t.reply_count AS t_reply_count
   FROM chat_message m
   LEFT JOIN app_user u ON u.id = m.author_user_id
-  LEFT JOIN chat_agent a ON a.id = m.author_agent_id`;
+  LEFT JOIN chat_agent a ON a.id = m.author_agent_id
+  LEFT JOIN chat_thread t ON t.root_message_id = m.id`;
 
 function toAgentMessage(r: AgentMessageRow, withConversation: boolean): AgentMessageItem {
+  const isRoot = r.thread_root_id === null && r.t_root !== null;
   return {
     id: r.id,
     ...(withConversation ? { conversation_id: r.conversation_id } : {}),
@@ -946,6 +961,9 @@ function toAgentMessage(r: AgentMessageRow, withConversation: boolean): AgentMes
     at: r.created_at,
     // Lark meaning: the message this one answers, or else the root of its thread.
     parent_id: r.reply_to_message_id ?? r.thread_root_id,
+    thread_id: r.thread_root_id ?? (isRoot ? r.id : null),
+    reply_to_id: r.reply_to_message_id,
+    ...(isRoot ? { reply_count: r.t_reply_count ?? 0 } : {}),
     text: `[chat] ${renderMentionText(r.body)}`,
   };
 }
@@ -960,15 +978,22 @@ export async function agentCanReadConversation(db: D1Database, actor: Actor, con
 
 /**
  * Messages of one conversation, oldest first. Without `after` it is the newest `limit` before `before` (or now);
- * with `after` it is the oldest `limit` after that time. Deleted messages are left out. The caller checks access.
+ * with `after` it is the oldest `limit` after that time. Deleted messages are left out. Without `threadId` it is the
+ * main flow; with it, that thread (its root and replies). The caller checks access, and that the root belongs here.
  */
 export async function agentMessages(
   db: D1Database,
   conversationId: string,
-  opts: { before?: string; after?: string; limit: number },
+  opts: { before?: string; after?: string; limit: number; threadId?: string },
 ): Promise<AgentMessageItem[]> {
   const where = ['m.conversation_id = ?', 'm.deleted_at IS NULL'];
   const binds: unknown[] = [conversationId];
+  if (opts.threadId) {
+    where.push('(m.id = ? OR m.thread_root_id = ?)');
+    binds.push(opts.threadId, opts.threadId);
+  } else {
+    where.push('(m.thread_root_id IS NULL OR m.also_in_main = 1)');
+  }
   if (opts.before) { where.push('m.created_at < ?'); binds.push(opts.before); }
   if (opts.after) { where.push('m.created_at > ?'); binds.push(opts.after); }
   const order = opts.after ? 'ASC' : 'DESC';

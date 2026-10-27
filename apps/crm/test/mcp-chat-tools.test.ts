@@ -238,6 +238,60 @@ describe('chat read tools', () => {
     expect((await tool(other.token, 'get_task', { task_id: taskId })).data.code).toBe('NOT_FOUND');
   });
 
+  test('read_messages reads the main flow by default and a whole thread with thread_id', async () => {
+    const { token } = await selfToken('u-lan');
+    const convId = await group('u-lan', ['u-long']);
+    const root = await say('u-lan', convId, 'Tin gốc');
+    const reply = await web('u-long', 'POST', `/chat/conversations/${convId}/messages`, { id: crypto.randomUUID(), body: 'Chỉ trong chuỗi', threadRootId: root });
+    expect(reply.status).toBe(200);
+    const replyId = reply.json.data.id as string;
+
+    const listed = await tool(token, 'list_conversations');
+    expect(listed.data.find((c: any) => c.id === convId)).toMatchObject({ mode: 'chat', parent_conversation_id: null });
+
+    const main = await tool(token, 'read_messages', { conversation_id: convId });
+    expect(main.data.messages.map((m: any) => m.id)).toEqual([root]);
+    expect(main.data.messages[0]).toMatchObject({ thread_id: root, reply_to_id: null, parent_id: null, reply_count: 1 });
+
+    const thread = await tool(token, 'read_messages', { conversation_id: convId, thread_id: root });
+    expect(thread.data.messages.map((m: any) => [m.id, m.thread_id])).toEqual([[root, root], [replyId, root]]);
+    expect(thread.data.messages[1]).toMatchObject({ parent_id: root, reply_to_id: null });
+    expect(thread.data.messages[1].reply_count).toBeUndefined();
+
+    const otherConv = await group('u-lan', ['u-huy'], 'Nhóm khác');
+    const otherRoot = await say('u-lan', otherConv, 'Gốc ở nhóm khác');
+    expect((await tool(token, 'read_messages', { conversation_id: convId, thread_id: otherRoot })).data.code).toBe('NOT_FOUND');
+    expect((await tool(token, 'read_messages', { conversation_id: convId, thread_id: replyId })).data.code).toBe('NOT_FOUND');
+
+    const found = await tool(token, 'search_messages', { query: 'chỉ trong chuỗi' });
+    expect(found.data.messages).toEqual([expect.objectContaining({ id: replyId, conversation_id: convId, thread_id: root })]);
+  });
+
+  test('get_task shows a chat source only when the agent may read that chat', async () => {
+    const { token } = await selfToken('u-lan');
+    const convId = await group('u-lan', ['u-long']);
+    const msg = await say('u-lan', convId, 'Gửi báo giá');
+    const fromGroup = await web('u-lan', 'POST', '/commands/createTask', {
+      kind: 'internal', title: 'Gửi báo giá', assigneeUserId: 'u-lan', source: { conversationId: convId, messageId: msg, scope: 'message' },
+    });
+    expect(fromGroup.status).toBe(200);
+    const detail = await tool(token, 'get_task', { task_id: fromGroup.json.data.taskId });
+    expect(detail.data.source).toEqual({ conversation_id: convId, message_id: msg, scope: 'message' });
+
+    const dm = await web('u-lan', 'POST', '/chat/conversations', { kind: 'direct', userId: 'u-huy' });
+    const dmId = dm.json.data.id as string;
+    const dmMsg = await say('u-huy', dmId, 'Nhờ chị gửi hợp đồng');
+    const fromDm = await web('u-lan', 'POST', '/commands/createTask', {
+      kind: 'internal', title: 'Gửi hợp đồng', assigneeUserId: 'u-lan', source: { conversationId: dmId, messageId: dmMsg, scope: 'message' },
+    });
+    expect(fromDm.status).toBe(200);
+    expect((await tool(token, 'get_task', { task_id: fromDm.json.data.taskId })).data.source).toEqual({ conversation_id: dmId, message_id: dmMsg, scope: 'message' });
+    expect((await web('u-huy', 'PATCH', `/chat/conversations/${dmId}`, { agentReadable: false })).status).toBe(200);
+    const hidden = await tool(token, 'get_task', { task_id: fromDm.json.data.taskId });
+    expect(hidden.isError).toBe(false);
+    expect(hidden.data).not.toHaveProperty('source');
+  });
+
   test('the kill switch stops chat reads and task comments', async () => {
     const reader = await selfToken('u-lan');
     const writer = await selfToken('u-lan', 'read_tasks');

@@ -615,6 +615,11 @@ async function createTask({ db, actor, input, tx }: Ctx<CreateTaskInput>) {
       return fail('NOT_FOUND', 'Không tìm thấy việc cha trong phạm vi của bạn');
     }
   }
+  const source = input.source ?? null;
+  if (source) {
+    const sourceFail = await checkTaskSource(db, actor, source, input.draft ?? null);
+    if (sourceFail) return sourceFail;
+  }
   const id = crypto.randomUUID();
   const dueAt = input.dueAt ? new Date(input.dueAt).toISOString() : null;
   const row = {
@@ -629,14 +634,81 @@ async function createTask({ db, actor, input, tx }: Ctx<CreateTaskInput>) {
     assignee_user_id: input.assigneeUserId,
     status: 'open',
     created_by_user_id: actor.id,
+    source_conversation_id: source?.conversationId ?? null,
+    source_message_id: source?.messageId ?? null,
+    source_scope: source?.scope ?? null,
   };
   tx.insertVersioned('task', row);
-  for (const uid of new Set(input.memberUserIds)) {
+  const memberUserIds = [...new Set(input.memberUserIds)];
+  for (const uid of memberUserIds) {
     tx.raw(db.prepare('INSERT OR IGNORE INTO task_member (task_id, user_id, added_at) VALUES (?, ?, ?)').bind(id, uid, tx.now));
   }
+  if (input.draft) {
+    // The draft is marked used in the same batch, and only while it is still unused, so it creates one task at most.
+    const path = `$.taskDrafts[${input.draft.index}].createdTaskId`;
+    tx.assert('SELECT json_extract(meta_json, ?) IS NULL FROM chat_message WHERE id = ?', [path, input.draft.messageId]);
+    tx.raw(db.prepare('UPDATE chat_message SET meta_json = json_set(meta_json, ?, ?) WHERE id = ?').bind(path, id, input.draft.messageId));
+  }
   tx.audit('task', id, null, { ...row, memberUserIds: input.memberUserIds });
-  tx.event('task.created', { taskId: id, assigneeUserId: input.assigneeUserId });
+  tx.event('task.created', { taskId: id, assigneeUserId: input.assigneeUserId, memberUserIds, source });
   return ok({ taskId: id });
+}
+
+type TaskSource = NonNullable<CreateTaskInput['source']>;
+
+/**
+ * A task made from chat must point at a live message of a group or direct chat the actor belongs to (a thread source
+ * must be a top-level message). An agent draft may be used only by the person who asked for it, for the source it was
+ * drafted from, and only once. Null when everything holds.
+ */
+async function checkTaskSource(db: D1Database, actor: Actor, source: TaskSource, draft: CreateTaskInput['draft'] | null) {
+  if (actor.kind === 'agent') return fail('VALIDATION_FAILED', 'Agent không tạo việc từ chat');
+  const msg = await db.prepare(`
+    SELECT m.id, m.thread_root_id, m.deleted_at, c.kind, c.organization_id
+    FROM chat_message m
+    JOIN chat_conversation c ON c.id = m.conversation_id
+    JOIN chat_member cm ON cm.conversation_id = c.id AND cm.user_id = ?
+    WHERE m.id = ? AND m.conversation_id = ? AND c.archived_at IS NULL`)
+    .bind(actor.id, source.messageId, source.conversationId)
+    .first<{ id: string; thread_root_id: string | null; deleted_at: string | null; kind: string; organization_id: string }>();
+  if (
+    !msg
+    || msg.organization_id !== actor.organizationId
+    || (msg.kind !== 'group' && msg.kind !== 'direct')
+    || msg.deleted_at !== null
+    || (source.scope === 'thread' && msg.thread_root_id !== null)
+  ) {
+    return fail('NOT_FOUND', 'Không tìm thấy tin nguồn trong phạm vi của bạn');
+  }
+  if (!draft) return null;
+  const draftMsg = await db.prepare('SELECT author_kind, conversation_id, meta_json FROM chat_message WHERE id = ?')
+    .bind(draft.messageId)
+    .first<{ author_kind: string; conversation_id: string; meta_json: string | null }>();
+  const unusable = fail('VALIDATION_FAILED', 'Việc nháp không còn dùng được');
+  if (!draftMsg || draftMsg.author_kind !== 'agent' || draftMsg.conversation_id !== source.conversationId || !draftMsg.meta_json) {
+    return unusable;
+  }
+  let meta: { requestedByUserId?: unknown; taskDrafts?: unknown };
+  try {
+    meta = JSON.parse(draftMsg.meta_json) as typeof meta;
+  } catch {
+    return unusable;
+  }
+  const stored = Array.isArray(meta.taskDrafts)
+    ? (meta.taskDrafts[draft.index] as { source?: Partial<TaskSource> | null; createdTaskId?: unknown } | undefined)
+    : undefined;
+  if (
+    meta.requestedByUserId !== actor.id
+    || !stored
+    || stored.source?.conversationId !== source.conversationId
+    || stored.source?.messageId !== source.messageId
+    || stored.source?.scope !== source.scope
+  ) {
+    return unusable;
+  }
+  // Same answer as losing the race inside the batch, so the web shows "Việc nháp đã được tạo" either way.
+  if (stored.createdTaskId != null) return fail('STALE_VERSION', 'Việc nháp đã được tạo');
+  return null;
 }
 
 async function updateTask({ db, actor, input, tx }: Ctx<UpdateTaskInput>) {

@@ -418,7 +418,8 @@ export async function markThreadRead(db: D1Database, rootId: string, userId: str
 }
 
 /**
- * Follows, mutes or unfollows a thread in one batch. Following a root without replies creates its thread row.
+ * Follows, mutes or unfollows a thread in one batch. Following a root without replies creates its thread row. A new
+ * follower starts with the replies so far read.
  * The caller has checked that `root` is a top-level message of a group or direct chat the actor belongs to.
  */
 export async function setThreadSubscription(
@@ -439,9 +440,10 @@ export async function setThreadSubscription(
     db.prepare(`INSERT OR IGNORE INTO chat_thread (root_message_id, conversation_id, is_topic, reply_count, last_activity_at, created_at)
       VALUES (?, ?, ?, 0, ?, ?)`)
       .bind(root.id, root.conversation_id, conversation.mode === 'topic' ? 1 : 0, now, now),
+    // A new manual follower starts with everything so far read; an existing follower keeps their read marker.
     db.prepare(`INSERT OR IGNORE INTO chat_thread_follower (root_message_id, user_id, via, muted, last_read_at, followed_at)
-      VALUES (?, ?, 'manual', ?, NULL, ?)`)
-      .bind(root.id, actor.id, muted, now),
+      VALUES (?, ?, 'manual', ?, ?, ?)`)
+      .bind(root.id, actor.id, muted, now, now),
     db.prepare('UPDATE chat_thread_follower SET muted = ? WHERE root_message_id = ? AND user_id = ?')
       .bind(muted, root.id, actor.id),
   ]);
