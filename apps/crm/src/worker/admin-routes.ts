@@ -3,6 +3,7 @@ import { agentKillSwitchInput, foldText, normalizeEmail, rosterImportInput, upda
 import type { z } from 'zod';
 import type { Actor, AppBindings } from './env';
 import { createChatAgent, listAdminChatAgents, updateChatAgent } from './chat-agents';
+import { departmentGroupSyncStatements } from './chat-groups';
 import { GuardedTx, isConstraintFailure, isGuardFailure } from './guarded-tx';
 import { TEMP_PASSWORD_HOURS, TEMP_PASSWORD_ITERATIONS, generateTempPassword, hashPassword } from './password';
 import { parseRosterCsv, placementError, planRoster } from './roster';
@@ -39,6 +40,11 @@ async function commit(c: Ctx, tx: GuardedTx, onGuard = stale) {
 /** Race guard for "at least one active admin"; callers pre-check in JS to give the clear message. */
 function assertAdminRemains(tx: GuardedTx, actor: Actor) {
   tx.assert("SELECT COUNT(*) >= 1 FROM app_user WHERE organization_id = ? AND role = 'admin' AND status = 'active'", [actor.organizationId]);
+}
+
+/** Department groups follow the saved users inside the same batch, after the user rows are written. */
+function syncDepartmentGroups(tx: GuardedTx, db: D1Database, actor: Actor) {
+  for (const s of departmentGroupSyncStatements(db, actor.organizationId, tx.now)) tx.raw(s);
 }
 
 async function otherActiveAdmins(db: D1Database, actor: Actor, userId: string) {
@@ -155,6 +161,7 @@ adminRoutes.post('/roster/commit', async (c) => {
     const after = { name: u.name, email: u.email, role: u.role, departmentId: u.departmentKey ? departmentIds[u.departmentKey] : null, teamId: u.teamKey ? teamIds[u.teamKey] : null };
     tx.audit('app_user', u.userId ?? userIds.get(u.email)!, u.previous ? { ...u.previous, email: u.email } : null, after);
   }
+  syncDepartmentGroups(tx, db, actor);
   assertAdminRemains(tx, actor);
   const failed = await commit(c, tx);
   if (failed) return failed;
@@ -199,6 +206,7 @@ adminRoutes.patch('/users/:id', async (c) => {
   const tx = new GuardedTx(db, actor, 'updateUser');
   tx.update('app_user', user.id, v.version, set);
   tx.audit('app_user', user.id, snapshot(user), snapshot({ display_name: set.display_name as string, email, role, department_id: departmentId, team_id: teamId }));
+  syncDepartmentGroups(tx, db, actor);
   assertAdminRemains(tx, actor);
   const failed = await commit(c, tx);
   return failed ?? c.json(ok(null));
@@ -225,6 +233,7 @@ adminRoutes.post('/users/:id/status', async (c) => {
     tx.raw(db.prepare('DELETE FROM push_subscription WHERE user_id = ?').bind(user.id));
   }
   tx.audit('app_user', user.id, { status: user.status }, { status });
+  syncDepartmentGroups(tx, db, actor);
   assertAdminRemains(tx, actor);
   const failed = await commit(c, tx, status === 'disabled' && user.role === 'admin' ? lastAdmin : stale);
   return failed ?? c.json(ok(null));

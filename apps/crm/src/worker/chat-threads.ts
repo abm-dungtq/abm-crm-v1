@@ -137,6 +137,78 @@ export async function afterThreadMessage(sink: Sink, db: D1Database, input: Afte
 }
 
 /**
+ * A new top-level message in a topic-mode conversation starts a topic: its thread row (no replies yet) and the
+ * followers, the author first, then the mentioned people. Run the statements in one `db.batch` after the insert.
+ */
+export function startTopicStatements(
+  db: D1Database,
+  input: { conversationId: string; rootId: string; authorUserId: string; mentionIds: string[]; now: string },
+): D1PreparedStatement[] {
+  const followers = [
+    { u: input.authorUserId, v: 'author' },
+    ...[...new Set(input.mentionIds)].filter((uid) => uid !== input.authorUserId).map((uid) => ({ u: uid, v: 'mention' })),
+  ];
+  return [
+    db.prepare(`INSERT OR IGNORE INTO chat_thread (root_message_id, conversation_id, is_topic, reply_count, last_activity_at, created_at)
+      VALUES (?, ?, 1, 0, ?, ?)`)
+      .bind(input.rootId, input.conversationId, input.now, input.now),
+    db.prepare(`INSERT OR IGNORE INTO chat_thread_follower (root_message_id, user_id, via, muted, last_read_at, followed_at)
+      SELECT ?1, json_extract(value, '$.u'), json_extract(value, '$.v'), 0, NULL, ?2 FROM json_each(?3)`)
+      .bind(input.rootId, input.now, JSON.stringify(followers)),
+  ];
+}
+
+/**
+ * One page of a conversation's topics: top-level messages (user or agent) that quote nothing, latest activity first.
+ * `before` is an activity timestamp from the previous page. Each item carries its thread summary.
+ */
+export async function listTopics(
+  db: D1Database,
+  actorId: string,
+  conversationId: string,
+  opts: { before?: string; limit?: number } = {},
+): Promise<ChatMessageItem[]> {
+  const limit = Math.min(Math.max(opts.limit ?? 30, 1), 50);
+  const where = ['m.conversation_id = ?', 'm.thread_root_id IS NULL', 'm.reply_to_message_id IS NULL', "m.author_kind IN ('user', 'agent')"];
+  const binds: unknown[] = [conversationId];
+  if (opts.before) { where.push('COALESCE(t.last_activity_at, m.created_at) < ?'); binds.push(opts.before); }
+  const rows = await db.prepare(`${MESSAGE_ROW_SELECT}
+    LEFT JOIN chat_thread t ON t.root_message_id = m.id
+    WHERE ${where.join(' AND ')}
+    ORDER BY COALESCE(t.last_activity_at, m.created_at) DESC, m.id DESC
+    LIMIT ?`)
+    .bind(...binds, limit)
+    .all<MessageRow>();
+  return hydrateMessages(db, actorId, rows.results);
+}
+
+/**
+ * Closes or reopens a thread. Only a topic can be closed; reopening is always allowed. Returns the summary for the
+ * actor (null when the root has no thread row), or a Vietnamese error message.
+ */
+export async function setThreadClosed(
+  db: D1Database,
+  actorId: string,
+  rootId: string,
+  closed: boolean,
+): Promise<{ ok: true; thread: ThreadSummary | null } | { ok: false; message: string }> {
+  const now = new Date().toISOString();
+  if (closed) {
+    const res = await db.prepare(`UPDATE chat_thread SET closed_at = COALESCE(closed_at, ?), closed_by_user_id = COALESCE(closed_by_user_id, ?)
+      WHERE root_message_id = ? AND is_topic = 1`)
+      .bind(now, actorId, rootId)
+      .run();
+    if ((res.meta?.changes ?? 0) === 0) return { ok: false, message: 'Chỉ đóng được chủ đề' };
+  } else {
+    await db.prepare('UPDATE chat_thread SET closed_at = NULL, closed_by_user_id = NULL WHERE root_message_id = ?')
+      .bind(rootId)
+      .run();
+  }
+  const summaries = await loadThreadSummaries(db, actorId, [rootId]);
+  return { ok: true, thread: summaries.get(rootId) ?? null };
+}
+
+/**
  * The three reads behind thread summaries (thread rows with the reader's follow state, the latest 3 replies, the
  * repliers), each restricted to `rootIds`. Run them in one `db.batch` and pass the results to `buildThreadSummaries`.
  */

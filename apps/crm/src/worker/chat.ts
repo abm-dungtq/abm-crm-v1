@@ -83,6 +83,10 @@ export interface ChatConversationRow {
   last_message_at: string | null;
   archived_at: string | null;
   mode: 'chat' | 'topic';
+  /** Set on a department group. */
+  department_id: string | null;
+  /** Set on a subgroup: its department group. */
+  parent_conversation_id: string | null;
   member_role?: 'owner' | 'member' | null;
 }
 
@@ -97,6 +101,14 @@ export interface ChatConversationSummary {
   unread: number;
   /** Unread thread-only replies in this conversation's followed, unmuted threads. */
   threadUnread: number;
+  mode: 'chat' | 'topic';
+  /** Set on a department group. */
+  departmentId: string | null;
+  /** Set on a subgroup: its department group, and that group's title. */
+  parentConversationId: string | null;
+  parentTitle: string | null;
+  /** A system group (Inbox, department group): members follow the org chart, nobody edits them by hand. */
+  system: boolean;
 }
 
 export type ChatEvent =
@@ -295,6 +307,11 @@ export async function listConversations(db: D1Database, actor: Actor): Promise<C
       c.agent_readable,
       c.last_message_at,
       c.updated_at,
+      c.mode,
+      c.department_id,
+      c.parent_conversation_id,
+      p.title AS parent_title,
+      c.system_key,
       (SELECT CASE WHEN lm.deleted_at IS NOT NULL THEN '' ELSE SUBSTR(lm.body, 1, 120) END
        FROM chat_message lm
        WHERE lm.conversation_id = c.id
@@ -313,6 +330,7 @@ export async function listConversations(db: D1Database, actor: Actor): Promise<C
        WHERE f.user_id = ?1 AND f.muted = 0 AND t.conversation_id = c.id) AS thread_unread
     FROM chat_conversation c
     JOIN chat_member cm ON cm.conversation_id = c.id AND cm.user_id = ?1
+    LEFT JOIN chat_conversation p ON p.id = c.parent_conversation_id
     WHERE c.organization_id = ?2
       AND c.archived_at IS NULL
       AND c.kind IN ('group', 'direct')
@@ -325,6 +343,11 @@ export async function listConversations(db: D1Database, actor: Actor): Promise<C
       agent_readable: number;
       last_message_at: string | null;
       updated_at: string;
+      mode: 'chat' | 'topic';
+      department_id: string | null;
+      parent_conversation_id: string | null;
+      parent_title: string | null;
+      system_key: string | null;
       last_message: string | null;
       unread: number;
       thread_unread: number;
@@ -340,6 +363,11 @@ export async function listConversations(db: D1Database, actor: Actor): Promise<C
     updatedAt: r.updated_at,
     unread: r.unread,
     threadUnread: r.thread_unread,
+    mode: r.mode,
+    departmentId: r.department_id,
+    parentConversationId: r.parent_conversation_id,
+    parentTitle: r.parent_title,
+    system: r.system_key !== null,
   }));
 }
 

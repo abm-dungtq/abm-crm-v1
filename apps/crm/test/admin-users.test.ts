@@ -169,6 +169,35 @@ test('editing a user validates placement and reports duplicate email', async () 
   expect((await admin('/admin/users/u-lan', { version: v, name: 'Cũ' }, 'PATCH')).status).toBe(409);
 });
 
+const deptMembers = async (conversationId: string) =>
+  (await db.prepare('SELECT user_id, role FROM chat_member WHERE conversation_id = ? ORDER BY user_id').bind(conversationId)
+    .all<{ user_id: string; role: string }>()).results;
+
+test('roster commit creates and fills department groups in the same save', async () => {
+  expect((await admin('/admin/roster/commit', { csv: demoRoster })).status).toBe(200);
+  const groups = (await db.prepare(`SELECT c.id, c.title, c.system_key, c.department_id FROM chat_conversation c
+    WHERE c.department_id IS NOT NULL ORDER BY c.title`).all<any>()).results;
+  expect(groups.map((g) => g.title)).toEqual(['Phòng Chăm sóc khách hàng', 'Phòng Kinh doanh']);
+  for (const g of groups) {
+    expect(g.id).toBe(`dept:${g.department_id}`);
+    expect(g.system_key).toBe(g.id);
+  }
+  const cskh = groups[0];
+  const head = await db.prepare("SELECT id FROM app_user WHERE email = 'head-cskh@demo.abm.example'").first<{ id: string }>();
+  expect(await deptMembers(cskh.id)).toEqual([{ user_id: head!.id, role: 'owner' }]);
+  const kd = await deptMembers('dept:dep-kd');
+  expect(kd).toHaveLength(7);
+  expect(kd.filter((m) => m.role === 'owner').map((m) => m.user_id)).toEqual(['u-head']);
+});
+
+test('editing a user keeps department group roles and membership current', async () => {
+  expect((await admin('/admin/users/u-lan', { version: await version('u-lan'), role: 'head', teamName: '' }, 'PATCH')).status).toBe(200);
+  expect(await deptMembers('dept:dep-kd')).toContainEqual({ user_id: 'u-lan', role: 'owner' });
+  expect((await admin('/admin/users/u-lan', { version: await version('u-lan'), role: 'director', departmentName: '' }, 'PATCH')).status).toBe(200);
+  expect((await deptMembers('dept:dep-kd')).map((m) => m.user_id)).not.toContain('u-lan');
+  expect(await deptMembers('dept:dep-kd')).toHaveLength(5);
+});
+
 test('locking a user deletes every push subscription of theirs, and only theirs', async () => {
   const stamp = new Date().toISOString();
   const sub = (id: string, userId: string) => db.prepare(`INSERT INTO push_subscription (id, user_id, endpoint, p256dh, auth, created_at)

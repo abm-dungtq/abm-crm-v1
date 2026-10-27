@@ -25,10 +25,14 @@ import {
   afterThreadMessage,
   getThread,
   listFollowedThreads,
+  listTopics,
   markThreadRead,
   resolveThreadRoot,
+  setThreadClosed,
   setThreadSubscription,
+  startTopicStatements,
 } from './chat-threads';
+import { ensureDepartmentGroups, isDepartmentGroupKey } from './chat-groups';
 import {
   addConversationAgent,
   findOrCreateAgentDirect,
@@ -101,7 +105,10 @@ chatRoutes.get('/socket', async (c) => {
 });
 
 chatRoutes.get('/conversations', async (c) => {
-  return c.json(ok(await listConversations(c.env.DB, c.get('actor'))));
+  const actor = c.get('actor');
+  // Re-checks the department groups against the org chart; a no-op batch when nothing changed.
+  await ensureDepartmentGroups(c.env.DB, actor.organizationId);
+  return c.json(ok(await listConversations(c.env.DB, actor)));
 });
 
 chatRoutes.get('/agents', async (c) => {
@@ -121,6 +128,7 @@ chatRoutes.post('/conversations', async (c) => {
     memberUserIds?: unknown;
     userId?: string;
     agentId?: string;
+    parentConversationId?: unknown;
   }>().catch(() => null);
 
   if (!body || (body.kind !== 'group' && body.kind !== 'direct')) {
@@ -169,15 +177,36 @@ chatRoutes.post('/conversations', async (c) => {
     return c.json(fail('VALIDATION_FAILED', 'Thành viên không hợp lệ', { fields: { memberUserIds: 'Không hợp lệ' } }), 422);
   }
 
+  // A subgroup hangs under a department group only (one level). Any member of that department group, or a
+  // director or admin, may create it, with members from any department.
+  const rawParent = body.parentConversationId ?? null;
+  if (rawParent !== null && (typeof rawParent !== 'string' || !rawParent.trim())) {
+    return c.json(fail('VALIDATION_FAILED', 'Nhóm cha không hợp lệ', { fields: { parentConversationId: 'Không hợp lệ' } }), 422);
+  }
+  const parentId = rawParent === null ? null : rawParent.trim();
+  if (parentId !== null) {
+    const parent = await db.prepare(`
+      SELECT c.kind, c.department_id, cm.role AS member_role
+      FROM chat_conversation c
+      LEFT JOIN chat_member cm ON cm.conversation_id = c.id AND cm.user_id = ?
+      WHERE c.id = ? AND c.organization_id = ? AND c.archived_at IS NULL`)
+      .bind(actor.id, parentId, actor.organizationId)
+      .first<{ kind: string; department_id: string | null; member_role: string | null }>();
+    if (!parent || parent.kind !== 'group' || parent.department_id === null) {
+      return c.json(fail('VALIDATION_FAILED', 'Nhóm nhỏ chỉ tạo được trong nhóm phòng ban', { fields: { parentConversationId: 'Không hợp lệ' } }), 422);
+    }
+    if (!parent.member_role && actor.role !== 'director' && actor.role !== 'admin') return c.json(forbidden, 403);
+  }
+
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   const allMembers = [...new Set([actor.id, ...rawMembers])];
 
   await db.batch([
     db.prepare(`INSERT INTO chat_conversation
-      (id, organization_id, kind, title, created_by_user_id, created_at, updated_at)
-      VALUES (?, ?, 'group', ?, ?, ?, ?)`)
-      .bind(id, actor.organizationId, title, actor.id, now, now),
+      (id, organization_id, kind, title, parent_conversation_id, created_by_user_id, created_at, updated_at)
+      VALUES (?, ?, 'group', ?, ?, ?, ?, ?)`)
+      .bind(id, actor.organizationId, title, parentId, actor.id, now, now),
     ...allMembers.map((uid) =>
       db.prepare(`INSERT INTO chat_member (conversation_id, user_id, role, joined_at)
         VALUES (?, ?, ?, ?)`)
@@ -199,7 +228,7 @@ chatRoutes.get('/conversations/:id', async (c) => {
   const conv = await loadConversation(db, actor, c.req.param('id'));
   if (!conv) return c.json(notFound, 404);
 
-  const [membersRes, agentsRes] = await db.batch([
+  const [membersRes, agentsRes, treeRes] = await db.batch([
     db.prepare(`
       SELECT cm.user_id AS id, u.display_name AS name, cm.role
       FROM chat_member cm
@@ -214,7 +243,20 @@ chatRoutes.get('/conversations/:id', async (c) => {
       WHERE cam.conversation_id = ?
       ORDER BY a.display_name, a.id`)
       .bind(conv.id),
+    // The parent's title, then the subgroups of a department group that the actor belongs to.
+    db.prepare(`
+      SELECT 'parent' AS rel, p.id, COALESCE(p.title, '') AS title FROM chat_conversation p WHERE p.id = ?1
+      UNION ALL
+      SELECT 'sub' AS rel, s.id, COALESCE(s.title, '') AS title
+      FROM chat_conversation s
+      JOIN chat_member sm ON sm.conversation_id = s.id AND sm.user_id = ?2
+      WHERE ?3 IS NOT NULL AND s.parent_conversation_id = ?4 AND s.archived_at IS NULL`)
+      .bind(conv.parent_conversation_id, actor.id, conv.department_id, conv.id),
   ]);
+  const treeRows = (treeRes?.results ?? []) as { rel: 'parent' | 'sub'; id: string; title: string }[];
+  const subgroups = treeRows.filter((r) => r.rel === 'sub')
+    .map((r) => ({ id: r.id, title: r.title }))
+    .sort((a, b) => a.title.localeCompare(b.title, 'vi') || a.id.localeCompare(b.id));
 
   const memberRows = (membersRes?.results ?? []) as { id: string; name: string; role: 'owner' | 'member' }[];
   const agentRows = ((agentsRes?.results ?? []) as {
@@ -242,6 +284,11 @@ chatRoutes.get('/conversations/:id', async (c) => {
     taskId: conv.task_id,
     system: conv.system_key !== null,
     agentReadable: conv.agent_readable === 1,
+    mode: conv.mode,
+    departmentId: conv.department_id,
+    parentConversationId: conv.parent_conversation_id,
+    parentTitle: treeRows.find((r) => r.rel === 'parent')?.title ?? null,
+    subgroups,
     createdByUserId: conv.created_by_user_id,
     createdAt: conv.created_at,
     updatedAt: conv.updated_at,
@@ -257,14 +304,32 @@ chatRoutes.patch('/conversations/:id', async (c) => {
   const conv = await loadConversation(db, actor, c.req.param('id'));
   if (!conv) return c.json(notFound, 404);
 
-  const body = await c.req.json<{ title?: unknown; agentReadable?: unknown }>().catch(() => null);
-  if (!body || (body.title === undefined && body.agentReadable === undefined)) {
+  const body = await c.req.json<{ title?: unknown; agentReadable?: unknown; mode?: unknown }>().catch(() => null);
+  if (!body || (body.title === undefined && body.agentReadable === undefined && body.mode === undefined)) {
     return c.json(fail('VALIDATION_FAILED', 'Dữ liệu không hợp lệ'), 422);
+  }
+
+  const isDepartmentGroup = isDepartmentGroupKey(conv.system_key);
+  const mayManageGroup = conv.member_role === 'owner' || actor.role === 'director' || actor.role === 'admin';
+  // The department group and mode checks run before any write, so these refusals change nothing.
+  if (body.title !== undefined && isDepartmentGroup) {
+    return c.json(fail('VALIDATION_FAILED', 'Tên nhóm phòng ban theo tên phòng ban', { fields: { title: 'Không hợp lệ' } }), 422);
+  }
+  if (body.mode !== undefined) {
+    if (body.mode !== 'chat' && body.mode !== 'topic') {
+      return c.json(fail('VALIDATION_FAILED', 'Chế độ nhóm không hợp lệ', { fields: { mode: 'Không hợp lệ' } }), 422);
+    }
+    // Normal groups and department groups only; the Inbox group keeps its plain chat.
+    if (conv.kind !== 'group' || (conv.system_key !== null && !isDepartmentGroup)) {
+      return c.json(fail('VALIDATION_FAILED', 'Nhóm này không đổi được chế độ', { fields: { mode: 'Không hợp lệ' } }), 422);
+    }
+    if (!mayManageGroup) return c.json(forbidden, 403);
   }
 
   const now = new Date().toISOString();
   let nextTitle = conv.title;
   let nextAgentReadable = conv.agent_readable === 1;
+  let nextMode = conv.mode;
 
   if (body.agentReadable !== undefined) {
     if (typeof body.agentReadable !== 'boolean' || conv.kind !== 'direct') {
@@ -284,11 +349,17 @@ chatRoutes.patch('/conversations/:id', async (c) => {
     if (trimmed.length < 1 || trimmed.length > 80) {
       return c.json(fail('VALIDATION_FAILED', 'Tên nhóm cần từ 1 đến 80 ký tự', { fields: { title: 'Không hợp lệ' } }), 422);
     }
-    const mayRename = conv.member_role === 'owner' || actor.role === 'director' || actor.role === 'admin';
-    if (!mayRename) return c.json(forbidden, 403);
+    if (!mayManageGroup) return c.json(forbidden, 403);
     nextTitle = trimmed;
     await db.prepare('UPDATE chat_conversation SET title = ?, updated_at = ? WHERE id = ?')
       .bind(trimmed, now, conv.id)
+      .run();
+  }
+
+  if (body.mode === 'chat' || body.mode === 'topic') {
+    nextMode = body.mode;
+    await db.prepare('UPDATE chat_conversation SET mode = ?, updated_at = ? WHERE id = ?')
+      .bind(body.mode, now, conv.id)
       .run();
   }
 
@@ -298,7 +369,7 @@ chatRoutes.patch('/conversations/:id', async (c) => {
     conversationId: conv.id,
   });
 
-  return c.json(ok({ id: conv.id, title: nextTitle, agentReadable: nextAgentReadable }));
+  return c.json(ok({ id: conv.id, title: nextTitle, agentReadable: nextAgentReadable, mode: nextMode }));
 });
 
 chatRoutes.post('/conversations/:id/members', async (c) => {
@@ -492,6 +563,11 @@ chatRoutes.post('/conversations/:id/messages', async (c) => {
   const alsoInMain = body.alsoSendToMain === true;
   const inputError = threadInputError(conv, threadRootId, alsoInMain);
   if (inputError) return c.json(inputError, 422);
+  // In topic mode a top-level message starts a topic; answering someone happens inside their topic.
+  const startsTopic = conv.mode === 'topic' && threadRootId === null;
+  if (startsTopic && replyToMessageId !== null) {
+    return c.json(fail('VALIDATION_FAILED', 'Ở chế độ Chủ đề, hãy trả lời trong chủ đề', { fields: { replyToMessageId: 'Không hợp lệ' } }), 422);
+  }
 
   let attachmentIds: string[] = [];
   if (body.attachmentIds !== undefined) {
@@ -561,11 +637,29 @@ chatRoutes.post('/conversations/:id/messages', async (c) => {
         conversationId: conv.id,
         rootId: threadRoot.id,
         rootAuthorUserId: threadRoot.author_kind === 'user' ? threadRoot.author_user_id : null,
-        isTopic: threadRoot.is_topic === null ? conv.mode === 'topic' : threadRoot.is_topic === 1,
+        isTopic: conv.mode === 'topic',
         message: result.data,
         authorUserId: actor.id,
         mentionIds: mentions,
         memberIds: recipients,
+      });
+    } else if (startsTopic) {
+      await db.batch(startTopicStatements(db, {
+        conversationId: conv.id,
+        rootId: result.data.id,
+        authorUserId: actor.id,
+        mentionIds: result.data.mentions,
+        now: result.data.createdAt,
+      }));
+      publish(sink, actor.organizationId, recipients, {
+        type: 'message.created',
+        conversationId: conv.id,
+        messageId: result.data.id,
+      });
+      publish(sink, actor.organizationId, recipients, {
+        type: 'thread.updated',
+        conversationId: conv.id,
+        rootId: result.data.id,
       });
     } else {
       publish(sink, actor.organizationId, recipients, {
@@ -781,6 +875,45 @@ chatRoutes.put('/threads/:rootId/subscription', async (c) => {
     rootId: resolved.root.id,
   });
   return c.json(ok(result));
+});
+
+chatRoutes.post('/threads/:rootId/close', async (c) => {
+  const actor = c.get('actor');
+  const db = c.env.DB;
+  const body = await c.req.json<{ closed?: unknown }>().catch(() => null);
+  if (typeof body?.closed !== 'boolean') {
+    return c.json(fail('VALIDATION_FAILED', 'Dữ liệu không hợp lệ', { fields: { closed: 'Không hợp lệ' } }), 422);
+  }
+  const resolved = await resolveThreadRoot(db, actor, c.req.param('rootId'));
+  if (!resolved || resolved.conversation.kind === 'task') return c.json(notFound, 404);
+  const { root, conversation } = resolved;
+  const isRootAuthor = root.author_kind === 'user' && root.author_user_id === actor.id;
+  const mayClose = isRootAuthor || conversation.member_role === 'owner' || actor.role === 'director' || actor.role === 'admin';
+  if (!mayClose) return c.json(forbidden, 403);
+
+  const result = await setThreadClosed(db, actor.id, root.id, body.closed);
+  if (!result.ok) return c.json(fail('VALIDATION_FAILED', result.message), 422);
+
+  const recipients = await memberIds(db, conversation.id);
+  publish(sinkFrom(c), actor.organizationId, recipients, {
+    type: 'thread.updated',
+    conversationId: conversation.id,
+    rootId: root.id,
+  });
+  return c.json(ok(result.thread));
+});
+
+chatRoutes.get('/conversations/:id/topics', async (c) => {
+  const actor = c.get('actor');
+  const db = c.env.DB;
+  const conv = await loadConversation(db, actor, c.req.param('id'));
+  if (!conv) return c.json(notFound, 404);
+  const limitParam = Number(c.req.query('limit'));
+  const topics = await listTopics(db, actor.id, conv.id, {
+    before: c.req.query('before') || undefined,
+    limit: Number.isFinite(limitParam) && limitParam > 0 ? limitParam : undefined,
+  });
+  return c.json(ok(topics));
 });
 
 chatRoutes.post('/conversations/:id/attachments', async (c) => {
