@@ -1,7 +1,7 @@
 ---
 title: "Chat CRM kiểu Lark: trả lời trích dẫn, chuỗi, chủ đề, nhóm phòng ban, tạo việc từ chat"
 description: "Hai kiểu trả lời (trích dẫn và theo chuỗi) có khung chuỗi riêng, người theo dõi và tab Chuỗi; nhóm phòng ban tự đồng bộ có nhóm nhỏ; chế độ Chủ đề; Trợ lý soạn việc nháp từ một tin hoặc một chuỗi, người bấm xác nhận mới tạo."
-status: pending
+status: in-progress
 priority: P2
 effort: 10d
 branch: main
@@ -13,7 +13,7 @@ created: 2026-10-26
 
 # Chat CRM kiểu Lark: chuỗi, chủ đề, nhóm phòng ban, tạo việc từ chat
 
-Status: pending · Owner: Opus (giao việc, soát, chạy mọi thao tác remote) · Executor: Claude `fullstack-developer`, mỗi phase một lần chạy (Agy hết quota đến khoảng 01/11/2026) · Không gọi kongming: gặp lỗi thì dừng và báo BLOCKED cho Opus.
+Status: in-progress (đã deploy 27/10, chờ user kiểm live) · Owner: Opus (giao việc, soát, chạy mọi thao tác remote) · Executor: Claude `fullstack-developer`, mỗi phase một lần chạy (Agy hết quota đến khoảng 01/11/2026) · Không gọi kongming: gặp lỗi thì dừng và báo BLOCKED cho Opus.
 
 Hợp đồng gốc: [brainstorm-261026-1028-lark-style-threads.md](../reports/brainstorm-261026-1028-lark-style-threads.md) · Nghiên cứu Lark: [researcher-261026-1023-lark-threads-topics.md](../reports/researcher-261026-1023-lark-threads-topics.md) · Plan trước (đã deploy bản `62d61a57`): [261025-1500-internal-chat-tasks-agents](../261025-1500-internal-chat-tasks-agents/plan.md)
 
@@ -48,16 +48,16 @@ Planner chốt (có lý do, xem từng phase):
 ## Phase
 | # | Phase | Executor | Phụ thuộc | Trạng thái |
 |---|-------|----------|-----------|------------|
-| 01 | [Mô hình dữ liệu và trả lời trích dẫn (backend)](phase-01-data-model-quote-reply.md) | Claude | mốc commit (câu hỏi 1) | pending |
-| 02 | [Chuỗi: người theo dõi, chưa đọc, thông báo, realtime (backend)](phase-02-threads-backend.md) | Claude | 01 | pending |
-| 03 | [Nhóm phòng ban, nhóm nhỏ, chế độ Chủ đề (backend)](phase-03-department-groups-topics-backend.md) | Claude | 02 | pending |
-| 04 | [Tạo việc từ chat: nguồn, tạo tay, thẻ việc, thông báo (backend)](phase-04-task-from-chat-backend.md) | Claude | 03 | pending |
-| 05 | [Trợ lý soạn việc nháp, @Trợ lý trong chuỗi, MCP hiểu chuỗi](phase-05-agent-drafts-mcp-threads.md) | Claude | 04 | pending |
-| 06 | [Web: trích dẫn, khung chuỗi, thẻ chuỗi, tab Chuỗi](phase-06-web-quote-threads.md) | Claude | 02 (chạy song song với 03–05 được) | pending |
-| 07 | [Web: cây Phòng ban → nhóm nhỏ, cài đặt nhóm, chế độ Chủ đề](phase-07-web-groups-topics.md) | Claude | 03, 06 | pending |
-| 08 | [Web: tạo việc từ chat, thẻ nháp, thẻ việc, link "Tạo từ chat"](phase-08-web-task-from-chat.md) | Claude | 05, 07 | pending |
-| 09 | [Tài liệu: ADR-012, hướng dẫn chat tiếng Việt, prompt GoClaw](phase-09-docs.md) | Claude | 05, 08 | pending |
-| 10 | [Phát hành: sao lưu, migration remote, deploy, kiểm tra live](phase-10-release.md) | Opus | 01–09 | pending |
+| 01 | [Mô hình dữ liệu và trả lời trích dẫn (backend)](phase-01-data-model-quote-reply.md) | Claude | mốc commit (câu hỏi 1) | done |
+| 02 | [Chuỗi: người theo dõi, chưa đọc, thông báo, realtime (backend)](phase-02-threads-backend.md) | Claude | 01 | done |
+| 03 | [Nhóm phòng ban, nhóm nhỏ, chế độ Chủ đề (backend)](phase-03-department-groups-topics-backend.md) | Claude | 02 | done |
+| 04 | [Tạo việc từ chat: nguồn, tạo tay, thẻ việc, thông báo (backend)](phase-04-task-from-chat-backend.md) | Claude | 03 | done |
+| 05 | [Trợ lý soạn việc nháp, @Trợ lý trong chuỗi, MCP hiểu chuỗi](phase-05-agent-drafts-mcp-threads.md) | Claude | 04 | done |
+| 06 | [Web: trích dẫn, khung chuỗi, thẻ chuỗi, tab Chuỗi](phase-06-web-quote-threads.md) | Claude | 02 (chạy song song với 03–05 được) | done |
+| 07 | [Web: cây Phòng ban → nhóm nhỏ, cài đặt nhóm, chế độ Chủ đề](phase-07-web-groups-topics.md) | Claude | 03, 06 | done |
+| 08 | [Web: tạo việc từ chat, thẻ nháp, thẻ việc, link "Tạo từ chat"](phase-08-web-task-from-chat.md) | Claude | 05, 07 | done |
+| 09 | [Tài liệu: ADR-012, hướng dẫn chat tiếng Việt, prompt GoClaw](phase-09-docs.md) | Claude | 05, 08 | done |
+| 10 | [Phát hành: sao lưu, migration remote, deploy, kiểm tra live](phase-10-release.md) | Opus | 01–09 | in-progress (chờ user: 10.5, 10.6) |
 
 Thứ tự chạy: 01 → 02 → 03 → 04 → 05. Phase 06 được chạy song song với 03–05 vì chỉ sửa file trong `src/web/**` và `test/web-chat.test.ts`, không đụng file worker nào. Sau đó chạy 07 → 08 → 09 → 10. Các phase backend chạy nối tiếp vì cùng sửa `chat.ts`, `chat-routes.ts` và `chat-agents.ts`.
 
