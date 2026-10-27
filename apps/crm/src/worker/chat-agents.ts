@@ -6,7 +6,9 @@ import {
   publish,
   renderMentionText,
   type ChatMessageItem,
+  type InsertMessageInput,
 } from './chat';
+import { afterThreadMessage } from './chat-threads';
 import { fail, ok } from './command-result';
 import type { Actor, Sink } from './env';
 import { readBridgePresence } from './inbox/bridge-routes';
@@ -61,8 +63,10 @@ export interface ChatCompletionPayload {
   chatConversationId: string;
   chatAgentId: string;
   requestedByUserId: string;
-  /** The question the agent's answer quotes; null in a direct agent chat. */
+  /** The question the agent's answer quotes; null in a direct agent chat and inside a thread. */
   replyToMessageId: string | null;
+  /** The thread the question was asked in; the answer goes into the same thread. */
+  threadRootId: string | null;
   commandId?: string;
 }
 
@@ -374,9 +378,11 @@ const oneLine = (text: string) => text.replace(/\s*[\r\n]+\s*/g, ' ').trim();
  * Id of the "Trợ lý đang offline" notice: one per conversation per 10-minute window, so a burst of messages while
  * the agent machine is down posts it once. The conversation id is hashed to keep the id within 64 characters.
  */
-async function offlineNoticeId(conversationId: string, nowMs: number): Promise<string> {
+async function offlineNoticeId(conversationId: string, threadRootId: string | null, nowMs: number): Promise<string> {
   const bucket = Math.floor(nowMs / OFFLINE_NOTICE_WINDOW_MS);
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(conversationId));
+  // A thread gets its own notice, so a notice already posted in the main flow does not leave the thread waiting.
+  const scope = threadRootId ? `${conversationId}#${threadRootId}` : conversationId;
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(scope));
   const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
   return `offline:${hex}:${bucket}`;
 }
@@ -385,12 +391,14 @@ export async function scheduleAgentTurns(
   sink: Sink,
   db: D1Database,
   actor: Actor,
-  conversation: { id: string; kind: 'group' | 'direct' | 'task'; organization_id?: string },
+  conversation: { id: string; kind: 'group' | 'direct' | 'task'; organization_id?: string; mode?: 'chat' | 'topic' },
   message: ChatMessageItem,
   recipientUserIds?: string[],
 ): Promise<void> {
   if (message.authorKind !== 'user' || message.duplicate) return;
 
+  // A question asked inside a thread is answered in that thread, with only that thread as context.
+  const threadRootId = conversation.kind === 'task' ? null : message.threadRootId;
   const isDirectAgent = conversation.kind === 'direct' && conversation.id.startsWith('dm-agent:');
   const mentionedAgentIds =
     conversation.kind === 'group' || conversation.kind === 'task'
@@ -437,7 +445,10 @@ export async function scheduleAgentTurns(
 
     if (targetAgents.length === 0) return;
 
-    // ONE query to load the last 20 main-flow messages of the conversation
+    // ONE query to load the last 20 messages of the main flow, or of the thread the question was asked in
+    const scopeSql = threadRootId
+      ? '(m.id = ?3 OR m.thread_root_id = ?3)'
+      : '(m.thread_root_id IS NULL OR m.also_in_main = 1)';
     const recent = await db
       .prepare(
         `SELECT m.id, m.body,
@@ -448,11 +459,11 @@ export async function scheduleAgentTurns(
          WHERE m.conversation_id = ?1
            AND m.deleted_at IS NULL
            AND m.id <> ?2
-           AND (m.thread_root_id IS NULL OR m.also_in_main = 1)
+           AND ${scopeSql}
          ORDER BY m.created_at DESC, m.id DESC
          LIMIT 20`,
       )
-      .bind(conversation.id, message.id)
+      .bind(conversation.id, message.id, ...(threadRootId ? [threadRootId] : []))
       .all<{ id: string; body: string; author_name: string }>();
 
     const historyLines = recent.results
@@ -479,8 +490,9 @@ export async function scheduleAgentTurns(
 
   if (turns.length === 0) return;
 
-  // In a group or task thread the agent's answer quotes the question; a direct agent chat needs no quote.
-  const replyToMessageId = isDirectAgent ? null : message.id;
+  // In a group or task conversation the agent's answer quotes the question; a direct agent chat needs no quote, and
+  // inside a thread the answer simply follows the question.
+  const replyToMessageId = isDirectAgent || threadRootId ? null : message.id;
   const commandInputs: EnqueueCommandInput[] = turns.map((turn) => ({
     kind: 'run_completion',
     target: 'bridge',
@@ -494,6 +506,7 @@ export async function scheduleAgentTurns(
       chatAgentId: turn.agentId,
       requestedByUserId: actor.id,
       replyToMessageId,
+      threadRootId,
     } satisfies ChatCompletionPayload,
     dedupeKey: `chat-turn:${message.id}:${turn.agentId}`,
   }));
@@ -510,27 +523,99 @@ export async function scheduleAgentTurns(
       type: 'agent.thinking',
       conversationId: conversation.id,
       agentId: turn.agentId,
+      ...(threadRootId ? { rootId: threadRootId } : {}),
     });
   }
 
   const { bridgeOnline } = await readBridgePresence(db);
   if (!bridgeOnline) {
-    const offlineId = await offlineNoticeId(conversation.id, Date.now());
+    const offlineId = await offlineNoticeId(conversation.id, threadRootId, Date.now());
     const offlineRes = await insertMessage(db, {
       id: offlineId,
       conversationId: conversation.id,
       authorKind: 'system',
       body: 'Trợ lý đang offline, sẽ trả lời khi máy chủ agent hoạt động lại.',
       replyToMessageId,
+      threadRootId,
     });
     if (offlineRes.ok && !offlineRes.data.duplicate) {
-      publish(sink, actor.organizationId, members, {
-        type: 'message.created',
+      await announceAgentMessage(sink, db, {
+        organizationId: actor.organizationId,
         conversationId: conversation.id,
-        messageId: offlineId,
+        // The question was stored as a thread reply just before, so the root author already follows.
+        rootAuthorUserId: null,
+        isTopic: conversation.mode === 'topic',
+        memberIds: members,
+        message: offlineRes.data,
       });
     }
   }
+}
+
+/**
+ * Tells members about a stored agent or system message. A thread message also updates the thread (counters,
+ * `thread.updated`); agent and system messages notify nobody.
+ */
+async function announceAgentMessage(
+  sink: Sink,
+  db: D1Database,
+  input: {
+    organizationId: string;
+    conversationId: string;
+    rootAuthorUserId: string | null;
+    isTopic: boolean;
+    memberIds: string[];
+    message: ChatMessageItem;
+  },
+): Promise<void> {
+  if (input.message.threadRootId) {
+    await afterThreadMessage(sink, db, {
+      organizationId: input.organizationId,
+      conversationId: input.conversationId,
+      rootId: input.message.threadRootId,
+      rootAuthorUserId: input.rootAuthorUserId,
+      isTopic: input.isTopic,
+      message: input.message,
+      authorUserId: null,
+      mentionIds: [],
+      memberIds: input.memberIds,
+    });
+    return;
+  }
+  publish(sink, input.organizationId, input.memberIds, {
+    type: 'message.created',
+    conversationId: input.conversationId,
+    messageId: input.message.id,
+  });
+}
+
+/**
+ * Stores an agent or system answer. When the quoted question was recalled meanwhile, the answer is stored without
+ * the quote (same thread, if any) instead of being dropped, so "Trợ lý đang trả lời…" is always cleared by a message.
+ */
+async function insertAgentAnswer(db: D1Database, input: InsertMessageInput): Promise<ApiResult<ChatMessageItem>> {
+  const result = await insertMessage(db, input);
+  if (result.ok || !input.replyToMessageId || result.error.code !== 'VALIDATION_FAILED') return result;
+  return insertMessage(db, { ...input, replyToMessageId: null });
+}
+
+/** Payload fields shared by the reply and failure paths, read defensively since the payload comes back from the bridge. */
+function readThreadRootId(raw: Partial<ChatCompletionPayload>): string | null {
+  return typeof raw.threadRootId === 'string' && raw.threadRootId ? raw.threadRootId : null;
+}
+
+/** The conversation (with its mode) and, inside a thread, the root's author, as the first statements of a batch. */
+function conversationAndRootStatements(db: D1Database, convId: string, threadRootId: string | null): D1PreparedStatement[] {
+  return [
+    db.prepare('SELECT id, organization_id, mode FROM chat_conversation WHERE id = ?').bind(convId),
+    db.prepare('SELECT author_kind, author_user_id FROM chat_message WHERE id = ? AND conversation_id = ?')
+      .bind(threadRootId ?? '', convId),
+  ];
+}
+
+function rootAuthorFrom(res: D1Result | undefined): string | null {
+  const row = (res?.results?.[0] ?? null) as { author_kind: string; author_user_id: string | null } | null;
+  return row?.author_kind === 'user' ? row.author_user_id : null;
 }
 
 const TASK_SUGGESTION_LINE_RE =
@@ -580,11 +665,12 @@ export async function applyChatAgentReply(
   const agentId = typeof raw.chatAgentId === 'string' ? raw.chatAgentId : null;
   const requestedByUserId = typeof raw.requestedByUserId === 'string' ? raw.requestedByUserId : null;
   const replyToMessageId = typeof raw.replyToMessageId === 'string' ? raw.replyToMessageId : null;
+  const threadRootId = readThreadRootId(raw);
   const cmdId =commandId ?? (typeof raw.commandId === 'string' ? raw.commandId : '');
   if (!convId || !cmdId) return;
 
-  const [convRes, membersRes] = await db.batch([
-    db.prepare('SELECT id, organization_id FROM chat_conversation WHERE id = ?').bind(convId),
+  const [convRes, rootRes, membersRes] = await db.batch([
+    ...conversationAndRootStatements(db, convId, threadRootId),
     db
       .prepare(
         `SELECT cm.user_id, u.display_name
@@ -595,7 +681,7 @@ export async function applyChatAgentReply(
       .bind(convId),
   ]);
 
-  const conv = (convRes?.results?.[0] ?? null) as { id: string; organization_id: string } | null;
+  const conv = (convRes?.results?.[0] ?? null) as { id: string; organization_id: string; mode: 'chat' | 'topic' } | null;
   if (!conv) return;
   const members = (membersRes?.results ?? []) as { user_id: string; display_name: string }[];
 
@@ -617,27 +703,26 @@ export async function applyChatAgentReply(
   };
 
   const msgId = `agent:${cmdId}`;
-  const inserted = await insertMessage(db, {
+  const inserted = await insertAgentAnswer(db, {
     id: msgId,
     conversationId: convId,
     authorKind: 'agent',
     authorAgentId: agentId,
     replyToMessageId,
+    threadRootId,
     body,
     meta,
   });
 
   if (inserted.ok && !inserted.data.duplicate) {
-    publish(
-      sink,
-      conv.organization_id,
-      members.map((m) => m.user_id),
-      {
-        type: 'message.created',
-        conversationId: convId,
-        messageId: msgId,
-      },
-    );
+    await announceAgentMessage(sink, db, {
+      organizationId: conv.organization_id,
+      conversationId: convId,
+      rootAuthorUserId: rootAuthorFrom(rootRes),
+      isTopic: conv.mode === 'topic',
+      memberIds: members.map((m) => m.user_id),
+      message: inserted.data,
+    });
   }
 }
 
@@ -650,31 +735,36 @@ export async function applyChatAgentFailure(
   const raw = (payload ?? {}) as Partial<ChatCompletionPayload>;
   const convId = typeof raw.chatConversationId === 'string' ? raw.chatConversationId : '';
   const replyToMessageId = typeof raw.replyToMessageId === 'string' ? raw.replyToMessageId : null;
+  const threadRootId = readThreadRootId(raw);
   if (!convId || !commandId) return;
 
-  const [convRes, membersRes] = await db.batch([
-    db.prepare('SELECT id, organization_id FROM chat_conversation WHERE id = ?').bind(convId),
+  const [convRes, rootRes, membersRes] = await db.batch([
+    ...conversationAndRootStatements(db, convId, threadRootId),
     db.prepare('SELECT user_id FROM chat_member WHERE conversation_id = ?').bind(convId),
   ]);
 
-  const conv = (convRes?.results?.[0] ?? null) as { id: string; organization_id: string } | null;
+  const conv = (convRes?.results?.[0] ?? null) as { id: string; organization_id: string; mode: 'chat' | 'topic' } | null;
   if (!conv) return;
   const memberUserIds = ((membersRes?.results ?? []) as { user_id: string }[]).map((r) => r.user_id);
 
   const msgId = `agent-failed:${commandId}`;
-  const inserted = await insertMessage(db, {
+  const inserted = await insertAgentAnswer(db, {
     id: msgId,
     conversationId: convId,
     authorKind: 'system',
     replyToMessageId,
+    threadRootId,
     body: 'Trợ lý không trả lời được lần này. Thử lại sau.',
   });
 
   if (inserted.ok && !inserted.data.duplicate) {
-    publish(sink, conv.organization_id, memberUserIds, {
-      type: 'message.created',
+    await announceAgentMessage(sink, db, {
+      organizationId: conv.organization_id,
       conversationId: convId,
-      messageId: msgId,
+      rootAuthorUserId: rootAuthorFrom(rootRes),
+      isTopic: conv.mode === 'topic',
+      memberIds: memberUserIds,
+      message: inserted.data,
     });
   }
 }

@@ -36,6 +36,18 @@ export interface NotificationRow {
 const PUSH_TTL_SECONDS = 3600;
 const PUSH_MAX_SUBSCRIPTIONS = 20;
 const PUSH_BODY_MAX_CHARS = 200;
+/** Pushes one sink (one request or one cron run) may send across all its notify calls. */
+export const PUSH_ALLOWANCE_PER_SINK = 25;
+
+/**
+ * Pushes already queued per sink. A request can notify several times (mention, direct, thread), and every push is a
+ * subrequest, so the calls share one allowance. Keyed weakly so it ends with the sink.
+ */
+const pushesUsed = new WeakMap<Sink, number>();
+
+function pushAllowanceLeft(sink: Sink): number {
+  return Math.max(PUSH_ALLOWANCE_PER_SINK - (pushesUsed.get(sink) ?? 0), 0);
+}
 
 /**
  * Stores in-app notifications for every user (deduplicated by key), tells each user's open tabs, and hands the
@@ -60,8 +72,9 @@ export async function notify(sink: Sink, input: NotifyInput): Promise<void> {
 
 /**
  * Stores many notifications with one D1 batch, publishes one live event per organization, reads the push
- * subscriptions with one query and pushes to at most `pushLimit` devices in the background. Rows past the
- * limit stay in-app only. Returns how many rows were newly inserted. Never throws.
+ * subscriptions with one query and pushes to at most `pushLimit` devices in the background, never past what is left
+ * of the sink's shared allowance. Rows past the limit stay in-app only. Returns how many rows were newly inserted.
+ * Never throws.
  */
 export async function notifyRows(sink: Sink, rows: NotificationRow[], pushLimit: number): Promise<number> {
   try {
@@ -101,7 +114,8 @@ export async function notifyRows(sink: Sink, rows: NotificationRow[], pushLimit:
       publish(sink, organizationId, userIds, { type: 'notification' });
     }
 
-    await queuePushes(sink, inserted, pushLimit);
+    const queued = await queuePushes(sink, inserted, Math.min(pushLimit, pushAllowanceLeft(sink)));
+    if (queued > 0) pushesUsed.set(sink, (pushesUsed.get(sink) ?? 0) + queued);
     return inserted.length;
   } catch (err) {
     console.error('notify_failed', err instanceof Error ? err.message : 'unknown');
@@ -111,11 +125,14 @@ export async function notifyRows(sink: Sink, rows: NotificationRow[], pushLimit:
 
 type SubscriptionRow = { id: string; user_id: string; endpoint: string; p256dh: string; auth: string };
 
-/** Reads the subscriptions of the rows' users (one query) and hands the sends to `sink.waitUntil`. */
-async function queuePushes(sink: Sink, rows: NotificationRow[], pushLimit: number): Promise<void> {
+/**
+ * Reads the subscriptions of the rows' users (one query) and hands the sends to `sink.waitUntil`. Returns how many
+ * pushes were queued.
+ */
+async function queuePushes(sink: Sink, rows: NotificationRow[], pushLimit: number): Promise<number> {
   const vapidPublicKey = sink.env.VAPID_PUBLIC_KEY?.trim();
   const vapidPrivateKey = sink.env.VAPID_PRIVATE_KEY?.trim();
-  if (!vapidPublicKey || !vapidPrivateKey || pushLimit < 1) return;
+  if (!vapidPublicKey || !vapidPrivateKey || pushLimit < 1) return 0;
 
   const db = sink.env.DB;
   const userIds = [...new Set(rows.map((r) => r.userId))];
@@ -127,7 +144,7 @@ async function queuePushes(sink: Sink, rows: NotificationRow[], pushLimit: numbe
     LIMIT ?`)
     .bind(JSON.stringify(userIds), pushLimit)
     .all<SubscriptionRow>();
-  if (subs.results.length === 0) return;
+  if (subs.results.length === 0) return 0;
 
   const subsByUser = new Map<string, SubscriptionRow[]>();
   for (const sub of subs.results) {
@@ -150,7 +167,9 @@ async function queuePushes(sink: Sink, rows: NotificationRow[], pushLimit: numbe
     publicKey: vapidPublicKey,
     privateKey: vapidPrivateKey,
   };
-  sink.waitUntil(sendPushes(db, sends.slice(0, pushLimit), vapid));
+  const queued = sends.slice(0, pushLimit);
+  sink.waitUntil(sendPushes(db, queued, vapid));
+  return queued.length;
 }
 
 /** Sends each push once (no retry) and records the outcome per subscription in one batch. Never throws. */

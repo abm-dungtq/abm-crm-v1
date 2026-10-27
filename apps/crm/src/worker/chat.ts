@@ -1,4 +1,5 @@
 import type { ApiResult, ErrorCode } from '@abm/contracts';
+import { buildThreadSummaries, threadSummaryStatements, type ThreadSummary } from './chat-threads';
 import { fail, ok } from './command-result';
 import type { Actor, Sink } from './env';
 import { notify } from './notify';
@@ -30,6 +31,8 @@ export interface ChatMessageItem {
   deleted: boolean;
   duplicate?: boolean;
   attachments?: ChatAttachmentItem[];
+  /** Set on a top-level message that has a thread; read endpoints fill it, insert results leave it null. */
+  thread: ThreadSummary | null;
 }
 
 /** The quoted message shown above a quote reply. `snippet` is empty when the quoted message was recalled. */
@@ -57,6 +60,10 @@ export interface InsertMessageInput {
   authorAgentId?: string | null;
   body: string;
   replyToMessageId?: string | null;
+  /** Root of the thread this message is a reply in. The caller validates it (`validateThreadTarget`). */
+  threadRootId?: string | null;
+  /** A thread reply that is also shown in the main flow ("Cũng gửi vào nhóm"). */
+  alsoInMain?: boolean;
   mentions?: string[];
   meta?: Record<string, unknown> | null;
 }
@@ -75,6 +82,7 @@ export interface ChatConversationRow {
   updated_at: string;
   last_message_at: string | null;
   archived_at: string | null;
+  mode: 'chat' | 'topic';
   member_role?: 'owner' | 'member' | null;
 }
 
@@ -87,14 +95,29 @@ export interface ChatConversationSummary {
   lastMessageAt: string | null;
   updatedAt: string;
   unread: number;
+  /** Unread thread-only replies in this conversation's followed, unmuted threads. */
+  threadUnread: number;
 }
 
 export type ChatEvent =
   | { type: 'message.created'; conversationId: string; messageId: string }
   | { type: 'message.deleted'; conversationId: string; messageId: string }
   | { type: 'conversation.updated'; conversationId: string }
-  | { type: 'read'; conversationId: string }
-  | { type: 'agent.thinking'; conversationId: string; agentId: string };
+  | { type: 'thread.updated'; conversationId: string; rootId: string; messageId?: string }
+  | { type: 'read'; conversationId: string; rootId?: string }
+  | { type: 'agent.thinking'; conversationId: string; agentId: string; rootId?: string };
+
+/** The thread root as `validateThreadTarget` reads it. */
+export interface ThreadRootRow {
+  id: string;
+  conversation_id: string;
+  thread_root_id: string | null;
+  author_kind: 'user' | 'agent' | 'system';
+  author_user_id: string | null;
+  created_at: string;
+  closed_at: string | null;
+  is_topic: number | null;
+}
 
 export function parseMentions(body: string): string[] {
   const ids = new Set<string>();
@@ -128,7 +151,7 @@ export function renderMentionText(body: string): string {
 }
 
 /** Display name of a message author, with the generic names for agents and the system when no row is joined. */
-function authorNameOrDefault(name: string | null, kind: 'user' | 'agent' | 'system'): string | null {
+export function authorNameOrDefault(name: string | null, kind: 'user' | 'agent' | 'system'): string | null {
   return name ?? (kind === 'agent' ? 'Trợ lý' : kind === 'system' ? 'Hệ thống' : null);
 }
 
@@ -234,26 +257,41 @@ export async function memberIds(db: D1Database, conversationId: string): Promise
   return rows.results.map((r) => r.user_id);
 }
 
+/**
+ * SQL expression for a conversation's title as `actorParam` sees it: the other person (or the agent) in a direct
+ * chat, the task title for a task conversation, else the stored title. `actorParam` is used exactly once, so a
+ * positional `?` works.
+ */
+export function conversationTitleSql(alias: string, actorParam: string): string {
+  return `CASE
+      WHEN ${alias}.kind = 'direct' THEN COALESCE(
+        (SELECT u.display_name FROM chat_member m2 JOIN app_user u ON u.id = m2.user_id
+         WHERE m2.conversation_id = ${alias}.id AND m2.user_id <> ${actorParam} LIMIT 1),
+        (SELECT a.display_name FROM chat_agent_member cam JOIN chat_agent a ON a.id = cam.agent_id
+         WHERE cam.conversation_id = ${alias}.id LIMIT 1),
+        ${alias}.title, '')
+      WHEN ${alias}.kind = 'task' THEN COALESCE((SELECT t.title FROM task t WHERE t.id = ${alias}.task_id), ${alias}.title, '')
+      ELSE COALESCE(${alias}.title, '')
+    END`;
+}
+
+/**
+ * Unread thread-only replies in the followed, unmuted threads of `f.user_id`, for a query that joins
+ * `chat_thread_follower f` and `chat_thread t`. Replies also shown in the main flow are counted there instead.
+ */
+const FOLLOWED_THREAD_UNREAD_SQL = `SELECT COUNT(*) FROM chat_message tm
+  WHERE tm.thread_root_id = t.root_message_id
+    AND tm.created_at > COALESCE(f.last_read_at, '')
+    AND tm.author_user_id IS NOT f.user_id
+    AND tm.deleted_at IS NULL
+    AND tm.also_in_main = 0`;
+
 export async function listConversations(db: D1Database, actor: Actor): Promise<ChatConversationSummary[]> {
   const rows = await db.prepare(`
     SELECT
       c.id,
       c.kind,
-      CASE
-        WHEN c.kind = 'direct' THEN COALESCE(
-          (SELECT u.display_name FROM chat_member m2
-           JOIN app_user u ON u.id = m2.user_id
-           WHERE m2.conversation_id = c.id AND m2.user_id <> ?1
-           LIMIT 1),
-          (SELECT a.display_name FROM chat_agent_member cam
-           JOIN chat_agent a ON a.id = cam.agent_id
-           WHERE cam.conversation_id = c.id
-           LIMIT 1),
-          c.title,
-          ''
-        )
-        ELSE COALESCE(c.title, '')
-      END AS title,
+      ${conversationTitleSql('c', '?1')} AS title,
       c.agent_readable,
       c.last_message_at,
       c.updated_at,
@@ -268,7 +306,11 @@ export async function listConversations(db: D1Database, actor: Actor): Promise<C
          AND um.created_at > COALESCE(cm.last_read_at, '')
          AND um.author_user_id IS NOT ?1
          AND um.deleted_at IS NULL
-         AND (um.thread_root_id IS NULL OR um.also_in_main = 1)) AS unread
+         AND (um.thread_root_id IS NULL OR um.also_in_main = 1)) AS unread,
+      (SELECT COALESCE(SUM((${FOLLOWED_THREAD_UNREAD_SQL})), 0)
+       FROM chat_thread_follower f
+       JOIN chat_thread t ON t.root_message_id = f.root_message_id
+       WHERE f.user_id = ?1 AND f.muted = 0 AND t.conversation_id = c.id) AS thread_unread
     FROM chat_conversation c
     JOIN chat_member cm ON cm.conversation_id = c.id AND cm.user_id = ?1
     WHERE c.organization_id = ?2
@@ -285,6 +327,7 @@ export async function listConversations(db: D1Database, actor: Actor): Promise<C
       updated_at: string;
       last_message: string | null;
       unread: number;
+      thread_unread: number;
     }>();
 
   return rows.results.map((r) => ({
@@ -296,22 +339,35 @@ export async function listConversations(db: D1Database, actor: Actor): Promise<C
     lastMessageAt: r.last_message_at,
     updatedAt: r.updated_at,
     unread: r.unread,
+    threadUnread: r.thread_unread,
   }));
 }
 
+/** Main-flow unread plus unread thread-only replies in followed, unmuted threads of conversations still joined. */
 export async function unreadTotal(db: D1Database, actor: Actor): Promise<number> {
   const row = await db.prepare(`
-    SELECT COUNT(*) AS total
-    FROM chat_conversation c
-    JOIN chat_member cm ON cm.conversation_id = c.id AND cm.user_id = ?1
-    JOIN chat_message m ON m.conversation_id = c.id
-    WHERE c.organization_id = ?2
-      AND c.archived_at IS NULL
-      AND c.kind IN ('group', 'direct', 'task')
-      AND m.created_at > COALESCE(cm.last_read_at, '')
-      AND m.author_user_id IS NOT ?1
-      AND m.deleted_at IS NULL
-      AND (m.thread_root_id IS NULL OR m.also_in_main = 1)`)
+    SELECT (
+      SELECT COUNT(*)
+      FROM chat_conversation c
+      JOIN chat_member cm ON cm.conversation_id = c.id AND cm.user_id = ?1
+      JOIN chat_message m ON m.conversation_id = c.id
+      WHERE c.organization_id = ?2
+        AND c.archived_at IS NULL
+        AND c.kind IN ('group', 'direct', 'task')
+        AND m.created_at > COALESCE(cm.last_read_at, '')
+        AND m.author_user_id IS NOT ?1
+        AND m.deleted_at IS NULL
+        AND (m.thread_root_id IS NULL OR m.also_in_main = 1)
+    ) + (
+      SELECT COALESCE(SUM((${FOLLOWED_THREAD_UNREAD_SQL})), 0)
+      FROM chat_thread_follower f
+      JOIN chat_thread t ON t.root_message_id = f.root_message_id
+      JOIN chat_conversation c ON c.id = t.conversation_id
+      JOIN chat_member cm ON cm.conversation_id = c.id AND cm.user_id = f.user_id
+      WHERE f.user_id = ?1 AND f.muted = 0
+        AND c.organization_id = ?2
+        AND c.archived_at IS NULL
+    ) AS total`)
     .bind(actor.id, actor.organizationId)
     .first<{ total: number }>();
   return row?.total ?? 0;
@@ -393,19 +449,32 @@ export async function ensureTaskConversation(db: D1Database, actor: Actor, taskI
   return convId;
 }
 
-export async function listMessages(
-  db: D1Database,
-  conversationId: string,
-  opts: { before?: string; after?: string; limit?: number } = {},
-): Promise<ChatMessageItem[]> {
-  const limit = Math.min(Math.max(opts.limit ?? 50, 1), 100);
-  const where = ['m.conversation_id = ?', '(m.thread_root_id IS NULL OR m.also_in_main = 1)'];
-  const binds: unknown[] = [conversationId];
-  if (opts.before) { where.push('m.created_at < ?'); binds.push(opts.before); }
-  if (opts.after) { where.push('m.created_at > ?'); binds.push(opts.after); }
-  // With `after` the oldest messages past that time are taken; the result is still returned newest first.
-  const order = opts.after ? 'ASC' : 'DESC';
-  const rows = await db.prepare(`
+/** One message row with its author and quote preview joined; `MESSAGE_ROW_SELECT` reads it, `hydrateMessages` maps it. */
+export interface MessageRow {
+  id: string;
+  conversation_id: string;
+  author_kind: 'user' | 'agent' | 'system';
+  author_user_id: string | null;
+  author_agent_id: string | null;
+  reply_to_message_id: string | null;
+  thread_root_id: string | null;
+  also_in_main: number;
+  body: string;
+  mentions_json: string | null;
+  meta_json: string | null;
+  created_at: string;
+  deleted_at: string | null;
+  author_name: string | null;
+  q_id: string | null;
+  q_author_kind: 'user' | 'agent' | 'system' | null;
+  q_body: string | null;
+  q_deleted_at: string | null;
+  q_thread_root_id: string | null;
+  q_author_name: string | null;
+}
+
+/** `SELECT ... FROM chat_message m ...` producing `MessageRow`; callers append `WHERE`, `ORDER BY` and `LIMIT`. */
+export const MESSAGE_ROW_SELECT = `
     SELECT m.id, m.conversation_id, m.author_kind, m.author_user_id, m.author_agent_id,
       m.reply_to_message_id, m.thread_root_id, m.also_in_main,
       m.body, m.mentions_json, m.meta_json, m.created_at, m.deleted_at,
@@ -417,53 +486,39 @@ export async function listMessages(
     LEFT JOIN chat_agent a ON a.id = m.author_agent_id
     LEFT JOIN chat_message q ON q.id = m.reply_to_message_id
     LEFT JOIN app_user qu ON qu.id = q.author_user_id
-    LEFT JOIN chat_agent qa ON qa.id = q.author_agent_id
-    WHERE ${where.join(' AND ')}
-    ORDER BY m.created_at ${order}, m.id ${order}
-    LIMIT ?`)
-    .bind(...binds, limit)
-    .all<{
-      id: string;
-      conversation_id: string;
-      author_kind: 'user' | 'agent' | 'system';
-      author_user_id: string | null;
-      author_agent_id: string | null;
-      reply_to_message_id: string | null;
-      thread_root_id: string | null;
-      also_in_main: number;
-      body: string;
-      mentions_json: string | null;
-      meta_json: string | null;
-      created_at: string;
-      deleted_at: string | null;
-      author_name: string | null;
-      q_id: string | null;
-      q_author_kind: 'user' | 'agent' | 'system' | null;
-      q_body: string | null;
-      q_deleted_at: string | null;
-      q_thread_root_id: string | null;
-      q_author_name: string | null;
-    }>();
-  if (opts.after) rows.results.reverse();
+    LEFT JOIN chat_agent qa ON qa.id = q.author_agent_id`;
 
-  const messageIds = rows.results.map((r) => r.id);
-  const attRows = messageIds.length > 0
-    ? await db.prepare(`
+/**
+ * Turns message rows into items: loads their attachments and the thread summaries of the top-level ones in ONE
+ * `db.batch` (no query when `rows` is empty). Row order is kept.
+ */
+export async function hydrateMessages(
+  db: D1Database,
+  actorId: string | null,
+  rows: MessageRow[],
+): Promise<ChatMessageItem[]> {
+  if (rows.length === 0) return [];
+  const rootIds = rows.filter((r) => r.thread_root_id === null).map((r) => r.id);
+  const [attRes, ...summaryRes] = await db.batch([
+    db.prepare(`
         SELECT id, message_id, file_name, content_type, size_bytes
         FROM chat_attachment
         WHERE message_id IN (SELECT value FROM json_each(?))
         ORDER BY created_at ASC, id ASC`)
-      .bind(JSON.stringify(messageIds))
-      .all<{ id: string; message_id: string; file_name: string; content_type: string; size_bytes: number }>()
-    : { results: [] };
+      .bind(JSON.stringify(rows.map((r) => r.id))),
+    ...(rootIds.length > 0 ? threadSummaryStatements(db, actorId, rootIds) : []),
+  ]);
   const attByMsg = new Map<string, ChatAttachmentItem[]>();
-  for (const a of attRows.results) {
+  for (const a of (attRes?.results ?? []) as {
+    id: string; message_id: string; file_name: string; content_type: string; size_bytes: number;
+  }[]) {
     const list = attByMsg.get(a.message_id) ?? [];
     list.push({ id: a.id, fileName: a.file_name, contentType: a.content_type, size: a.size_bytes });
     attByMsg.set(a.message_id, list);
   }
+  const summaries = rootIds.length > 0 ? buildThreadSummaries(summaryRes) : new Map<string, ThreadSummary>();
 
-  return rows.results.map((r) => {
+  return rows.map((r) => {
     const deleted = r.deleted_at !== null;
     const quoteDeleted = r.q_deleted_at !== null;
     return {
@@ -491,8 +546,35 @@ export async function listMessages(
       createdAt: r.created_at,
       deleted,
       attachments: deleted ? [] : (attByMsg.get(r.id) ?? []),
+      thread: summaries.get(r.id) ?? null,
     };
   });
+}
+
+/**
+ * One page of the main flow, newest first, in 2 queries. `actorId` personalises the thread summaries (following,
+ * muted, unread); without it they show as not followed.
+ */
+export async function listMessages(
+  db: D1Database,
+  conversationId: string,
+  opts: { before?: string; after?: string; limit?: number; actorId?: string } = {},
+): Promise<ChatMessageItem[]> {
+  const limit = Math.min(Math.max(opts.limit ?? 50, 1), 100);
+  const where = ['m.conversation_id = ?', '(m.thread_root_id IS NULL OR m.also_in_main = 1)'];
+  const binds: unknown[] = [conversationId];
+  if (opts.before) { where.push('m.created_at < ?'); binds.push(opts.before); }
+  if (opts.after) { where.push('m.created_at > ?'); binds.push(opts.after); }
+  // With `after` the oldest messages past that time are taken; the result is still returned newest first.
+  const order = opts.after ? 'ASC' : 'DESC';
+  const rows = await db.prepare(`${MESSAGE_ROW_SELECT}
+    WHERE ${where.join(' AND ')}
+    ORDER BY m.created_at ${order}, m.id ${order}
+    LIMIT ?`)
+    .bind(...binds, limit)
+    .all<MessageRow>();
+  if (opts.after) rows.results.reverse();
+  return hydrateMessages(db, opts.actorId ?? null, rows.results);
 }
 
 export async function insertMessage(db: D1Database, input: InsertMessageInput): Promise<ApiResult<ChatMessageItem>> {
@@ -507,15 +589,23 @@ export async function insertMessage(db: D1Database, input: InsertMessageInput): 
   // Only people mention people: agent and system messages are stored without mentions, so they notify nobody.
   const mentions = input.authorKind === 'user' ? (input.mentions ?? parseMentions(text).slice(0, 10)) : [];
   const replyToId = input.replyToMessageId ?? null;
+  const threadRootId = input.threadRootId ?? null;
+  const alsoInMain = threadRootId !== null && input.alsoInMain === true;
   const authorUserId = input.authorUserId ?? null;
   const authorAgentId = input.authorAgentId ?? null;
 
+  // A main-flow quote must target a message visible in the main flow; a quote inside a thread must target the
+  // root or a reply of that same thread.
   const insertRes = await db.prepare(`
     INSERT OR IGNORE INTO chat_message
-      (id, conversation_id, author_kind, author_user_id, author_agent_id, reply_to_message_id, body, mentions_json, meta_json, created_at)
-    SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10
+      (id, conversation_id, author_kind, author_user_id, author_agent_id, reply_to_message_id, body, mentions_json, meta_json,
+       created_at, thread_root_id, also_in_main)
+    SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12
     WHERE ?6 IS NULL OR EXISTS (
-      SELECT 1 FROM chat_message p WHERE p.id = ?6 AND p.conversation_id = ?2 AND p.deleted_at IS NULL
+      SELECT 1 FROM chat_message p
+      WHERE p.id = ?6 AND p.conversation_id = ?2 AND p.deleted_at IS NULL
+        AND (CASE WHEN ?11 IS NULL THEN (p.thread_root_id IS NULL OR p.also_in_main = 1)
+             ELSE (p.id = ?11 OR p.thread_root_id = ?11) END)
     )`)
     .bind(
       input.id,
@@ -528,6 +618,8 @@ export async function insertMessage(db: D1Database, input: InsertMessageInput): 
       mentions.length ? JSON.stringify(mentions) : null,
       input.meta ? JSON.stringify(input.meta) : null,
       now,
+      threadRootId,
+      alsoInMain ? 1 : 0,
     )
     .run();
 
@@ -583,15 +675,19 @@ export async function insertMessage(db: D1Database, input: InsertMessageInput): 
         createdAt: existing.created_at,
         deleted,
         duplicate: true,
+        thread: null,
       });
     }
 
     return fail('CONFLICT' as ErrorCode, 'Mã tin nhắn đã được sử dụng');
   }
 
-  await db.prepare('UPDATE chat_conversation SET last_message_at = ?, updated_at = ? WHERE id = ?')
-    .bind(now, now, input.conversationId)
-    .run();
+  // A thread-only reply does not move the conversation up the list.
+  if (threadRootId === null || alsoInMain) {
+    await db.prepare('UPDATE chat_conversation SET last_message_at = ?, updated_at = ? WHERE id = ?')
+      .bind(now, now, input.conversationId)
+      .run();
+  }
 
   return ok({
     id: input.id,
@@ -602,29 +698,93 @@ export async function insertMessage(db: D1Database, input: InsertMessageInput): 
     authorName: null,
     replyToMessageId: replyToId,
     replyTo: null,
-    threadRootId: null,
-    alsoInMain: false,
+    threadRootId,
+    alsoInMain,
     body: text,
     mentions,
     meta: input.meta ?? null,
     createdAt: now,
     deleted: false,
     duplicate: false,
+    thread: null,
   });
 }
 
+const threadFail = (message: string): ApiResult<never> =>
+  fail('VALIDATION_FAILED', message, { fields: { threadRootId: 'Không hợp lệ' } });
+
+/** The thread root lookup used by `validateThreadTarget`; exposed so a route can batch it with other reads. */
+export function threadTargetStatement(db: D1Database, threadRootId: string): D1PreparedStatement {
+  return db.prepare(`
+    SELECT r.id, r.conversation_id, r.thread_root_id, r.author_kind, r.author_user_id, r.created_at, t.closed_at, t.is_topic
+    FROM chat_message r
+    LEFT JOIN chat_thread t ON t.root_message_id = r.id
+    WHERE r.id = ?`)
+    .bind(threadRootId);
+}
+
 /**
- * Moves the read marker forward. `at` comes from the browser, so it is normalised to ISO and capped at the server
- * clock: the marker never moves back, and a future value would hide every later message from the unread count.
+ * Checks where a message may go without reading the database: threads exist only in groups and direct chats, and
+ * "Cũng gửi vào nhóm" needs a thread and a chat-mode conversation. Null when the input is fine.
  */
-export async function markRead(db: D1Database, conversationId: string, userId: string, at: string) {
+export function threadInputError(
+  conversation: Pick<ChatConversationRow, 'kind' | 'mode'>,
+  threadRootId: string | null,
+  alsoInMain: boolean,
+): ApiResult<never> | null {
+  if (threadRootId !== null && conversation.kind === 'task') return threadFail('Bình luận việc không trả lời theo chuỗi');
+  if (alsoInMain && (threadRootId === null || conversation.mode === 'topic')) {
+    return threadFail('Không gửi vào nhóm được ở đây');
+  }
+  return null;
+}
+
+/** Checks a loaded thread root (see `threadTargetStatement`). Agent and system messages may post in a closed thread. */
+export function checkThreadRoot(
+  conversation: Pick<ChatConversationRow, 'id'>,
+  root: ThreadRootRow | null,
+  authorKind: 'user' | 'agent' | 'system',
+): ApiResult<ThreadRootRow> {
+  if (!root || root.conversation_id !== conversation.id) return threadFail('Không tìm thấy tin gốc của chuỗi');
+  if (root.thread_root_id !== null) return threadFail('Chỉ trả lời theo chuỗi cho tin gốc');
+  if (root.closed_at !== null && authorKind === 'user') return threadFail('Chủ đề đã đóng');
+  return ok(root);
+}
+
+/**
+ * Validates a thread reply target in one query. Returns the root (null for a main-flow message) or a 422
+ * `VALIDATION_FAILED` with a Vietnamese message.
+ */
+export async function validateThreadTarget(
+  db: D1Database,
+  conversation: Pick<ChatConversationRow, 'id' | 'kind' | 'mode'>,
+  threadRootId: string | null,
+  authorKind: 'user' | 'agent' | 'system',
+  alsoInMain: boolean,
+): Promise<ApiResult<ThreadRootRow | null>> {
+  const inputError = threadInputError(conversation, threadRootId, alsoInMain);
+  if (inputError) return inputError;
+  if (threadRootId === null) return ok(null);
+  const root = await threadTargetStatement(db, threadRootId).first<ThreadRootRow>();
+  return checkThreadRoot(conversation, root, authorKind);
+}
+
+/**
+ * Normalises a read marker from the browser to ISO and caps it at the server clock: a future value would hide every
+ * later message from the unread count. Callers only ever move markers forward.
+ */
+export function clampReadAt(at: string): string {
   const now = new Date().toISOString();
   const parsed = Date.parse(at);
   const iso = Number.isFinite(parsed) ? new Date(parsed).toISOString() : now;
-  const safeAt = iso < now ? iso : now;
+  return iso < now ? iso : now;
+}
+
+/** Moves the read marker forward (never back), clamped by `clampReadAt`. */
+export async function markRead(db: D1Database, conversationId: string, userId: string, at: string) {
   await db.prepare(`UPDATE chat_member SET last_read_at = MAX(COALESCE(last_read_at, ''), ?)
     WHERE conversation_id = ? AND user_id = ?`)
-    .bind(safeAt, conversationId, userId)
+    .bind(clampReadAt(at), conversationId, userId)
     .run();
 }
 
@@ -659,8 +819,8 @@ export async function messageContext(
     : msg.created_at;
   const beforeAnchor = new Date(Date.parse(anchorAt) + 1).toISOString();
   const [older, newer] = await Promise.all([
-    listMessages(db, msg.conversation_id, { before: beforeAnchor, limit: 26 }),
-    listMessages(db, msg.conversation_id, { after: anchorAt, limit: 25 }),
+    listMessages(db, msg.conversation_id, { before: beforeAnchor, limit: 26, actorId: actor.id }),
+    listMessages(db, msg.conversation_id, { after: anchorAt, limit: 25, actorId: actor.id }),
   ]);
   const seen = new Set<string>();
   const messages = [...newer, ...older].filter((m) => (seen.has(m.id) ? false : (seen.add(m.id), true)));
@@ -703,16 +863,7 @@ export async function agentVisibleConversations(db: D1Database, actor: Actor): P
   const visible = agentVisibleConversationSql(actor);
   const rows = await db.prepare(`
     SELECT c.id, c.kind, c.last_message_at,
-      CASE
-        WHEN c.kind = 'direct' THEN COALESCE(
-          (SELECT u.display_name FROM chat_member m2 JOIN app_user u ON u.id = m2.user_id
-           WHERE m2.conversation_id = c.id AND m2.user_id <> ? LIMIT 1),
-          (SELECT a.display_name FROM chat_agent_member cam JOIN chat_agent a ON a.id = cam.agent_id
-           WHERE cam.conversation_id = c.id LIMIT 1),
-          c.title, '')
-        WHEN c.kind = 'task' THEN COALESCE((SELECT t.title FROM task t WHERE t.id = c.task_id), c.title, '')
-        ELSE COALESCE(c.title, '')
-      END AS title,
+      ${conversationTitleSql('c', '?')} AS title,
       CASE WHEN cm.user_id IS NULL THEN 0 ELSE (
         SELECT COUNT(*) FROM chat_message um
         WHERE um.conversation_id = c.id AND um.created_at > COALESCE(cm.last_read_at, '')

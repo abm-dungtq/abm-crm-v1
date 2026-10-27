@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { sinkFrom, type AppBindings } from './env';
 import {
   addConversationMembers,
+  checkThreadRoot,
   ensureTaskConversation,
   filterMentions,
   findOrCreateDirect,
@@ -15,8 +16,19 @@ import {
   parseUserMentions,
   publish,
   renderMentionText,
+  threadInputError,
+  threadTargetStatement,
   unreadTotal,
+  type ThreadRootRow,
 } from './chat';
+import {
+  afterThreadMessage,
+  getThread,
+  listFollowedThreads,
+  markThreadRead,
+  resolveThreadRoot,
+  setThreadSubscription,
+} from './chat-threads';
 import {
   addConversationAgent,
   findOrCreateAgentDirect,
@@ -441,6 +453,7 @@ chatRoutes.get('/conversations/:id/messages', async (c) => {
   const messages = await listMessages(db, conv.id, {
     before,
     limit: limit !== undefined && Number.isFinite(limit) ? limit : undefined,
+    actorId: actor.id,
   });
   return c.json(ok(messages));
 });
@@ -456,6 +469,8 @@ chatRoutes.post('/conversations/:id/messages', async (c) => {
     body?: unknown;
     replyToMessageId?: unknown;
     parentMessageId?: unknown;
+    threadRootId?: unknown;
+    alsoSendToMain?: unknown;
     attachmentIds?: unknown;
   }>().catch(() => null);
 
@@ -467,6 +482,16 @@ chatRoutes.post('/conversations/:id/messages', async (c) => {
   if (replyToMessageId !== null && typeof replyToMessageId !== 'string') {
     return c.json(fail('VALIDATION_FAILED', 'Tin được trả lời không hợp lệ', { fields: { replyToMessageId: 'Không hợp lệ' } }), 422);
   }
+  const threadRootId = body.threadRootId ?? null;
+  if (threadRootId !== null && (typeof threadRootId !== 'string' || !threadRootId)) {
+    return c.json(fail('VALIDATION_FAILED', 'Tin gốc của chuỗi không hợp lệ', { fields: { threadRootId: 'Không hợp lệ' } }), 422);
+  }
+  if (body.alsoSendToMain !== undefined && typeof body.alsoSendToMain !== 'boolean') {
+    return c.json(fail('VALIDATION_FAILED', 'Dữ liệu chưa hợp lệ', { fields: { alsoSendToMain: 'Không hợp lệ' } }), 422);
+  }
+  const alsoInMain = body.alsoSendToMain === true;
+  const inputError = threadInputError(conv, threadRootId, alsoInMain);
+  if (inputError) return c.json(inputError, 422);
 
   let attachmentIds: string[] = [];
   if (body.attachmentIds !== undefined) {
@@ -476,7 +501,18 @@ chatRoutes.post('/conversations/:id/messages', async (c) => {
     attachmentIds = [...new Set(body.attachmentIds.map((a) => a.trim()).filter(Boolean))];
   }
 
-  const members = await memberIds(db, conv.id);
+  const memberStatement = db.prepare('SELECT user_id FROM chat_member WHERE conversation_id = ?').bind(conv.id);
+  let members: string[];
+  let threadRoot: ThreadRootRow | null = null;
+  if (threadRootId !== null) {
+    const [memberRes, rootRes] = await db.batch([memberStatement, threadTargetStatement(db, threadRootId)]);
+    members = ((memberRes?.results ?? []) as { user_id: string }[]).map((r) => r.user_id);
+    const checked = checkThreadRoot(conv, (rootRes?.results?.[0] ?? null) as ThreadRootRow | null, 'user');
+    if (!checked.ok) return c.json(checked, 422);
+    threadRoot = checked.data;
+  } else {
+    members = await memberIds(db, conv.id);
+  }
   const rawMentions = parseUserMentions(body.body).slice(0, 10);
   const mentions = await filterMentions(db, actor.organizationId, conv.kind, conv.task_id, members, rawMentions);
 
@@ -487,6 +523,8 @@ chatRoutes.post('/conversations/:id/messages', async (c) => {
     authorUserId: actor.id,
     body: body.body,
     replyToMessageId,
+    threadRootId,
+    alsoInMain,
     mentions,
   });
 
@@ -514,16 +552,39 @@ chatRoutes.post('/conversations/:id/messages', async (c) => {
         .bind(result.data.id, JSON.stringify(attachmentIds), conv.id, actor.id)
         .run();
     }
+    // One sink for the whole request, so every notify call shares its push allowance.
     const sink = sinkFrom(c);
-    publish(sink, actor.organizationId, recipients, {
-      type: 'message.created',
-      conversationId: conv.id,
-      messageId: result.data.id,
-    });
+    let threadFollowers: string[] = [];
+    if (threadRoot) {
+      threadFollowers = await afterThreadMessage(sink, db, {
+        organizationId: actor.organizationId,
+        conversationId: conv.id,
+        rootId: threadRoot.id,
+        rootAuthorUserId: threadRoot.author_kind === 'user' ? threadRoot.author_user_id : null,
+        isTopic: threadRoot.is_topic === null ? conv.mode === 'topic' : threadRoot.is_topic === 1,
+        message: result.data,
+        authorUserId: actor.id,
+        mentionIds: mentions,
+        memberIds: recipients,
+      });
+    } else {
+      publish(sink, actor.organizationId, recipients, {
+        type: 'message.created',
+        conversationId: conv.id,
+        messageId: result.data.id,
+      });
+    }
 
+    // Each person gets at most one notification per message. A main-flow direct message stays `chat_direct` even
+    // when it mentions the other person; otherwise a mention comes first, then a thread.
     const renderedBody = renderMentionText(result.data.body);
-    if (conv.kind === 'direct') {
-      const otherMembers = recipients.filter((uid) => uid !== actor.id);
+    const dedupeKey = `msg:${result.data.id}`;
+    const chatLink = threadRoot ? `/chat/${conv.id}?thread=${threadRoot.id}` : `/chat/${conv.id}`;
+    const notified = new Set<string>([actor.id]);
+
+    const inMainFlow = threadRoot === null || result.data.alsoInMain;
+    if (conv.kind === 'direct' && inMainFlow) {
+      const otherMembers = recipients.filter((uid) => !notified.has(uid));
       if (otherMembers.length > 0) {
         await notify(sink, {
           organizationId: actor.organizationId,
@@ -532,12 +593,13 @@ chatRoutes.post('/conversations/:id/messages', async (c) => {
           title: actor.displayName,
           body: renderedBody,
           link: `/chat/${conv.id}`,
-          dedupeKey: `msg:${result.data.id}`,
+          dedupeKey,
         });
+        for (const uid of otherMembers) notified.add(uid);
       }
     }
 
-    const mentionUserIds = result.data.mentions.filter((uid) => uid !== actor.id);
+    const mentionUserIds = result.data.mentions.filter((uid) => !notified.has(uid));
     if (mentionUserIds.length > 0) {
       await notify(sink, {
         organizationId: actor.organizationId,
@@ -545,8 +607,22 @@ chatRoutes.post('/conversations/:id/messages', async (c) => {
         kind: 'chat_mention',
         title: `${actor.displayName} đã nhắc đến bạn`,
         body: renderedBody,
-        link: conv.kind === 'task' && conv.task_id ? `/tasks/${conv.task_id}` : `/chat/${conv.id}`,
-        dedupeKey: `msg:${result.data.id}`,
+        link: conv.kind === 'task' && conv.task_id ? `/tasks/${conv.task_id}` : chatLink,
+        dedupeKey,
+      });
+      for (const uid of mentionUserIds) notified.add(uid);
+    }
+
+    const threadUserIds = threadFollowers.filter((uid) => !notified.has(uid));
+    if (threadRoot && threadUserIds.length > 0) {
+      await notify(sink, {
+        organizationId: actor.organizationId,
+        userIds: threadUserIds,
+        kind: 'chat_thread',
+        title: `${actor.displayName} trả lời trong chuỗi`,
+        body: renderedBody,
+        link: chatLink,
+        dedupeKey,
       });
     }
 
@@ -572,12 +648,15 @@ chatRoutes.delete('/messages/:id', async (c) => {
   const actor = c.get('actor');
   const db = c.env.DB;
   const msg = await db.prepare(
-    'SELECT id, conversation_id, author_kind, author_user_id FROM chat_message WHERE id = ?',
+    'SELECT id, conversation_id, author_kind, author_user_id, thread_root_id, also_in_main, deleted_at FROM chat_message WHERE id = ?',
   ).bind(c.req.param('id')).first<{
     id: string;
     conversation_id: string;
     author_kind: string;
     author_user_id: string | null;
+    thread_root_id: string | null;
+    also_in_main: number;
+    deleted_at: string | null;
   }>();
   if (!msg) return c.json(notFound, 404);
 
@@ -589,16 +668,38 @@ chatRoutes.delete('/messages/:id', async (c) => {
   }
 
   const now = new Date().toISOString();
-  await db.prepare('UPDATE chat_message SET deleted_at = COALESCE(deleted_at, ?) WHERE id = ?')
-    .bind(now, msg.id)
-    .run();
+  const recallStatement = db.prepare('UPDATE chat_message SET deleted_at = COALESCE(deleted_at, ?) WHERE id = ?')
+    .bind(now, msg.id);
+  if (msg.thread_root_id !== null && msg.deleted_at === null) {
+    // The counter drops only when this batch is the one that recalls the reply, so a repeated delete cannot
+    // count it twice.
+    await db.batch([
+      db.prepare(`UPDATE chat_thread SET reply_count = MAX(reply_count - 1, 0)
+        WHERE root_message_id = ? AND EXISTS (SELECT 1 FROM chat_message WHERE id = ? AND deleted_at IS NULL)`)
+        .bind(msg.thread_root_id, msg.id),
+      recallStatement,
+    ]);
+  } else {
+    await recallStatement.run();
+  }
 
   const recipients = await memberIds(db, conv.id);
-  publish(sinkFrom(c), actor.organizationId, recipients, {
-    type: 'message.deleted',
-    conversationId: conv.id,
-    messageId: msg.id,
-  });
+  const sink = sinkFrom(c);
+  if (msg.thread_root_id !== null) {
+    publish(sink, actor.organizationId, recipients, {
+      type: 'thread.updated',
+      conversationId: conv.id,
+      rootId: msg.thread_root_id,
+      messageId: msg.id,
+    });
+  }
+  if (msg.thread_root_id === null || msg.also_in_main === 1) {
+    publish(sink, actor.organizationId, recipients, {
+      type: 'message.deleted',
+      conversationId: conv.id,
+      messageId: msg.id,
+    });
+  }
 
   return c.json(ok({ id: msg.id, conversationId: conv.id, deleted: true }));
 });
@@ -622,6 +723,64 @@ chatRoutes.post('/conversations/:id/read', async (c) => {
   });
 
   return c.json(ok({ conversationId: conv.id }));
+});
+
+chatRoutes.get('/threads', async (c) => {
+  const limitParam = Number(c.req.query('limit'));
+  const items = await listFollowedThreads(c.env.DB, c.get('actor'), {
+    before: c.req.query('before') || undefined,
+    limit: Number.isFinite(limitParam) && limitParam > 0 ? limitParam : undefined,
+  });
+  return c.json(ok(items));
+});
+
+chatRoutes.get('/threads/:rootId', async (c) => {
+  const limitParam = Number(c.req.query('limit'));
+  const page = await getThread(c.env.DB, c.get('actor'), c.req.param('rootId'), {
+    before: c.req.query('before') || undefined,
+    limit: Number.isFinite(limitParam) && limitParam > 0 ? limitParam : undefined,
+  });
+  if (!page) return c.json(notFound, 404);
+  return c.json(ok(page));
+});
+
+chatRoutes.post('/threads/:rootId/read', async (c) => {
+  const actor = c.get('actor');
+  const db = c.env.DB;
+  const resolved = await resolveThreadRoot(db, actor, c.req.param('rootId'));
+  if (!resolved) return c.json(notFound, 404);
+
+  const body = await c.req.json<{ at?: unknown }>().catch(() => null);
+  const at = typeof body?.at === 'string' && body.at ? body.at : new Date().toISOString();
+  await markThreadRead(db, resolved.root.id, actor.id, at);
+
+  publish(sinkFrom(c), actor.organizationId, [actor.id], {
+    type: 'read',
+    conversationId: resolved.conversation.id,
+    rootId: resolved.root.id,
+  });
+  return c.json(ok({ rootId: resolved.root.id }));
+});
+
+chatRoutes.put('/threads/:rootId/subscription', async (c) => {
+  const actor = c.get('actor');
+  const db = c.env.DB;
+  const body = await c.req.json<{ state?: unknown }>().catch(() => null);
+  const state = body?.state;
+  if (state !== 'following' && state !== 'muted' && state !== 'none') {
+    return c.json(fail('VALIDATION_FAILED', 'Trạng thái theo dõi không hợp lệ', { fields: { state: 'Không hợp lệ' } }), 422);
+  }
+  const resolved = await resolveThreadRoot(db, actor, c.req.param('rootId'));
+  // Threads exist only in groups and direct chats; task comments have none to follow.
+  if (!resolved || resolved.conversation.kind === 'task') return c.json(notFound, 404);
+
+  const result = await setThreadSubscription(db, actor, resolved.root, resolved.conversation, state);
+  publish(sinkFrom(c), actor.organizationId, [actor.id], {
+    type: 'thread.updated',
+    conversationId: resolved.conversation.id,
+    rootId: resolved.root.id,
+  });
+  return c.json(ok(result));
 });
 
 chatRoutes.post('/conversations/:id/attachments', async (c) => {
