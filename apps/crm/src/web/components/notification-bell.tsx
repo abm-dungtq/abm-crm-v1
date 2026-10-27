@@ -8,7 +8,7 @@ import { Empty, ErrorState, Loading } from './ui';
 
 export interface NotificationItem {
   id: string;
-  kind: 'chat_direct' | 'chat_mention' | 'task_assigned' | 'task_due' | 'approval' | 'inbox' | 'system';
+  kind: 'chat_direct' | 'chat_mention' | 'chat_thread' | 'task_assigned' | 'task_due' | 'approval' | 'inbox' | 'system';
   title: string;
   body: string | null;
   link: string | null;
@@ -77,7 +77,8 @@ export function NotificationBell() {
     }
     setOpen(false);
     if (item.link) {
-      void navigate({ to: item.link as '/' });
+      // `href` keeps a query such as `/chat/<id>?thread=<root>`; `to` would treat it as part of the path.
+      void navigate({ href: item.link });
     }
   };
 

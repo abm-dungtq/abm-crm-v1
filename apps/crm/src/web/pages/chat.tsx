@@ -1,10 +1,12 @@
-import { useEffect, useId, useMemo, useState } from 'react';
-import { Link, useNavigate, useParams } from '@tanstack/react-router';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useEffect, useId, useMemo, useState, type MouseEvent } from 'react';
+import { Link, useNavigate, useParams, useSearch } from '@tanstack/react-router';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useActor } from '../actor-context';
 import { ApiFailure, api, useApi } from '../api';
+import { chatLink, formatThreadTime, parseChatSearch } from '../chat-links';
 import { useChatSocketConnected } from '../chat-socket';
 import { ChatThread, ConversationAgentsDialog } from '../components/chat-thread';
+import { ChatThreadPanel } from '../components/chat-thread-panel';
 import { Icon } from '../components/icons';
 import { fmtShortTime } from '../components/inbox-thread';
 import { roleLabel } from '../components/layout';
@@ -21,7 +23,36 @@ import {
   fieldErrors,
   useToast,
 } from '../components/ui';
-import type { ChatAgentItem, ChatConversationDetail, ChatConversationSummary, DirectoryUser } from '../types';
+import type {
+  ChatAgentItem,
+  ChatConversationDetail,
+  ChatConversationSummary,
+  ChatFollowedThread,
+  DirectoryUser,
+} from '../types';
+
+const THREADS_PAGE_SIZE = 50;
+
+/** Bell with a slash: a followed thread whose notifications are off. */
+function MutedIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={14}
+      height={14}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.75}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      role="img"
+      aria-label="Đã tắt thông báo"
+      style={{ color: 'var(--muted)', flex: 'none' }}
+    >
+      <path d="M13.73 21a2 2 0 0 1-3.46 0M18.63 13A17.9 17.9 0 0 1 18 8M6.26 6.26A5.9 5.9 0 0 0 6 8c0 7-3 9-3 9h14M18 8a6 6 0 0 0-9.33-5M1 1l22 22" />
+    </svg>
+  );
+}
 
 function useIsPhoneWidth(): boolean {
   const [narrow, setNarrow] = useState(() =>
@@ -44,17 +75,48 @@ function useIsPhoneWidth(): boolean {
 
 export function ChatPage() {
   const { conversationId } = useParams({ strict: false });
+  const search = parseChatSearch(useSearch({ strict: false }) as Record<string, unknown>);
+  const navigate = useNavigate();
   const connected = useChatSocketConnected();
   const isPhoneWidth = useIsPhoneWidth();
 
   const [createGroupOpen, setCreateGroupOpen] = useState(false);
   const [newDirectOpen, setNewDirectOpen] = useState(false);
+  const [listTab, setListTab] = useState<'all' | 'threads'>('all');
 
   const conversationsQuery = useQuery<ChatConversationSummary[], ApiFailure>({
     queryKey: ['chat', 'conversations'],
     queryFn: () => api.get<ChatConversationSummary[]>('/chat/conversations'),
     refetchInterval: connected ? false : 60_000,
   });
+
+  // Loaded on every visit: the "Chuỗi" chip shows how many followed threads have unread replies.
+  const threadsQuery = useInfiniteQuery({
+    queryKey: ['chat', 'threads'],
+    queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
+      api.get<ChatFollowedThread[]>(`/chat/threads${pageParam ? `?before=${encodeURIComponent(pageParam)}` : ''}`),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last: ChatFollowedThread[]) =>
+      last.length >= THREADS_PAGE_SIZE ? last.at(-1)?.lastActivityAt : undefined,
+    refetchInterval: connected ? false : 60_000,
+  });
+  const followedThreads = useMemo(() => threadsQuery.data?.pages.flat() ?? [], [threadsQuery.data]);
+  const threadBadge = followedThreads.filter((t) => t.following && !t.muted && t.unread > 0).length;
+
+  const threadRootId = conversationId ? search.thread : undefined;
+  const openThread = (rootId: string, messageId?: string) => {
+    if (!conversationId) return;
+    void navigate({
+      to: '/chat/$conversationId',
+      params: { conversationId },
+      search: messageId ? { thread: rootId, message: messageId } : { thread: rootId },
+    });
+  };
+  // A new history entry, so Back reopens the panel the same way Back closes it.
+  const closeThread = () => {
+    if (!conversationId) return;
+    void navigate({ to: '/chat/$conversationId', params: { conversationId }, search: {}, replace: false });
+  };
 
   const groups = useMemo(
     () => (conversationsQuery.data ?? []).filter((c) => c.kind === 'group'),
@@ -73,7 +135,7 @@ export function ChatPage() {
       <h1 className="visually-hidden">Chat nội bộ</h1>
       <div
         className={isPhoneWidth ? 'inbox' : 'inbox inbox-channels-collapsed'}
-        data-view={conversationId ? 'thread' : 'list'}
+        data-view={conversationId ? (threadRootId ? 'thread-panel' : 'thread') : 'list'}
       >
         <section className="inbox-list" aria-label="Danh sách hội thoại chat">
           <div className="inbox-filters">
@@ -97,8 +159,73 @@ export function ChatPage() {
                 <span>Nhắn riêng</span>
               </button>
             </div>
+            <div className="chips" role="group" aria-label="Chọn danh sách">
+              <button
+                type="button"
+                className="chip"
+                aria-pressed={listTab === 'all'}
+                onClick={() => setListTab('all')}
+              >
+                Tất cả
+              </button>
+              <button
+                type="button"
+                className="chip"
+                aria-pressed={listTab === 'threads'}
+                onClick={() => setListTab('threads')}
+              >
+                Chuỗi
+                {threadBadge > 0 && (
+                  <span className="conv-unread-badge" aria-label={`${threadBadge} chuỗi có trả lời chưa đọc`}>
+                    {threadBadge}
+                  </span>
+                )}
+              </button>
+            </div>
           </div>
 
+          {listTab === 'threads' ? (
+            <div className="inbox-list-body">
+              {threadsQuery.isLoading && (
+                <div style={{ padding: 12 }}>
+                  <Loading rows={5} />
+                </div>
+              )}
+              {threadsQuery.error && (
+                <div style={{ padding: 12 }}>
+                  <ErrorState error={threadsQuery.error} onRetry={() => threadsQuery.refetch()} />
+                </div>
+              )}
+              {threadsQuery.data && followedThreads.length === 0 && (
+                <div className="small muted" style={{ padding: '10px 12px' }}>
+                  Bạn chưa theo dõi chuỗi nào. Trả lời theo chuỗi hoặc bấm Theo dõi để thấy ở đây.
+                </div>
+              )}
+              {followedThreads.length > 0 && (
+                <ul className="conv-list" aria-label="Chuỗi đang theo dõi">
+                  {followedThreads.map((t) => (
+                    <ChatFollowedThreadRow
+                      key={t.rootId}
+                      item={t}
+                      selected={t.conversationId === conversationId && t.rootId === threadRootId}
+                    />
+                  ))}
+                </ul>
+              )}
+              {threadsQuery.hasNextPage && (
+                <div style={{ padding: 10, textAlign: 'center' }}>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    disabled={threadsQuery.isFetchingNextPage}
+                    onClick={() => void threadsQuery.fetchNextPage()}
+                  >
+                    {threadsQuery.isFetchingNextPage ? 'Đang tải…' : 'Tải thêm'}
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
           <div className="inbox-list-body">
             {conversationsQuery.isLoading && (
               <div style={{ padding: 12 }}>
@@ -172,11 +299,19 @@ export function ChatPage() {
               </>
             )}
           </div>
+          )}
         </section>
 
         <div className="inbox-main">
           {conversationId ? (
-            <ChatConversationPane conversationId={conversationId} />
+            <ChatConversationPane
+              conversationId={conversationId}
+              threadRootId={threadRootId}
+              messageId={search.message}
+              isPhoneWidth={isPhoneWidth}
+              onOpenThread={openThread}
+              onCloseThread={closeThread}
+            />
           ) : (
             <div className="inbox-placeholder">
               <Empty title="Chọn một hội thoại" icon="message">
@@ -228,6 +363,9 @@ function ChatConversationRow({
                   {item.unread}
                 </span>
               )}
+              {item.unread === 0 && item.threadUnread > 0 && (
+                <span className="chat-unread-dot" role="img" aria-label="Có trả lời chưa đọc trong chuỗi" />
+              )}
             </div>
             <div
               className="small truncate"
@@ -245,7 +383,65 @@ function ChatConversationRow({
   );
 }
 
-function ChatConversationPane({ conversationId }: { conversationId: string }) {
+function ChatFollowedThreadRow({ item, selected }: { item: ChatFollowedThread; selected: boolean }) {
+  const navigate = useNavigate();
+  const href = chatLink({ conversationId: item.conversationId, threadRootId: item.rootId });
+  const title = item.conversationTitle || (item.conversationKind === 'group' ? 'Nhóm chat' : 'Tin riêng');
+  const unread = !item.muted && item.unread > 0;
+  const onClick = (e: MouseEvent<HTMLAnchorElement>) => {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    void navigate({ href });
+  };
+
+  return (
+    <li>
+      <a href={href} className="conv-row" aria-current={selected ? 'true' : undefined} onClick={onClick}>
+        <div className="row" style={{ gap: 8 }}>
+          <Avatar name={title} />
+          <div className="truncate" style={{ flex: 1, minWidth: 0 }}>
+            <div className="row" style={{ gap: 6 }}>
+              <span className="conv-name truncate" style={{ flex: 1, fontWeight: unread ? 700 : 600 }}>
+                {title}
+              </span>
+              {item.muted ? (
+                <MutedIcon />
+              ) : (
+                unread && (
+                  <span className="conv-unread-badge" aria-label={`${item.unread} trả lời chưa đọc`}>
+                    {item.unread}
+                  </span>
+                )
+              )}
+            </div>
+            <div className="small truncate" style={{ color: unread ? 'var(--text)' : 'var(--muted)' }}>
+              {item.rootAuthorName ?? 'Nhân viên'}: {item.rootDeleted ? 'Tin đã thu hồi' : formatMentionText(item.rootSnippet)}
+            </div>
+            <div className="small muted">
+              {item.replyCount} trả lời · {formatThreadTime(item.lastReplyAt ?? item.lastActivityAt)}
+            </div>
+          </div>
+        </div>
+      </a>
+    </li>
+  );
+}
+
+function ChatConversationPane({
+  conversationId,
+  threadRootId,
+  messageId,
+  isPhoneWidth,
+  onOpenThread,
+  onCloseThread,
+}: {
+  conversationId: string;
+  threadRootId?: string;
+  messageId?: string;
+  isPhoneWidth: boolean;
+  onOpenThread: (rootId: string, messageId?: string) => void;
+  onCloseThread: () => void;
+}) {
   const actor = useActor();
   const client = useQueryClient();
   const toast = useToast();
@@ -302,8 +498,11 @@ function ChatConversationPane({ conversationId }: { conversationId: string }) {
     conv.kind === 'group' &&
     (myMember?.role === 'owner' || actor.role === 'director' || actor.role === 'admin');
 
+  const showPanel = Boolean(threadRootId) && (conv.kind === 'group' || conv.kind === 'direct');
+
   return (
-    <section className="inbox-thread" style={{ flex: 1, minHeight: 0 }} aria-label={`Hội thoại ${displayTitle}`}>
+    <div className="chat-main-row">
+    <section className="inbox-thread chat-conversation-col" style={{ flex: 1, minHeight: 0 }} aria-label={`Hội thoại ${displayTitle}`}>
       <header className="inbox-thread-head">
         <Link
           to="/chat"
@@ -377,7 +576,12 @@ function ChatConversationPane({ conversationId }: { conversationId: string }) {
         )}
       </header>
 
-      <ChatThread conversationId={conversationId} embedded />
+      <ChatThread
+        conversationId={conversationId}
+        embedded
+        onOpenThread={onOpenThread}
+        focusMessageId={threadRootId ? undefined : messageId}
+      />
 
       <div
         className="small muted"
@@ -413,6 +617,18 @@ function ChatConversationPane({ conversationId }: { conversationId: string }) {
         </>
       )}
     </section>
+    {showPanel && threadRootId && (
+      <ChatThreadPanel
+        key={threadRootId}
+        conversationId={conversationId}
+        rootId={threadRootId}
+        conversationTitle={displayTitle}
+        highlightMessageId={messageId}
+        isPhone={isPhoneWidth}
+        onClose={onCloseThread}
+      />
+    )}
+    </div>
   );
 }
 

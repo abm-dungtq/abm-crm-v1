@@ -1,5 +1,6 @@
 import { Outlet, createRootRoute, createRoute, createRouter, type ErrorComponentProps } from '@tanstack/react-router';
 import { ActorContext } from './actor-context';
+import { parseChatSearch, type ChatSearch } from './chat-links';
 import { ApiFailure, currentDemoUser, useApi, useAuthMode } from './api';
 import { RolePicker, Shell } from './components/layout';
 import { Alert, ErrorState, Loading, ToastProvider } from './components/ui';
@@ -165,7 +166,12 @@ const routes = [
   }),
   createRoute({ getParentRoute: () => rootRoute, path: '/tasks/$taskId', component: TaskDetailPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/chat', component: ChatPage }),
-  createRoute({ getParentRoute: () => rootRoute, path: '/chat/$conversationId', component: ChatPage }),
+  createRoute({
+    getParentRoute: () => rootRoute,
+    path: '/chat/$conversationId',
+    component: ChatPage,
+    validateSearch: (s: Record<string, unknown>): ChatSearch => parseChatSearch(s),
+  }),
   createRoute({ getParentRoute: () => rootRoute, path: '/settings/notifications', component: NotificationSettingsPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/settings/agents', component: AgentConnectPage }),
   createRoute({ getParentRoute: () => rootRoute, path: '/approvals', component: ApprovalsPage }),

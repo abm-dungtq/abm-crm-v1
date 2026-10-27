@@ -4,11 +4,15 @@ import { useQueryClient } from '@tanstack/react-query';
 export type ChatSocketEvent =
   | { type: 'message.created' | 'message.deleted'; conversationId: string; messageId: string }
   | { type: 'conversation.updated'; conversationId: string }
-  | { type: 'read'; conversationId: string }
-  | { type: 'agent.thinking'; conversationId: string; agentId: string }
+  | { type: 'thread.updated'; conversationId: string; rootId: string; messageId?: string }
+  | { type: 'read'; conversationId: string; rootId?: string }
+  | { type: 'agent.thinking'; conversationId: string; agentId: string; rootId?: string }
   | { type: 'notification' };
 
-/** Window event that `chat-thread.tsx` listens for to show "Trợ lý đang trả lời…" to every member, not only the sender. */
+/**
+ * Window event the chat views listen for to show "Trợ lý đang trả lời…" to every member, not only the sender.
+ * `detail.rootId` is set when the agent answers inside a thread, so only that thread panel shows it.
+ */
 export const AGENT_THINKING_EVENT = 'chat:agent-thinking';
 
 const BACKOFF_MS = [1000, 2000, 5000, 10000, 30000] as const;
@@ -111,8 +115,21 @@ export function useChatSocket(): { connected: boolean } {
         return;
       }
 
+      // The main list carries the thread cards, the thread query the panel, and the followed list the "Chuỗi" tab.
+      if (event.type === 'thread.updated' && typeof event.conversationId === 'string' && typeof event.rootId === 'string') {
+        void queryClient.invalidateQueries({ queryKey: ['chat', event.conversationId] });
+        void queryClient.invalidateQueries({ queryKey: ['chat', 'thread', event.rootId] });
+        void queryClient.invalidateQueries({ queryKey: ['chat', 'threads'] });
+        void queryClient.invalidateQueries({ queryKey: ['chat', 'conversations'] });
+        void queryClient.invalidateQueries({ queryKey: ['chat', 'unread'] });
+        return;
+      }
+
       // A read marker changes only unread counts; refetching the messages here would cost a request per read.
       if (event.type === 'read' && typeof event.conversationId === 'string') {
+        if (typeof event.rootId === 'string') {
+          void queryClient.invalidateQueries({ queryKey: ['chat', 'threads'] });
+        }
         void queryClient.invalidateQueries({ queryKey: ['chat', 'conversations'] });
         void queryClient.invalidateQueries({ queryKey: ['chat', 'unread'] });
         return;
@@ -120,7 +137,11 @@ export function useChatSocket(): { connected: boolean } {
 
       if (event.type === 'agent.thinking' && typeof event.conversationId === 'string') {
         window.dispatchEvent(new CustomEvent(AGENT_THINKING_EVENT, {
-          detail: { conversationId: event.conversationId, agentId: event.agentId },
+          detail: {
+            conversationId: event.conversationId,
+            agentId: event.agentId,
+            rootId: typeof event.rootId === 'string' ? event.rootId : null,
+          },
         }));
         return;
       }

@@ -116,7 +116,13 @@ export interface ChatMessage {
   authorUserId: string | null;
   authorAgentId: string | null;
   authorName: string | null;
-  parentMessageId: string | null;
+  /** The quoted message ("Trả lời"); `replyTo` is its preview, filled by read endpoints only. */
+  replyToMessageId: string | null;
+  replyTo: ChatQuotePreview | null;
+  /** Root of the thread this message replies in; null for a main-flow message. */
+  threadRootId: string | null;
+  /** A thread reply also shown in the main flow ("Cũng gửi vào nhóm"). */
+  alsoInMain: boolean;
   body: string;
   mentions: string[];
   meta: Record<string, unknown> | null;
@@ -124,7 +130,65 @@ export interface ChatMessage {
   deleted: boolean;
   duplicate?: boolean;
   attachments?: ChatAttachment[];
+  /** Set on a top-level message that has a thread. */
+  thread: ChatThreadSummary | null;
 }
+
+/** The quoted message shown above a quote reply. `snippet` is empty when the quoted message was recalled. */
+export interface ChatQuotePreview {
+  id: string;
+  authorName: string | null;
+  snippet: string;
+  deleted: boolean;
+  threadRootId: string | null;
+}
+
+/** The thread card under a root message, with the reader's follow state. */
+export interface ChatThreadSummary {
+  rootId: string;
+  conversationId: string;
+  replyCount: number;
+  lastReplyAt: string | null;
+  lastActivityAt: string;
+  isTopic: boolean;
+  closed: boolean;
+  closedAt: string | null;
+  /** Up to 3 people who replied, newest reply first. */
+  repliers: { userId: string; name: string }[];
+  /** Up to 3 latest replies, newest first. */
+  latest: { id: string; authorName: string | null; snippet: string; createdAt: string }[];
+  following: boolean;
+  muted: boolean;
+  /** Replies by others after the reader's thread read marker; 0 when the reader does not follow. */
+  unread: number;
+}
+
+export interface ChatThreadDetail {
+  root: ChatMessage;
+  thread: ChatThreadSummary | null;
+  /** Oldest first. */
+  replies: ChatMessage[];
+  hasMore: boolean;
+}
+
+/** One row of the "Chuỗi" tab. */
+export type ChatFollowedThread = ChatThreadSummary & {
+  conversationTitle: string;
+  conversationKind: 'group' | 'direct';
+  rootAuthorName: string | null;
+  rootSnippet: string;
+  rootDeleted: boolean;
+};
+
+/** The main-flow window around one message (newest first), used to jump to an older message. */
+export interface ChatMessageContext {
+  conversationId: string;
+  messageId: string;
+  threadRootId: string | null;
+  messages: ChatMessage[];
+}
+
+export type ChatThreadSubscriptionState = 'following' | 'muted' | 'none';
 
 export interface ChatConversationSummary {
   id: string;
@@ -135,6 +199,8 @@ export interface ChatConversationSummary {
   lastMessageAt: string | null;
   updatedAt: string;
   unread: number;
+  /** Unread thread-only replies in this conversation's followed, unmuted threads. */
+  threadUnread: number;
 }
 
 export interface ChatMember {
@@ -176,6 +242,8 @@ export interface ChatConversationDetail {
   /** A system group (the "Inbox" group): members follow the roster and cannot be edited by hand. */
   system: boolean;
   agentReadable: boolean;
+  /** "Chủ đề" mode turns every new message into a topic; absent means the normal chat mode. */
+  mode?: 'chat' | 'topic';
   createdByUserId: string | null;
   createdAt: string;
   updatedAt: string;
