@@ -5,6 +5,7 @@ import { formatThreadTime, replierInitials } from '../chat-links';
 import { useChatSocketConnected } from '../chat-socket';
 import type { ChatConversationDetail, ChatMessage } from '../types';
 import { ChatComposer, useAgentThinking, useDebouncedMarkRead } from './chat-composer';
+import { useTaskDraftRequest } from './chat-task-cards';
 import { formatMentionText } from './mention-input';
 import { Avatar, Empty, ErrorState, Loading } from './ui';
 
@@ -31,6 +32,8 @@ export function ChatTopicList({
   const conversationId = conversation.id;
   const topicsKey = ['chat', conversationId, 'topics'] as const;
   const [optimistic, setOptimistic] = useState<ChatMessage[]>([]);
+  const taskDraftRequest = useTaskDraftRequest();
+  const canMakeTask = conversation.kind === 'group' || conversation.kind === 'direct';
 
   const topicsQuery = useInfiniteQuery({
     queryKey: topicsKey,
@@ -131,10 +134,17 @@ export function ChatTopicList({
                 message={m}
                 pending={optimistic.some((o) => o.id === m.id) && !stored.some((s) => s.id === m.id)}
                 onOpen={() => onOpenThread(m.id)}
+                onMakeTask={
+                  canMakeTask && !m.deleted
+                    ? () => taskDraftRequest.requestTaskDraft({ conversationId, messageId: m.id, scope: 'thread' })
+                    : undefined
+                }
+                makeTaskPending={taskDraftRequest.pending}
               />
             ))}
           </ol>
         )}
+        {taskDraftRequest.dialog}
         {topicsQuery.hasNextPage && (
           <div style={{ padding: 10, textAlign: 'center' }}>
             <button
@@ -152,7 +162,20 @@ export function ChatTopicList({
   );
 }
 
-function ChatTopicCard({ message: m, pending, onOpen }: { message: ChatMessage; pending: boolean; onOpen: () => void }) {
+function ChatTopicCard({
+  message: m,
+  pending,
+  onOpen,
+  onMakeTask,
+  makeTaskPending,
+}: {
+  message: ChatMessage;
+  pending: boolean;
+  onOpen: () => void;
+  /** "Tạo việc từ chuỗi" for the whole topic; absent when the topic cannot be a task source. */
+  onMakeTask?: () => void;
+  makeTaskPending: boolean;
+}) {
   const author = m.authorName ?? (m.authorKind === 'agent' ? 'Trợ lý' : 'Nhân viên');
   const thread = m.thread;
   const replyCount = thread?.replyCount ?? 0;
@@ -205,6 +228,11 @@ function ChatTopicCard({ message: m, pending, onOpen }: { message: ChatMessage; 
         <span className="small muted" style={{ flex: 1 }}>
           {replyCount} trả lời
         </span>
+        {onMakeTask && (
+          <button type="button" className="btn btn-sm btn-ghost" disabled={pending || makeTaskPending} onClick={onMakeTask}>
+            Tạo việc từ chuỗi
+          </button>
+        )}
         <button type="button" className="btn btn-sm" disabled={pending} onClick={onOpen}>
           Xem chủ đề
         </button>

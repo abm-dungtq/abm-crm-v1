@@ -6,6 +6,15 @@ import { ApiFailure, api } from '../api';
 import { formatThreadTime, replierInitials } from '../chat-links';
 import { fmtDateTime } from '../format';
 import type { ChatMessage, ChatQuotePreview, ChatTaskSuggestion } from '../types';
+import {
+  DraftCard,
+  FailedDraft,
+  TaskCard,
+  readFailedDraftSource,
+  readTaskCard,
+  readTaskDrafts,
+  useTaskDraftRequest,
+} from './chat-task-cards';
 import { Icon } from './icons';
 import { formatMentionText, renderMessageBody } from './mention-input';
 import { TaskFormDialog } from './task-form-dialog';
@@ -71,6 +80,7 @@ export function ChatMessageItem({
   const [suggestionToCreate, setSuggestionToCreate] = useState<ChatTaskSuggestion | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const pressRef = useRef<{ timer: ReturnType<typeof setTimeout>; x: number; y: number } | null>(null);
+  const taskDraftRequest = useTaskDraftRequest();
 
   const recallMutation = useMutation<{ id: string; conversationId: string; deleted: boolean }, ApiFailure, string>({
     mutationFn: (messageId) => api.delete(`/chat/messages/${encodeURIComponent(messageId)}`),
@@ -92,9 +102,30 @@ export function ChatMessageItem({
   const isMine = m.authorKind === 'user' && m.authorUserId === actor.id;
   const sender =
     m.authorName ?? (m.authorKind === 'agent' ? 'Trợ lý' : m.authorKind === 'system' ? 'Hệ thống' : 'Nhân viên');
+  const requestedByUserId =
+    !m.deleted && typeof m.meta?.requestedByUserId === 'string' ? m.meta.requestedByUserId : null;
+  // "Tự tạo việc" after Trợ lý could not draft: only for the person who asked.
+  const failedDraftSource =
+    !m.deleted && requestedByUserId === actor.id && m.authorKind !== 'user' ? readFailedDraftSource(m.meta) : null;
 
   if (m.authorKind === 'system') {
     const metaLink = !m.deleted && typeof m.meta?.link === 'string' ? m.meta.link : null;
+    const taskCard = m.deleted ? null : readTaskCard(m.meta);
+    if (taskCard) {
+      return (
+        <li
+          className="chat-task-card-row"
+          role="note"
+          data-message-id={m.id}
+          data-highlight={highlighted ? 'true' : undefined}
+        >
+          <TaskCard card={taskCard} />
+          <time className="small muted" dateTime={m.createdAt}>
+            {fmtDateTime(m.createdAt)}
+          </time>
+        </li>
+      );
+    }
     return (
       <li
         className="msg-system muted small"
@@ -112,6 +143,7 @@ export function ChatMessageItem({
         )}
         {' · '}
         <time dateTime={m.createdAt}>{fmtDateTime(m.createdAt)}</time>
+        {failedDraftSource && <FailedDraft source={failedDraftSource} />}
       </li>
     );
   }
@@ -119,12 +151,13 @@ export function ChatMessageItem({
   const msgAttachments = m.deleted ? [] : (m.attachments ?? []);
   const imageAtts = msgAttachments.filter((a) => isInlineImage(a.contentType));
   const fileAtts = msgAttachments.filter((a) => !isInlineImage(a.contentType));
+  // Older agent answers still carry `taskSuggestions`; newer ones carry `taskDrafts`. Only agent messages get drafts.
   const taskSuggestions =
     !m.deleted && Array.isArray(m.meta?.taskSuggestions) ? (m.meta.taskSuggestions as ChatTaskSuggestion[]) : [];
-  const requestedByUserId =
-    !m.deleted && typeof m.meta?.requestedByUserId === 'string' ? m.meta.requestedByUserId : null;
+  const taskDrafts = !m.deleted && m.authorKind === 'agent' ? readTaskDrafts(m.meta) : [];
 
   const canQuote = !m.deleted && !pending;
+  const canMakeTask = canQuote && (conversationKind === 'group' || conversationKind === 'direct');
   const canThreadReply =
     canQuote &&
     context === 'main' &&
@@ -254,6 +287,22 @@ export function ChatMessageItem({
             </div>
           )}
 
+          {taskDrafts.length > 0 && (
+            <div className="stack-sm" style={{ marginTop: 4 }}>
+              {taskDrafts.map(({ draft, index }) => (
+                <DraftCard
+                  key={`${m.id}-draft-${index}`}
+                  draft={draft}
+                  messageId={m.id}
+                  index={index}
+                  requestedByUserId={requestedByUserId}
+                />
+              ))}
+            </div>
+          )}
+
+          {failedDraftSource && <FailedDraft source={failedDraftSource} />}
+
           {context === 'main' && m.threadRootId && onOpenThread && (
             <button type="button" className="chat-link-btn small" onClick={() => onOpenThread(m.threadRootId!)}>
               Đã trả lời trong chuỗi · Xem chuỗi
@@ -278,6 +327,20 @@ export function ChatMessageItem({
                 items={[
                   ...(canQuote ? [{ label: 'Trả lời', onSelect: () => onQuote(m) }] : []),
                   ...(canThreadReply ? [{ label: 'Trả lời theo chuỗi', onSelect: () => onOpenThread?.(m.id) }] : []),
+                  ...(canMakeTask
+                    ? [
+                        {
+                          label: 'Tạo việc từ tin này',
+                          disabled: taskDraftRequest.pending,
+                          onSelect: () =>
+                            taskDraftRequest.requestTaskDraft({
+                              conversationId: m.conversationId,
+                              messageId: m.id,
+                              scope: 'message',
+                            }),
+                        },
+                      ]
+                    : []),
                   ...(showRecall
                     ? [{ label: 'Thu hồi', disabled: recallMutation.isPending, onSelect: () => recallMutation.mutate(m.id) }]
                     : []),
@@ -312,6 +375,8 @@ export function ChatMessageItem({
       {lightboxImage && (
         <ImageLightbox src={lightboxImage.src} alt={lightboxImage.alt} onClose={() => setLightboxImage(null)} />
       )}
+
+      {taskDraftRequest.dialog}
 
       {suggestionToCreate && (
         <TaskFormDialog

@@ -2,6 +2,7 @@ import { useEffect, useId, useState } from 'react';
 import type { CreateTaskInput } from '@abm/contracts';
 import { useActor } from '../actor-context';
 import { useApi, useCommand } from '../api';
+import { unresolvedNamesHint, type TaskFormInitialValues } from '../chat-task-draft';
 import { fromLocalInput, toLocalInput } from '../format';
 import type { DirectoryUser, LeadItem, TaskPriority } from '../types';
 import { roleLabel } from './layout';
@@ -50,12 +51,7 @@ const QUICK_DUE = [
 
 const CRM_ROLES = ['sale', 'leader', 'head', 'director', 'admin'];
 
-/** Values an internal task starts with when the dialog opens; `due` is a `datetime-local` value in Vietnam time. */
-export interface TaskFormInitialValues {
-  title?: string;
-  assigneeUserId?: string | null;
-  due?: string | null;
-}
+export type { TaskFormInitialValues };
 
 export function TaskFormDialog({
   open,
@@ -71,7 +67,10 @@ export function TaskFormDialog({
   initialValues?: TaskFormInitialValues;
 }) {
   const actor = useActor();
-  const canCreateCrm = !parentTask && CRM_ROLES.includes(actor.role);
+  const source = parentTask ? undefined : initialValues?.source;
+  const draftRef = source ? initialValues?.draft : undefined;
+  const unresolvedHint = unresolvedNamesHint(initialValues?.unresolvedNames);
+  const canCreateCrm = !parentTask && !source && CRM_ROLES.includes(actor.role);
   const [kind, setKind] = useState<'internal' | 'crm'>('internal');
   const [leadQuery, setLeadQuery] = useState('');
   const debouncedLeadQ = useDebounced(leadQuery.trim(), 200);
@@ -101,14 +100,21 @@ export function TaskFormDialog({
       setLeadQuery('');
       setLeadId('');
       setTitle(initialValues?.title ?? '');
-      setDescription('');
+      setDescription(initialValues?.description ?? '');
       setPriority('normal');
       setDue(initialValues?.due ?? '');
       setAssigneeUserId(initialValues?.assigneeUserId || actor.id);
-      setMemberUserIds([]);
+      setMemberUserIds((initialValues?.memberUserIds ?? []).slice(0, 20));
       mutation.reset();
     }
   }, [open, actor.id]);
+
+  // Prefilled members are kept only when they are active directory users; the list loads after the dialog opens.
+  useEffect(() => {
+    if (!open || !directory.data) return;
+    const active = new Set(directory.data.map((u) => u.id));
+    setMemberUserIds((prev) => (prev.every((id) => active.has(id)) ? prev : prev.filter((id) => active.has(id))));
+  }, [open, directory.data]);
 
   const handleKindChange = (nextKind: 'internal' | 'crm') => {
     setKind(nextKind);
@@ -166,12 +172,21 @@ export function TaskFormDialog({
         memberUserIds: !parentTask && kind === 'internal'
           ? memberUserIds.filter((uid) => uid !== assigneeUserId)
           : [],
+        source,
+        draft: draftRef,
       },
       {
         onSuccess: (res) => {
           toast(parentTask ? 'Đã thêm việc con' : 'Đã tạo công việc');
           onCreated?.(res.taskId);
           onClose();
+        },
+        onError: (err) => {
+          // Someone (or another tab) already made this draft into a task.
+          if (draftRef && (err.code === 'STALE_VERSION' || err.status === 409)) {
+            toast('Việc nháp này đã được tạo');
+            onClose();
+          }
         },
       },
     );
@@ -210,6 +225,17 @@ export function TaskFormDialog({
           </div>
         </Field>
       ) : null}
+
+      {source && (
+        <div className="small text-2">
+          Tạo từ chat · việc sẽ được gửi lại vào {source.scope === 'thread' ? 'chuỗi' : 'tin gốc'}
+        </div>
+      )}
+      {unresolvedHint && (
+        <div className="chat-task-hint small" role="note">
+          {unresolvedHint}
+        </div>
+      )}
 
       {!parentTask && kind === 'crm' && (
         <div className="stack-sm">

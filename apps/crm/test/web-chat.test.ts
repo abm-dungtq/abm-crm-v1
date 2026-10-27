@@ -8,7 +8,13 @@ import {
   canSwitchMode,
   type ChatTreeActor,
 } from '../src/web/chat-tree';
-import type { ChatConversationDetail, ChatConversationSummary } from '../src/web/types';
+import { draftToInitialValues, taskSourceLink, unresolvedNamesHint } from '../src/web/chat-task-draft';
+import type {
+  ChatConversationDetail,
+  ChatConversationSummary,
+  ChatManualTaskDraft,
+  ChatTaskDraft,
+} from '../src/web/types';
 
 describe('chatLink', () => {
   test('encodes the conversation id and adds no query without a target', () => {
@@ -191,5 +197,77 @@ describe('group permissions', () => {
     expect(canCloseTopic(topic, null, conv, admin)).toBe(true);
     expect(canCloseTopic({ isTopic: false }, 'u-member', conv, member)).toBe(false);
     expect(canCloseTopic(null, 'u-member', conv, owner)).toBe(false);
+  });
+});
+
+describe('task from chat', () => {
+  const source = { conversationId: 'g-1', messageId: 'm-root', scope: 'thread' as const };
+  const agentDraft = (over: Partial<ChatTaskDraft> = {}): ChatTaskDraft => ({
+    title: 'Gửi báo giá',
+    description: 'Gửi bản PDF',
+    assigneeName: 'Lan',
+    assigneeUserId: 'u-lan',
+    memberNames: ['Minh', 'Ai đó'],
+    memberUserIds: ['u-minh'],
+    unresolvedNames: ['Ai đó'],
+    dueDate: '2026-11-03',
+    source,
+    createdTaskId: null,
+    ...over,
+  });
+
+  test('draftToInitialValues: an agent draft keeps its fields, gets 09:00 on the due day, and carries source and draft', () => {
+    expect(draftToInitialValues(agentDraft(), 'agent:c-1', 0)).toEqual({
+      title: 'Gửi báo giá',
+      description: 'Gửi bản PDF',
+      assigneeUserId: 'u-lan',
+      due: '2026-11-03T09:00',
+      memberUserIds: ['u-minh'],
+      unresolvedNames: ['Ai đó'],
+      source,
+      draft: { messageId: 'agent:c-1', index: 0 },
+    });
+  });
+
+  test('draftToInitialValues: no due date stays null and a null description becomes empty', () => {
+    const values = draftToInitialValues(agentDraft({ dueDate: null, description: null }), 'agent:c-1', 2);
+    expect(values.due).toBeNull();
+    expect(values.description).toBe('');
+    expect(values.draft).toEqual({ messageId: 'agent:c-1', index: 2 });
+  });
+
+  test('draftToInitialValues: a manual draft has a source but no draft reference', () => {
+    const manual: ChatManualTaskDraft = {
+      title: 'Việc từ chat',
+      description: '09:00 01/11 Lan: nội dung',
+      assigneeUserId: null,
+      memberUserIds: ['u-minh'],
+      dueDate: null,
+      source: { conversationId: 'dm:a:b', messageId: 'm-1', scope: 'message' },
+    };
+    const values = draftToInitialValues(manual);
+    expect(values.source).toEqual(manual.source);
+    expect(values.draft).toBeUndefined();
+    expect(values.assigneeUserId).toBeNull();
+    expect(values.memberUserIds).toEqual(['u-minh']);
+    expect(values.unresolvedNames).toEqual([]);
+    expect(values.due).toBeNull();
+  });
+
+  test('draftToInitialValues: a draft without a source never sends a draft reference', () => {
+    const values = draftToInitialValues(agentDraft({ source: null }), 'agent:c-1', 0);
+    expect(values.source).toBeUndefined();
+    expect(values.draft).toBeUndefined();
+  });
+
+  test('taskSourceLink: a thread opens the thread panel, a message jumps to the message', () => {
+    expect(taskSourceLink({ conversationId: 'g-1', messageId: 'm-root', scope: 'thread' })).toBe('/chat/g-1?thread=m-root');
+    expect(taskSourceLink({ conversationId: 'g-1', messageId: 'm-7', scope: 'message' })).toBe('/chat/g-1?message=m-7');
+  });
+
+  test('unresolvedNamesHint lists the names with @, or nothing when all matched', () => {
+    expect(unresolvedNamesHint(['A', 'B'])).toBe('Chưa khớp tên: @A, @B. Chọn lại người trong danh sách.');
+    expect(unresolvedNamesHint([])).toBeNull();
+    expect(unresolvedNamesHint(undefined)).toBeNull();
   });
 });

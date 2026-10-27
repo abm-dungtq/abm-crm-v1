@@ -956,3 +956,35 @@ a.kpi-card:hover { border-color: var(--border-strong); text-decoration: none; }
   flex: none; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600;
   background: var(--surface-3); color: var(--muted);
 }
+
+/* ---------- chat: task drafts, task cards ---------- */
+.chat-task-card {
+  display: flex; flex-direction: column; gap: 6px; padding: 8px 12px; max-width: 380px; min-width: 0;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.chat-task-card[data-state='created'] { border-color: var(--accent); }
+.chat-task-card-head { display: flex; align-items: center; gap: 6px; }
+.chat-task-card-title { font-weight: 600; overflow-wrap: anywhere; }
+.chat-task-desc {
+  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.chat-task-desc[data-expanded='true'] { display: block; -webkit-line-clamp: unset; }
+.chat-task-fields { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 0; }
+.chat-task-fields dt { color: var(--muted); }
+.chat-task-fields dd { margin: 0; min-width: 0; }
+.chat-task-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.chat-task-chip {
+  display: inline-block; padding: 0 8px; border-radius: 999px; font-size: 12px;
+  background: var(--surface); border: 1px solid var(--border);
+}
+.chat-task-chip[data-unresolved='true'] { background: var(--warn-weak); border-color: var(--warn); color: var(--warn); }
+.chat-task-card-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.chat-task-card-row {
+  list-style: none; display: flex; flex-direction: column; align-items: center; gap: 2px; width: 100%; padding: 4px 12px;
+}
+.chat-task-card-row .chat-task-card { width: 100%; }
+.chat-task-failed { display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+.chat-task-hint {
+  padding: 6px 10px; border-radius: var(--radius-sm); background: var(--warn-weak); color: var(--warn);
+}

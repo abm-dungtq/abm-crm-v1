@@ -1,5 +1,5 @@
 import { useEffect, useId, useState } from 'react';
-import { Link, useParams } from '@tanstack/react-router';
+import { Link, useNavigate, useParams } from '@tanstack/react-router';
 import type { CancelTaskInput, CreateTaskInput, UpdateTaskInput } from '@abm/contracts';
 import { useActor } from '../actor-context';
 import { useApi, useCommand } from '../api';
@@ -27,7 +27,28 @@ import {
   useToast,
 } from '../components/ui';
 import { fmtDateTime, fmtDue, fromLocalInput, toLocalInput } from '../format';
-import type { DirectoryUser, TaskDetail, TaskPriority } from '../types';
+import { taskSourceLink } from '../chat-task-draft';
+import type { DirectoryUser, TaskDetail, TaskPriority, TaskSourceDetail } from '../types';
+
+/** "Tạo từ chat": opens the source thread or message for members of that chat; plain text for everyone else. */
+function TaskSourceLink({ source }: { source: TaskSourceDetail }) {
+  const navigate = useNavigate();
+  if (!source.canOpen) return <span className="muted">Tạo từ chat (bạn không ở trong hội thoại này)</span>;
+  const href = taskSourceLink(source);
+  return (
+    <a
+      href={href}
+      onClick={(e) => {
+        if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        e.preventDefault();
+        // `href` keeps `?thread=` / `?message=` as the search, which `to` would read as part of the path.
+        void navigate({ href });
+      }}
+    >
+      {source.conversationTitle ?? 'Mở hội thoại'}
+    </a>
+  );
+}
 
 export function TaskDetailPage() {
   const { taskId } = useParams({ from: '/tasks/$taskId' });
@@ -533,6 +554,14 @@ function TaskDetailView({ task }: { task: TaskDetail }) {
                 </dd>
                 <dt>Người tạo</dt>
                 <dd>{task.createdBy?.name ?? '—'}</dd>
+                {task.source && (
+                  <>
+                    <dt>Tạo từ chat</dt>
+                    <dd>
+                      <TaskSourceLink source={task.source} />
+                    </dd>
+                  </>
+                )}
                 <dt>Hạn</dt>
                 <dd>{task.dueAt ? fmtDue(task.dueAt) : <span className="muted">Chưa đặt hạn</span>}</dd>
                 {task.completedAt && (

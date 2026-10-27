@@ -93,6 +93,14 @@ export interface TaskDetail extends TaskItem {
   members: { id: string; name: string }[];
   subtasks: { id: string; title: string; status: string }[];
   parent: { id: string; title: string } | null;
+  /** Set on a task made from chat ("Tạo từ chat"). */
+  source: TaskSourceDetail | null;
+}
+
+/** Where a task made from chat came from; the title is null and `canOpen` false when the reader is not in that chat. */
+export interface TaskSourceDetail extends ChatTaskSource {
+  conversationTitle: string | null;
+  canOpen: boolean;
 }
 
 export interface DirectoryUser {
@@ -243,6 +251,51 @@ export interface ChatTaskSuggestion {
   assigneeName: string;
   assigneeUserId: string | null;
   dueDate: string | null;
+}
+
+/** One message (`scope 'message'`) or a whole thread (`scope 'thread'`, `messageId` is then the root). */
+export interface ChatTaskSource {
+  conversationId: string;
+  messageId: string;
+  scope: 'message' | 'thread';
+}
+
+/** A task Trợ lý proposed, stored in `meta.taskDrafts` of its message until the requester creates it. */
+export interface ChatTaskDraft {
+  title: string;
+  description: string | null;
+  assigneeName: string | null;
+  assigneeUserId: string | null;
+  memberNames: string[];
+  memberUserIds: string[];
+  /** Names that matched no conversation member, or more than one. */
+  unresolvedNames: string[];
+  /** `YYYY-MM-DD`. */
+  dueDate: string | null;
+  source: ChatTaskSource | null;
+  createdTaskId: string | null;
+}
+
+/** The draft the server builds without Trợ lý. */
+export interface ChatManualTaskDraft {
+  title: string;
+  description: string;
+  assigneeUserId: null;
+  memberUserIds: string[];
+  dueDate: null;
+  source: ChatTaskSource;
+}
+
+/** `POST /chat/conversations/:id/task-drafts`: Trợ lý is drafting (the card arrives by socket), or the manual draft. */
+export type ChatTaskDraftResponse = { mode: 'agent' } | { mode: 'manual'; draft: ChatManualTaskDraft };
+
+/** `meta.taskCard` of the system message posted where a task made from chat came from. */
+export interface ChatTaskCard {
+  taskId: string;
+  title: string;
+  assigneeName: string | null;
+  dueAt: string | null;
+  createdByName: string | null;
 }
 
 export interface ChatConversationDetail {

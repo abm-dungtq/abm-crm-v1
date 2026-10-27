@@ -13,6 +13,7 @@ import type {
 } from '../types';
 import { ChatComposer, useAgentThinking, useDebouncedMarkRead } from './chat-composer';
 import { ChatMessageItem, scrollToMessage } from './chat-message-item';
+import { useTaskDraftRequest } from './chat-task-cards';
 import { Icon } from './icons';
 import { ErrorState, FormError, Loading } from './ui';
 
@@ -181,6 +182,8 @@ export function ChatThreadPanel({
   const showAlsoSend = conversationMode === 'chat' && !(thread?.isTopic ?? false);
   const rootAuthorUserId = data?.root.authorKind === 'user' ? data.root.authorUserId : null;
   const showCloseTopic = conv ? canCloseTopic(thread, rootAuthorUserId, conv, actor) : false;
+  const taskDraftRequest = useTaskDraftRequest();
+  const canMakeTask = Boolean(data && !data.root.deleted && (conv?.kind === 'group' || conv?.kind === 'direct'));
   const toggleTopicClosed = () => {
     const nextClosed = !closed;
     const question = nextClosed
@@ -253,8 +256,19 @@ export function ChatThreadPanel({
                 {closed ? 'Mở lại' : 'Đóng chủ đề'}
               </button>
             )}
+            {canMakeTask && (
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={taskDraftRequest.pending}
+                onClick={() => taskDraftRequest.requestTaskDraft({ conversationId, messageId: rootId, scope: 'thread' })}
+              >
+                Tạo việc từ chuỗi
+              </button>
+            )}
           </>
         )}
+        {taskDraftRequest.dialog}
         {!isPhone && (
           <button
             type="button"
