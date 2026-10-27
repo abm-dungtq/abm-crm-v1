@@ -108,7 +108,7 @@ chatRoutes.get('/socket', async (c) => {
 
 chatRoutes.get('/conversations', async (c) => {
   const actor = c.get('actor');
-  // Re-checks the department groups against the org chart; a no-op batch when nothing changed.
+  // Re-checks the department groups against the org chart with one read; syncs only on drift and never fails the list.
   await ensureDepartmentGroups(c.env.DB, actor.organizationId);
   return c.json(ok(await listConversations(c.env.DB, actor)));
 });
@@ -809,12 +809,16 @@ chatRoutes.delete('/messages/:id', async (c) => {
     .bind(now, msg.id);
   if (msg.thread_root_id !== null && msg.deleted_at === null) {
     // The counter drops only when this batch is the one that recalls the reply, so a repeated delete cannot
-    // count it twice.
+    // count it twice. The last reply time then follows the remaining replies; the activity time stays.
     await db.batch([
       db.prepare(`UPDATE chat_thread SET reply_count = MAX(reply_count - 1, 0)
         WHERE root_message_id = ? AND EXISTS (SELECT 1 FROM chat_message WHERE id = ? AND deleted_at IS NULL)`)
         .bind(msg.thread_root_id, msg.id),
       recallStatement,
+      db.prepare(`UPDATE chat_thread SET last_reply_at = (
+          SELECT MAX(r.created_at) FROM chat_message r WHERE r.thread_root_id = ?1 AND r.deleted_at IS NULL)
+        WHERE root_message_id = ?1`)
+        .bind(msg.thread_root_id),
     ]);
   } else {
     await recallStatement.run();
@@ -911,7 +915,7 @@ chatRoutes.put('/threads/:rootId/subscription', async (c) => {
   // Threads exist only in groups and direct chats; task comments have none to follow.
   if (!resolved || resolved.conversation.kind === 'task') return c.json(notFound, 404);
 
-  const result = await setThreadSubscription(db, actor, resolved.root, resolved.conversation, state);
+  const result = await setThreadSubscription(db, actor, resolved.root, resolved.conversation, state, { explicit: true });
   publish(sinkFrom(c), actor.organizationId, [actor.id], {
     type: 'thread.updated',
     conversationId: resolved.conversation.id,
@@ -934,7 +938,7 @@ chatRoutes.post('/threads/:rootId/close', async (c) => {
   const mayClose = isRootAuthor || conversation.member_role === 'owner' || actor.role === 'director' || actor.role === 'admin';
   if (!mayClose) return c.json(forbidden, 403);
 
-  const result = await setThreadClosed(db, actor.id, root.id, body.closed);
+  const result = await setThreadClosed(db, actor.id, root, conversation, body.closed);
   if (!result.ok) return c.json(fail('VALIDATION_FAILED', result.message), 422);
 
   const recipients = await memberIds(db, conversation.id);

@@ -71,20 +71,23 @@ interface AfterThreadMessageInput {
 
 /**
  * Records a stored thread reply in ONE `db.batch`: creates the thread row if needed, bumps the counters, adds the
- * automatic followers (root author still in the conversation, the replier, mentioned people), marks the thread read
+ * automatic followers (root author still in the conversation, the replier, mentioned people, and in a direct chat
+ * every member on the first reply), marks the thread read
  * for the replier and reads the unmuted followers who are still members. Then tells the members' open tabs.
  * Returns the unmuted follower ids (the author included); the caller decides who is notified.
  */
 export async function afterThreadMessage(sink: Sink, db: D1Database, input: AfterThreadMessageInput): Promise<string[]> {
   const now = new Date().toISOString();
   const at = input.message.createdAt;
+  // A mentioned newcomer has read everything before the mentioning reply, so that reply and later ones are unread.
+  const justBefore = new Date(Date.parse(at) - 1).toISOString();
   const memberSet = new Set(input.memberIds);
-  const followers: { u: string; v: 'author' | 'reply' | 'mention' }[] = [];
+  const followers: { u: string; v: 'author' | 'reply' | 'mention'; r: string | null }[] = [];
   const seen = new Set<string>();
   const addFollower = (userId: string | null, via: 'author' | 'reply' | 'mention') => {
     if (!userId || seen.has(userId)) return;
     seen.add(userId);
-    followers.push({ u: userId, v: via });
+    followers.push({ u: userId, v: via, r: via === 'mention' ? justBefore : null });
   };
   if (input.rootAuthorUserId && memberSet.has(input.rootAuthorUserId)) addFollower(input.rootAuthorUserId, 'author');
   addFollower(input.authorUserId, 'reply');
@@ -100,10 +103,21 @@ export async function afterThreadMessage(sink: Sink, db: D1Database, input: Afte
   if (followers.length > 0) {
     statements.push(
       db.prepare(`INSERT OR IGNORE INTO chat_thread_follower (root_message_id, user_id, via, muted, last_read_at, followed_at)
-        SELECT ?1, json_extract(value, '$.u'), json_extract(value, '$.v'), 0, NULL, ?2 FROM json_each(?3)`)
+        SELECT ?1, json_extract(value, '$.u'), json_extract(value, '$.v'), 0, json_extract(value, '$.r'), ?2 FROM json_each(?3)`)
         .bind(input.rootId, now, JSON.stringify(followers)),
     );
   }
+  // In a direct chat both people follow from the first reply on, so a thread-only reply always reaches the other one.
+  // Only on the first reply ever, so someone who unfollowed later is not added back.
+  statements.push(
+    db.prepare(`INSERT OR IGNORE INTO chat_thread_follower (root_message_id, user_id, via, muted, last_read_at, followed_at)
+      SELECT ?1, cm.user_id, CASE WHEN cm.user_id IS ?2 THEN 'reply' ELSE 'author' END, 0, NULL, ?3
+      FROM chat_member cm
+      JOIN chat_conversation c ON c.id = cm.conversation_id AND c.kind = 'direct'
+      WHERE cm.conversation_id = ?4
+        AND NOT EXISTS (SELECT 1 FROM chat_message r WHERE r.thread_root_id = ?1 AND r.id <> ?5)`)
+      .bind(input.rootId, input.authorUserId, now, input.conversationId, input.message.id),
+  );
   if (input.authorUserId) {
     statements.push(
       db.prepare(`UPDATE chat_thread_follower SET last_read_at = MAX(COALESCE(last_read_at, ''), ?)
@@ -183,22 +197,33 @@ export async function listTopics(
 }
 
 /**
- * Closes or reopens a thread. Only a topic can be closed; reopening is always allowed. Returns the summary for the
- * actor (null when the root has no thread row), or a Vietnamese error message.
+ * Closes or reopens a thread. Only a topic can be closed: a thread marked as a topic, or any thread root of a
+ * conversation now in topic mode (messages from before the switch included; a root without replies gets its thread
+ * row here). Reopening is always allowed. Returns the summary for the actor (null when the root has no thread row), or
+ * a Vietnamese error message.
  */
 export async function setThreadClosed(
   db: D1Database,
   actorId: string,
-  rootId: string,
+  root: { id: string; conversation_id: string },
+  conversation: Pick<ChatConversationRow, 'mode'>,
   closed: boolean,
 ): Promise<{ ok: true; thread: ThreadSummary | null } | { ok: false; message: string }> {
   const now = new Date().toISOString();
+  const rootId = root.id;
   if (closed) {
-    const res = await db.prepare(`UPDATE chat_thread SET closed_at = COALESCE(closed_at, ?), closed_by_user_id = COALESCE(closed_by_user_id, ?)
-      WHERE root_message_id = ? AND is_topic = 1`)
-      .bind(now, actorId, rootId)
-      .run();
-    if ((res.meta?.changes ?? 0) === 0) return { ok: false, message: 'Chỉ đóng được chủ đề' };
+    const closeStatement = db.prepare(`UPDATE chat_thread SET closed_at = COALESCE(closed_at, ?1), closed_by_user_id = COALESCE(closed_by_user_id, ?2)
+      WHERE root_message_id = ?3 AND (is_topic = 1 OR ?4 = 1)`)
+      .bind(now, actorId, rootId, conversation.mode === 'topic' ? 1 : 0);
+    const results = conversation.mode === 'topic'
+      ? await db.batch([
+        db.prepare(`INSERT OR IGNORE INTO chat_thread (root_message_id, conversation_id, is_topic, reply_count, last_activity_at, created_at)
+          VALUES (?, ?, 1, 0, ?, ?)`)
+          .bind(rootId, root.conversation_id, now, now),
+        closeStatement,
+      ])
+      : [await closeStatement.run()];
+    if ((results[results.length - 1]?.meta?.changes ?? 0) === 0) return { ok: false, message: 'Chỉ đóng được chủ đề' };
   } else {
     await db.prepare('UPDATE chat_thread SET closed_at = NULL, closed_by_user_id = NULL WHERE root_message_id = ?')
       .bind(rootId)
@@ -420,6 +445,8 @@ export async function markThreadRead(db: D1Database, rootId: string, userId: str
 /**
  * Follows, mutes or unfollows a thread in one batch. Following a root without replies creates its thread row. A new
  * follower starts with the replies so far read.
+ * Only the person's own choice (`explicit: true`, the subscription route) changes the mute of an existing follower;
+ * an automatic follow (asking the agent for a draft) adds the row when missing and leaves a muted thread muted.
  * The caller has checked that `root` is a top-level message of a group or direct chat the actor belongs to.
  */
 export async function setThreadSubscription(
@@ -428,6 +455,7 @@ export async function setThreadSubscription(
   root: { id: string; conversation_id: string },
   conversation: Pick<ChatConversationRow, 'mode'>,
   state: ThreadSubscriptionState,
+  opts: { explicit?: boolean } = {},
 ): Promise<{ rootId: string; following: boolean; muted: boolean }> {
   if (state === 'none') {
     await db.prepare('DELETE FROM chat_thread_follower WHERE root_message_id = ? AND user_id = ?')
@@ -436,7 +464,7 @@ export async function setThreadSubscription(
   }
   const now = new Date().toISOString();
   const muted = state === 'muted' ? 1 : 0;
-  await db.batch([
+  const statements = [
     db.prepare(`INSERT OR IGNORE INTO chat_thread (root_message_id, conversation_id, is_topic, reply_count, last_activity_at, created_at)
       VALUES (?, ?, ?, 0, ?, ?)`)
       .bind(root.id, root.conversation_id, conversation.mode === 'topic' ? 1 : 0, now, now),
@@ -444,8 +472,14 @@ export async function setThreadSubscription(
     db.prepare(`INSERT OR IGNORE INTO chat_thread_follower (root_message_id, user_id, via, muted, last_read_at, followed_at)
       VALUES (?, ?, 'manual', ?, ?, ?)`)
       .bind(root.id, actor.id, muted, now, now),
-    db.prepare('UPDATE chat_thread_follower SET muted = ? WHERE root_message_id = ? AND user_id = ?')
-      .bind(muted, root.id, actor.id),
-  ]);
-  return { rootId: root.id, following: true, muted: muted === 1 };
+  ];
+  if (opts.explicit) {
+    statements.push(db.prepare('UPDATE chat_thread_follower SET muted = ? WHERE root_message_id = ? AND user_id = ?')
+      .bind(muted, root.id, actor.id));
+  }
+  statements.push(db.prepare('SELECT muted FROM chat_thread_follower WHERE root_message_id = ? AND user_id = ?')
+    .bind(root.id, actor.id));
+  const results = await db.batch(statements);
+  const row = (results[results.length - 1]?.results?.[0] ?? null) as { muted: number } | null;
+  return { rootId: root.id, following: true, muted: (row?.muted ?? muted) === 1 };
 }

@@ -33,9 +33,41 @@ export function departmentGroupSyncStatements(db: D1Database, organizationId: st
   ];
 }
 
-/** Runs the department group sync as one `db.batch`. Statements that find nothing to change write nothing. */
+/**
+ * One read that is true when the sync above would change anything: a department without its group, a group title
+ * that no longer matches, a member who left, was disabled or holds the wrong role, or an active user missing from
+ * their department's group. Keep it in step with `departmentGroupSyncStatements`.
+ */
+export function departmentGroupDriftStatement(db: D1Database, organizationId: string): D1PreparedStatement {
+  return db.prepare(`SELECT
+      EXISTS (SELECT 1 FROM department d WHERE d.organization_id = ?1
+        AND NOT EXISTS (SELECT 1 FROM chat_conversation c WHERE c.id = 'dept:' || d.id))
+      OR EXISTS (SELECT 1 FROM chat_conversation c WHERE c.organization_id = ?1 AND c.department_id IS NOT NULL
+        AND c.title IS NOT (SELECT d.name FROM department d WHERE d.id = c.department_id))
+      OR EXISTS (SELECT 1 FROM chat_conversation c
+        JOIN chat_member cm ON cm.conversation_id = c.id
+        LEFT JOIN app_user u ON u.id = cm.user_id
+        WHERE c.organization_id = ?1 AND c.department_id IS NOT NULL
+          AND (u.id IS NULL OR u.status IS NOT 'active' OR u.department_id IS NOT c.department_id
+            OR cm.role IS NOT (CASE WHEN u.role = 'head' THEN 'owner' ELSE 'member' END)))
+      OR EXISTS (SELECT 1 FROM app_user u WHERE u.organization_id = ?1 AND u.status = 'active' AND u.department_id IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM chat_member cm WHERE cm.conversation_id = 'dept:' || u.department_id AND cm.user_id = u.id))
+    AS drift`)
+    .bind(organizationId);
+}
+
+/**
+ * Re-checks the department groups with one read and runs the sync batch only when something drifted. Never throws:
+ * a failure is logged with the organization id only, so the caller can still answer.
+ */
 export async function ensureDepartmentGroups(db: D1Database, organizationId: string): Promise<void> {
-  await db.batch(departmentGroupSyncStatements(db, organizationId, new Date().toISOString()));
+  try {
+    const check = await departmentGroupDriftStatement(db, organizationId).first<{ drift: number }>();
+    if (!check || check.drift !== 1) return;
+    await db.batch(departmentGroupSyncStatements(db, organizationId, new Date().toISOString()));
+  } catch {
+    console.error('department_sync_failed', { organizationId });
+  }
 }
 
 /** True for a department group's `system_key`. */

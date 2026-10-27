@@ -200,6 +200,21 @@ describe('chat read tools', () => {
     expect((await tool(token, 'search_messages', { query: 'riêng tư' })).data.messages).toEqual([]);
   });
 
+  test('read_messages with thread_id is refused on a direct chat with agent reading turned off', async () => {
+    const { token } = await selfToken('u-lan');
+    const dm = await web('u-lan', 'POST', '/chat/conversations', { kind: 'direct', userId: 'u-huy' });
+    const dmId = dm.json.data.id as string;
+    const root = await say('u-huy', dmId, 'Chuyện riêng tư');
+    const reply = await web('u-lan', 'POST', `/chat/conversations/${dmId}/messages`, { id: crypto.randomUUID(), body: 'Trả lời riêng', threadRootId: root });
+    expect(reply.status).toBe(200);
+    expect((await tool(token, 'read_messages', { conversation_id: dmId, thread_id: root })).data.messages).toHaveLength(2);
+
+    expect((await web('u-huy', 'PATCH', `/chat/conversations/${dmId}`, { agentReadable: false })).status).toBe(200);
+    const refused = await tool(token, 'read_messages', { conversation_id: dmId, thread_id: root });
+    expect(refused).toMatchObject({ isError: true, data: { code: 'NOT_FOUND' } });
+    expect(JSON.stringify(refused.data)).not.toContain('riêng');
+  });
+
   test('search_messages finds visible messages case-insensitively and is rate limited', async () => {
     const { token } = await selfToken('u-lan');
     const convId = await group('u-lan', ['u-long']);

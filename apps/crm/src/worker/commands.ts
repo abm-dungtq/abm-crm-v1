@@ -617,7 +617,7 @@ async function createTask({ db, actor, input, tx }: Ctx<CreateTaskInput>) {
   }
   const source = input.source ?? null;
   if (source) {
-    const sourceFail = await checkTaskSource(db, actor, source, input.draft ?? null);
+    const sourceFail = await checkTaskSource(db, actor, source, input.draft ?? null, wantedUsers);
     if (sourceFail) return sourceFail;
   }
   const id = crypto.randomUUID();
@@ -659,9 +659,16 @@ type TaskSource = NonNullable<CreateTaskInput['source']>;
 /**
  * A task made from chat must point at a live message of a group or direct chat the actor belongs to (a thread source
  * must be a top-level message). An agent draft may be used only by the person who asked for it, for the source it was
- * drafted from, and only once. Null when everything holds.
+ * drafted from, while its message is not recalled, and only once; its assignee and co-workers must be people in the
+ * source conversation. Null when everything holds.
  */
-async function checkTaskSource(db: D1Database, actor: Actor, source: TaskSource, draft: CreateTaskInput['draft'] | null) {
+async function checkTaskSource(
+  db: D1Database,
+  actor: Actor,
+  source: TaskSource,
+  draft: CreateTaskInput['draft'] | null,
+  taskUserIds: string[],
+) {
   if (actor.kind === 'agent') return fail('VALIDATION_FAILED', 'Agent không tạo việc từ chat');
   const msg = await db.prepare(`
     SELECT m.id, m.thread_root_id, m.deleted_at, c.kind, c.organization_id
@@ -681,12 +688,19 @@ async function checkTaskSource(db: D1Database, actor: Actor, source: TaskSource,
     return fail('NOT_FOUND', 'Không tìm thấy tin nguồn trong phạm vi của bạn');
   }
   if (!draft) return null;
-  const draftMsg = await db.prepare('SELECT author_kind, conversation_id, meta_json FROM chat_message WHERE id = ?')
-    .bind(draft.messageId)
-    .first<{ author_kind: string; conversation_id: string; meta_json: string | null }>();
+  const draftMsg = await db.prepare(`SELECT m.author_kind, m.conversation_id, m.meta_json,
+      (SELECT COUNT(*) FROM chat_member cm WHERE cm.conversation_id = ?2 AND cm.user_id IN (SELECT value FROM json_each(?3))) AS member_count
+    FROM chat_message m WHERE m.id = ?1 AND m.deleted_at IS NULL`)
+    .bind(draft.messageId, source.conversationId, JSON.stringify(taskUserIds))
+    .first<{ author_kind: string; conversation_id: string; meta_json: string | null; member_count: number }>();
   const unusable = fail('VALIDATION_FAILED', 'Việc nháp không còn dùng được');
   if (!draftMsg || draftMsg.author_kind !== 'agent' || draftMsg.conversation_id !== source.conversationId || !draftMsg.meta_json) {
     return unusable;
+  }
+  if (draftMsg.member_count !== taskUserIds.length) {
+    return fail('VALIDATION_FAILED', 'Người nhận và người cùng làm phải là thành viên của cuộc trò chuyện', {
+      fields: { assigneeUserId: 'Không hợp lệ', memberUserIds: 'Không hợp lệ' },
+    });
   }
   let meta: { requestedByUserId?: unknown; taskDrafts?: unknown };
   try {

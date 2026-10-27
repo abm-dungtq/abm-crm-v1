@@ -79,6 +79,8 @@ const conversationOf = async (user: string, convId: string) =>
   ((await call(user, 'GET', '/chat/conversations')).json.data as any[]).find((c) => c.id === convId);
 const unreadOf = async (user: string) => (await call(user, 'GET', '/chat/unread')).json.data.total as number;
 const followedOf = async (user: string) => (await call(user, 'GET', '/chat/threads')).json.data as any[];
+// Keeps two writes out of the same millisecond, so read markers and "last reply" times are told apart.
+const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
 
 describe('chat threads', () => {
   test('a thread reply stays out of the main flow and shows on the root as a thread card', async () => {
@@ -275,6 +277,107 @@ describe('chat threads', () => {
     const thread = await call('u-lan', 'GET', `/chat/threads/${root.id}`);
     expect(thread.json.data.thread.replyCount).toBe(1);
     expect(thread.json.data.thread.latest.map((l: any) => l.snippet)).toEqual(['Hai']);
+  });
+
+  test('recalling the last reply moves the last reply time back to the remaining replies, and to none', async () => {
+    const g = await groupG();
+    const root = await post('u-lan', g, 'Tin gốc');
+    const r1 = await post('u-long', g, 'Một', { threadRootId: root.id });
+    await tick();
+    const r2 = await post('u-long', g, 'Hai', { threadRootId: root.id });
+    const threadRow = () => db.prepare('SELECT last_reply_at, last_activity_at FROM chat_thread WHERE root_message_id = ?')
+      .bind(root.id).first<{ last_reply_at: string | null; last_activity_at: string }>();
+    expect(await threadRow()).toEqual({ last_reply_at: r2.json.data.createdAt, last_activity_at: r2.json.data.createdAt });
+
+    expect((await call('u-long', 'DELETE', `/chat/messages/${r2.id}`)).status).toBe(200);
+    expect(await threadRow()).toEqual({ last_reply_at: r1.json.data.createdAt, last_activity_at: r2.json.data.createdAt });
+    expect((await call('u-lan', 'GET', `/chat/threads/${root.id}`)).json.data.thread.lastReplyAt).toBe(r1.json.data.createdAt);
+
+    expect((await call('u-long', 'DELETE', `/chat/messages/${r1.id}`)).status).toBe(200);
+    expect(await threadRow()).toEqual({ last_reply_at: null, last_activity_at: r2.json.data.createdAt });
+  });
+
+  test('a mentioned newcomer has only the mentioning reply and later ones unread', async () => {
+    const g = await groupG();
+    const root = await post('u-lan', g, 'Tin gốc');
+    await post('u-long', g, 'Một', { threadRootId: root.id });
+    await tick();
+    await post('u-long', g, 'Hai', { threadRootId: root.id });
+    await tick();
+    await post('u-long', g, 'Nhờ @[Hoàng Mai](user:u-mai) xem', { threadRootId: root.id });
+    expect((await followedOf('u-mai')).find((t) => t.rootId === root.id)).toMatchObject({ following: true, unread: 1 });
+    await tick();
+    await post('u-huy', g, 'Ba', { threadRootId: root.id });
+    expect((await followedOf('u-mai')).find((t) => t.rootId === root.id).unread).toBe(2);
+  });
+
+  test('in a direct chat a thread-only reply reaches the other person from the first reply on', async () => {
+    const dm = await call('u-lan', 'POST', '/chat/conversations', { kind: 'direct', userId: 'u-huy' });
+    const dmId = dm.json.data.id as string;
+    const root = await post('u-lan', dmId, 'Tin gốc');
+    await call('u-huy', 'POST', `/chat/conversations/${dmId}/read`, {});
+    await tick();
+
+    expect((await post('u-lan', dmId, 'Chỉ trong chuỗi', { threadRootId: root.id })).status).toBe(200);
+    expect(await followersOf(root.id)).toEqual([
+      { user_id: 'u-huy', via: 'author', muted: 0 },
+      { user_id: 'u-lan', via: 'author', muted: 0 },
+    ]);
+    expect((await followedOf('u-huy')).find((t) => t.rootId === root.id)).toMatchObject({ following: true, unread: 1 });
+    expect((await conversationOf('u-huy', dmId)).threadUnread).toBe(1);
+    expect(await notificationsOf('u-huy')).toEqual([
+      { kind: 'chat_direct', link: `/chat/${dmId}` },
+      { kind: 'chat_thread', link: `/chat/${dmId}?thread=${root.id}` },
+    ]);
+
+    // Someone who unfollows is not added back by later replies.
+    await call('u-huy', 'PUT', `/chat/threads/${root.id}/subscription`, { state: 'none' });
+    await post('u-lan', dmId, 'Thêm một ý', { threadRootId: root.id });
+    expect((await followersOf(root.id)).map((f) => f.user_id)).toEqual(['u-lan']);
+    expect((await notificationsOf('u-huy')).filter((n) => n.kind === 'chat_thread')).toHaveLength(1);
+  });
+
+  test('in a direct chat with the agent only the person follows, and agent replies notify nobody', async () => {
+    const created = await call('u-admin', 'POST', '/admin/chat-agents', { displayName: 'Trợ lý', dmAgentKey: 'crm-assistant', groupAgentKey: 'crm-group-assistant' });
+    const agentId = created.json.data.id as string;
+    const dm = await call('u-lan', 'POST', '/chat/conversations', { kind: 'direct', agentId });
+    expect(dm.status).toBe(200);
+    const dmId = dm.json.data.id as string;
+    // The bridge is offline, so the agent side answers at once with its notice, inside the thread.
+    await db.prepare('UPDATE inbox_setting SET bridge_last_seen_at = ? WHERE id = 1')
+      .bind(new Date(Date.now() - 60 * 60_000).toISOString()).run();
+    const root = await post('u-lan', dmId, 'Tin gốc');
+    await db.prepare('DELETE FROM notification').run();
+    expect((await post('u-lan', dmId, 'Hỏi trong chuỗi', { threadRootId: root.id })).status).toBe(200);
+
+    expect(await followersOf(root.id)).toEqual([{ user_id: 'u-lan', via: 'author', muted: 0 }]);
+    const agentReplies = await db.prepare("SELECT COUNT(*) AS n FROM chat_message WHERE thread_root_id = ? AND author_kind <> 'user'")
+      .bind(root.id).first<{ n: number }>();
+    expect(agentReplies!.n).toBeGreaterThan(0);
+    expect(await db.prepare('SELECT COUNT(*) AS n FROM notification').first()).toEqual({ n: 0 });
+  });
+
+  test('a person outside the conversation gets 404 from every thread, topic, context and draft route', async () => {
+    const g = await groupG();
+    const root = await post('u-lan', g, 'Tin gốc');
+    const reply = await post('u-long', g, 'Trả lời', { threadRootId: root.id });
+    const routes: [string, string, unknown?][] = [
+      ['PUT', `/chat/threads/${root.id}/subscription`, { state: 'following' }],
+      ['POST', `/chat/threads/${root.id}/read`, {}],
+      ['POST', `/chat/threads/${root.id}/close`, { closed: true }],
+      ['GET', `/chat/conversations/${g}/topics`],
+      ['GET', `/chat/messages/${reply.id}/context`],
+      ['GET', `/chat/messages/${root.id}/context`],
+      ['GET', `/chat/threads/${root.id}`],
+      ['POST', `/chat/conversations/${g}/task-drafts`, { messageId: root.id, scope: 'message' }],
+    ];
+    for (const [method, path, body] of routes) {
+      const res = await call('u-hung', method, path, body);
+      expect(res.status, `${method} ${path}`).toBe(404);
+      expect(res.json.error?.code, `${method} ${path}`).toBe('NOT_FOUND');
+    }
+    expect(await followersOf(root.id)).not.toContainEqual(expect.objectContaining({ user_id: 'u-hung' }));
+    expect(await db.prepare('SELECT closed_at FROM chat_thread WHERE root_message_id = ?').bind(root.id).first()).toEqual({ closed_at: null });
   });
 
   test('a follower removed from the conversation gets no thread notification', async () => {

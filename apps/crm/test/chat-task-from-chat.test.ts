@@ -261,6 +261,39 @@ describe('task from chat', () => {
     expect(wrongScope.status).toBe(422);
   });
 
+  test('a draft only assigns people of the source chat, and a recalled draft creates nothing', async () => {
+    const g = await groupG();
+    const msg = await post('u-lan', g, 'Gửi báo giá');
+    const source = { conversationId: g, messageId: msg, scope: 'message' };
+    const draftId = await agentDraftMessage(g, source);
+    const draft = { messageId: draftId, index: 0 };
+    const tasksBefore = (await db.prepare('SELECT COUNT(*) AS n FROM task').first<{ n: number }>())!.n;
+
+    // u-huy is active but not in the group.
+    for (const extra of [{ assigneeUserId: 'u-huy' }, { memberUserIds: ['u-hung', 'u-huy'] }]) {
+      const res = await command('u-lan', 'createTask', taskInput(source, { ...extra, draft }));
+      expect(res.status, JSON.stringify(extra)).toBe(422);
+      expect(res.json.error?.message).toBe('Người nhận và người cùng làm phải là thành viên của cuộc trò chuyện');
+    }
+
+    await db.prepare('UPDATE chat_message SET deleted_at = ? WHERE id = ?').bind(new Date().toISOString(), draftId).run();
+    const recalled = await command('u-lan', 'createTask', taskInput(source, { draft }));
+    expect(recalled.status).toBe(422);
+    expect(recalled.json.error?.message).toBe('Việc nháp không còn dùng được');
+    expect((await db.prepare('SELECT COUNT(*) AS n FROM task').first<{ n: number }>())!.n).toBe(tasksBefore);
+  });
+
+  test('a director or admin outside the source chat cannot create a task from it', async () => {
+    const g = await groupG();
+    const msg = await post('u-lan', g, 'Gửi báo giá');
+    for (const user of ['u-bgd', 'u-admin']) {
+      const res = await command(user, 'createTask', taskInput({ conversationId: g, messageId: msg, scope: 'message' }, { assigneeUserId: 'u-lan', memberUserIds: [] }));
+      expect(res.status, user).toBe(404);
+      expect(res.json.error?.message).toBe('Không tìm thấy tin nguồn trong phạm vi của bạn');
+    }
+    expect(await db.prepare('SELECT COUNT(*) AS n FROM task WHERE source_conversation_id IS NOT NULL').first()).toEqual({ n: 0 });
+  });
+
   test('task detail shows the source, and only a member of the chat may open it or see its title', async () => {
     const g = await groupG();
     const msg = await post('u-lan', g, 'Gửi báo giá');
@@ -469,6 +502,22 @@ describe('task drafts by the agent', () => {
     expect((await command('u-hung', 'createTask', input)).status).toBe(409);
     expect(await db.prepare('SELECT thread_root_id FROM chat_message WHERE id = ?').bind(`task-card:${created.json.data.taskId}`).first())
       .toEqual({ thread_root_id: root });
+  });
+
+  test('asking for a draft follows the thread but leaves a muted thread muted', async () => {
+    await setBridgeOnline(true);
+    const { g } = await groupWithAgent();
+    const root = await post('u-lan', g, 'Tin gốc');
+    await post('u-long', g, 'Một ý', { threadRootId: root });
+    const muted = await call('u-lan', 'PUT', `/chat/threads/${root}/subscription`, { state: 'muted' });
+    expect(muted.json.data).toEqual({ rootId: root, following: true, muted: true });
+
+    expect((await drafts('u-lan', g, { messageId: root, scope: 'thread' })).json.data).toEqual({ mode: 'agent' });
+    expect(await db.prepare('SELECT via, muted FROM chat_thread_follower WHERE root_message_id = ? AND user_id = ?').bind(root, 'u-lan').first())
+      .toEqual({ via: 'author', muted: 1 });
+    // The person's own choice still unmutes.
+    const unmuted = await call('u-lan', 'PUT', `/chat/threads/${root}/subscription`, { state: 'following' });
+    expect(unmuted.json.data).toEqual({ rootId: root, following: true, muted: false });
   });
 
   test('offline bridge, or "Tự tạo việc", gives the manual draft and queues nothing', async () => {

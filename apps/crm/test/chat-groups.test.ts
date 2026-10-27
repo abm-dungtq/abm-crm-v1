@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:test';
-import { beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import seedSql from '../seed/demo.sql?raw';
 import app from '../src/worker/index';
 import { ensureInboxConversation } from '../src/worker/inbox-notices';
@@ -7,6 +7,7 @@ import { resetDb } from './helpers/reset-db';
 
 const db = env.DB;
 beforeEach(() => resetDb(db, seedSql));
+afterEach(() => vi.restoreAllMocks());
 
 type Json = { ok: boolean; data?: any; error?: { code: string; message: string; fields?: Record<string, string> } };
 
@@ -47,6 +48,42 @@ const moveHuyToTraining = async () => call('u-admin', 'PATCH', '/admin/users/u-h
 
 const post = (user: string, conversationId: string, body: Record<string, unknown>) =>
   call(user, 'POST', `/chat/conversations/${conversationId}/messages`, { id: crypto.randomUUID(), ...body });
+
+/** Runs one GET of the conversation list while counting D1 queries (a batch is one), batches and write statements. */
+async function countedList(user: string) {
+  let d1 = 0;
+  let batches = 0;
+  let insideBatch = false;
+  const writes: string[] = [];
+  const origBatch = db.batch.bind(db);
+  const origPrepare = db.prepare.bind(db);
+  const wrap = (stmt: D1PreparedStatement): D1PreparedStatement => {
+    const [bind, first, all, run, raw] = [stmt.bind.bind(stmt), stmt.first.bind(stmt), stmt.all.bind(stmt), stmt.run.bind(stmt), stmt.raw.bind(stmt)];
+    const count = () => { if (!insideBatch) d1 += 1; };
+    stmt.bind = (...args: unknown[]) => wrap(bind(...args));
+    stmt.first = ((...a: [string?]) => { count(); return first(...(a as [never])); }) as typeof stmt.first;
+    stmt.all = (() => { count(); return all(); }) as typeof stmt.all;
+    stmt.run = (() => { count(); return run(); }) as typeof stmt.run;
+    stmt.raw = ((...a: [never?]) => { count(); return raw(...a); }) as typeof stmt.raw;
+    return stmt;
+  };
+  vi.spyOn(db, 'prepare').mockImplementation((sql: string) => {
+    if (/^\s*(INSERT|UPDATE|DELETE)\b/i.test(sql)) writes.push(sql);
+    return wrap(origPrepare(sql));
+  });
+  vi.spyOn(db, 'batch').mockImplementation(async (stmts: D1PreparedStatement[]) => {
+    d1 += 1;
+    batches += 1;
+    insideBatch = true;
+    try { return await origBatch(stmts); } finally { insideBatch = false; }
+  });
+  try {
+    const res = await call(user, 'GET', '/chat/conversations');
+    return { res, d1, batches, writes };
+  } finally {
+    vi.restoreAllMocks();
+  }
+}
 
 describe('department groups', () => {
   test('the conversation list creates the department group with exactly the active department members', async () => {
@@ -120,6 +157,90 @@ describe('department groups', () => {
     expect(inbox.status).toBe(422);
     const row = await db.prepare('SELECT mode FROM chat_conversation WHERE id = ?').bind(inboxId).first<{ mode: string }>();
     expect(row?.mode).toBe('chat');
+  });
+
+  test('without drift the conversation list runs only the check: no batch and no write', async () => {
+    const first = await countedList('u-lan');
+    expect(first.res.status).toBe(200);
+    expect(first.batches).toBe(1);
+
+    const second = await countedList('u-lan');
+    expect(second.res.status).toBe(200);
+    expect(second.res.json.data.some((c: any) => c.id === DEPT_KD)).toBe(true);
+    expect(second.batches).toBe(0);
+    expect(second.writes).toEqual([]);
+    // Exactly the sync batch fewer than the run that repaired the groups.
+    expect(second.d1).toBe(first.d1 - 1);
+  });
+
+  test('every kind of drift made straight in SQL is repaired by the next list, and the list after that is quiet', async () => {
+    await call('u-lan', 'GET', '/chat/conversations');
+    const now = new Date().toISOString();
+    const cases: { name: string; drift: () => Promise<unknown>; repaired: () => Promise<void> }[] = [
+      {
+        name: 'a department without its group',
+        drift: () => db.prepare("INSERT INTO department (id, organization_id, name, created_at, updated_at) VALUES ('dep-dt', 'org-abm', 'Phòng Đào tạo', ?, ?)")
+          .bind(now, now).run(),
+        repaired: async () => {
+          expect(await db.prepare("SELECT title FROM chat_conversation WHERE id = 'dept:dep-dt'").first()).toEqual({ title: 'Phòng Đào tạo' });
+        },
+      },
+      {
+        name: 'a renamed department and a user put straight into it',
+        drift: () => db.batch([
+          db.prepare("UPDATE department SET name = 'Phòng Kinh doanh Mới' WHERE id = 'dep-kd'"),
+          db.prepare(`INSERT INTO app_user (id, organization_id, department_id, team_id, display_name, email, role, created_at, updated_at)
+            VALUES ('u-new', 'org-abm', 'dep-kd', 'team-kd1', 'Người mới', 'u-new@demo.abm.example', 'sale', ?, ?)`).bind(now, now),
+        ]),
+        repaired: async () => {
+          expect(await db.prepare('SELECT title FROM chat_conversation WHERE id = ?').bind(DEPT_KD).first()).toEqual({ title: 'Phòng Kinh doanh Mới' });
+          expect(await members(DEPT_KD)).toContain('u-new');
+        },
+      },
+      {
+        name: 'a disabled member',
+        drift: () => db.prepare("UPDATE app_user SET status = 'disabled' WHERE id = 'u-mai'").run(),
+        repaired: async () => { expect(await members(DEPT_KD)).not.toContain('u-mai'); },
+      },
+      {
+        name: 'a member moved to another department',
+        drift: () => db.prepare("UPDATE app_user SET department_id = 'dep-dt', team_id = NULL WHERE id = 'u-huy'").run(),
+        repaired: async () => {
+          expect(await members(DEPT_KD)).not.toContain('u-huy');
+          expect(await members('dept:dep-dt')).toEqual(['u-huy']);
+        },
+      },
+      {
+        name: 'a member with the wrong role',
+        drift: () => db.prepare("UPDATE chat_member SET role = 'owner' WHERE conversation_id = ? AND user_id = 'u-lan'").bind(DEPT_KD).run(),
+        repaired: async () => {
+          expect(await db.prepare("SELECT role FROM chat_member WHERE conversation_id = ? AND user_id = 'u-lan'").bind(DEPT_KD).first())
+            .toEqual({ role: 'member' });
+        },
+      },
+    ];
+    for (const c of cases) {
+      await c.drift();
+      const repairing = await countedList('u-head');
+      expect(repairing.res.status, c.name).toBe(200);
+      expect(repairing.batches, c.name).toBe(1);
+      await c.repaired();
+      const quiet = await countedList('u-head');
+      expect(quiet.batches, c.name).toBe(0);
+      expect(quiet.writes, c.name).toEqual([]);
+    }
+  });
+
+  test('a failing sync is logged with the organization id only and the list still answers', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.spyOn(db, 'batch').mockRejectedValueOnce(new Error('D1 is down'));
+    const list = await call('u-lan', 'GET', '/chat/conversations');
+    expect(list.status).toBe(200);
+    expect(list.json.ok).toBe(true);
+    expect(errors).toHaveBeenCalledWith('department_sync_failed', { organizationId: 'org-abm' });
+    // The next list repairs what the failed one could not.
+    vi.restoreAllMocks();
+    expect((await call('u-lan', 'GET', '/chat/conversations')).json.data.some((c: any) => c.id === DEPT_KD)).toBe(true);
   });
 });
 
@@ -236,5 +357,29 @@ describe('topic mode', () => {
     expect(res.status).toBe(422);
     expect(res.json.error?.message).toBe('Chỉ đóng được chủ đề');
     expect((await call('u-lan', 'POST', `/chat/threads/${root.json.data.id}/close`, { closed: 'yes' })).status).toBe(422);
+  });
+
+  test('after switching to topic mode, threads and roots from before the switch close and reopen too', async () => {
+    const group = await call('u-lan', 'POST', '/chat/conversations', { kind: 'group', title: 'Nhóm chat', memberUserIds: ['u-long'] });
+    const groupId = group.json.data.id as string;
+    const withReplies = await post('u-lan', groupId, { body: 'Tin gốc có trả lời' });
+    expect((await post('u-long', groupId, { body: 'Trả lời', threadRootId: withReplies.json.data.id })).status).toBe(200);
+    const bare = await post('u-long', groupId, { body: 'Tin gốc chưa ai trả lời' });
+    expect(await db.prepare('SELECT is_topic FROM chat_thread WHERE root_message_id = ?').bind(withReplies.json.data.id).first())
+      .toEqual({ is_topic: 0 });
+    expect((await call('u-lan', 'PATCH', `/chat/conversations/${groupId}`, { mode: 'topic' })).status).toBe(200);
+
+    for (const [user, rootId] of [['u-lan', withReplies.json.data.id], ['u-long', bare.json.data.id]] as const) {
+      const closed = await call(user, 'POST', `/chat/threads/${rootId}/close`, { closed: true });
+      expect(closed.status).toBe(200);
+      expect(closed.json.data).toMatchObject({ rootId, closed: true });
+      const refused = await post('u-lan', groupId, { body: 'Trả lời khi đã đóng', threadRootId: rootId });
+      expect(refused.status).toBe(422);
+      expect(refused.json.error?.message).toBe('Chủ đề đã đóng');
+      const reopened = await call(user, 'POST', `/chat/threads/${rootId}/close`, { closed: false });
+      expect(reopened.status).toBe(200);
+      expect(reopened.json.data.closed).toBe(false);
+      expect((await post('u-lan', groupId, { body: 'Trả lời sau khi mở lại', threadRootId: rootId })).status).toBe(200);
+    }
   });
 });
