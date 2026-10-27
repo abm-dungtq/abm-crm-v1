@@ -98,6 +98,8 @@ export function useChatSocket(): { connected: boolean } {
       }
       if (!event || typeof event !== 'object' || typeof event.type !== 'string') return;
 
+      // `['chat', conversationId]` matches by prefix, so it also refreshes that conversation's topic list
+      // (`['chat', conversationId, 'topics']`); the same holds for `thread.updated` below.
       if (
         (event.type === 'message.created' || event.type === 'message.deleted') &&
         typeof event.conversationId === 'string'

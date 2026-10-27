@@ -1,12 +1,15 @@
-import { useEffect, useId, useMemo, useState, type MouseEvent } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type MouseEvent } from 'react';
 import { Link, useNavigate, useParams, useSearch } from '@tanstack/react-router';
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useActor } from '../actor-context';
 import { ApiFailure, api, useApi } from '../api';
 import { chatLink, formatThreadTime, parseChatSearch } from '../chat-links';
 import { useChatSocketConnected } from '../chat-socket';
+import { buildChatTree, canCreateSubgroup, sumUnread } from '../chat-tree';
+import { ChatGroupSettingsDialog } from '../components/chat-group-settings';
 import { ChatThread, ConversationAgentsDialog } from '../components/chat-thread';
 import { ChatThreadPanel } from '../components/chat-thread-panel';
+import { ChatTopicList } from '../components/chat-topic-list';
 import { Icon } from '../components/icons';
 import { fmtShortTime } from '../components/inbox-thread';
 import { roleLabel } from '../components/layout';
@@ -32,6 +35,12 @@ import type {
 } from '../types';
 
 const THREADS_PAGE_SIZE = 50;
+
+/** A department group chosen as the parent of a new subgroup. */
+interface SubgroupParent {
+  id: string;
+  title: string;
+}
 
 /** Bell with a slash: a followed thread whose notifications are off. */
 function MutedIcon() {
@@ -79,8 +88,14 @@ export function ChatPage() {
   const navigate = useNavigate();
   const connected = useChatSocketConnected();
   const isPhoneWidth = useIsPhoneWidth();
+  const actor = useActor();
 
-  const [createGroupOpen, setCreateGroupOpen] = useState(false);
+  // `parent` presets the "Thuộc phòng ban" picker when the dialog is opened from a department group.
+  const [createGroup, setCreateGroup] = useState<{ open: boolean; parent: SubgroupParent | null }>({
+    open: false,
+    parent: null,
+  });
+  const openCreateGroup = (parent: SubgroupParent | null = null) => setCreateGroup({ open: true, parent });
   const [newDirectOpen, setNewDirectOpen] = useState(false);
   const [listTab, setListTab] = useState<'all' | 'threads'>('all');
 
@@ -118,17 +133,22 @@ export function ChatPage() {
     void navigate({ to: '/chat/$conversationId', params: { conversationId }, search: {}, replace: false });
   };
 
-  const groups = useMemo(
-    () => (conversationsQuery.data ?? []).filter((c) => c.kind === 'group'),
-    [conversationsQuery.data],
-  );
-  const directs = useMemo(
-    () => (conversationsQuery.data ?? []).filter((c) => c.kind === 'direct'),
-    [conversationsQuery.data],
+  const tree = useMemo(() => buildChatTree(conversationsQuery.data ?? []), [conversationsQuery.data]);
+  const subgroupParents = useMemo<SubgroupParent[]>(
+    () =>
+      tree.departments
+        .filter((d) => canCreateSubgroup(d.group, actor))
+        .map((d) => ({ id: d.parentId, title: d.title })),
+    [tree, actor],
   );
 
-  const groupUnread = groups.reduce((sum, c) => sum + c.unread, 0);
-  const directUnread = directs.reduce((sum, c) => sum + c.unread, 0);
+  const departmentUnread = tree.departments.reduce(
+    (sum, d) => sum + (d.group?.unread ?? 0) + sumUnread(d.children),
+    0,
+  );
+  const groupUnread = sumUnread(tree.groups);
+  const systemUnread = sumUnread(tree.system);
+  const directUnread = sumUnread(tree.directs);
 
   return (
     <div className="inbox-workspace">
@@ -144,7 +164,7 @@ export function ChatPage() {
                 type="button"
                 className="btn btn-sm btn-primary"
                 style={{ flex: 1 }}
-                onClick={() => setCreateGroupOpen(true)}
+                onClick={() => openCreateGroup()}
               >
                 <Icon name="plus" />
                 <span>Tạo nhóm</span>
@@ -239,59 +259,90 @@ export function ChatPage() {
             )}
             {conversationsQuery.data && (
               <>
-                <div
-                  className="row"
-                  style={{
-                    padding: '10px 12px 6px',
-                    background: 'var(--surface-2)',
-                    borderBottom: '1px solid var(--border)',
-                  }}
-                >
-                  <span className="small" style={{ fontWeight: 700, textTransform: 'uppercase', color: 'var(--muted)' }}>
-                    Nhóm
-                  </span>
-                  {groupUnread > 0 && (
-                    <span className="conv-unread-badge" aria-label={`${groupUnread} tin chưa đọc trong nhóm`}>
-                      {groupUnread}
-                    </span>
-                  )}
-                </div>
-                {groups.length === 0 ? (
+                {tree.departments.length > 0 && (
+                  <>
+                    <ChatSectionHeader
+                      label="Phòng ban"
+                      unread={departmentUnread}
+                      unreadLabel={`${departmentUnread} tin chưa đọc trong nhóm phòng ban`}
+                    />
+                    <ul className="conv-list" aria-label="Phòng ban">
+                      {tree.departments.map((d) => (
+                        <li key={d.parentId}>
+                          {d.group ? (
+                            <ChatDepartmentRow
+                              item={d.group}
+                              selected={d.group.id === conversationId}
+                              canCreateSubgroup={canCreateSubgroup(d.group, actor)}
+                              onCreateSubgroup={() => openCreateGroup({ id: d.parentId, title: d.title })}
+                            />
+                          ) : (
+                            <div className="chat-dept-header truncate" title={d.title}>
+                              {d.title}
+                            </div>
+                          )}
+                          {d.children.length > 0 && (
+                            <ul className="conv-list" aria-label={`Nhóm nhỏ của ${d.title}`}>
+                              {d.children.map((c) => (
+                                <ChatConversationRow
+                                  key={c.id}
+                                  item={c}
+                                  selected={c.id === conversationId}
+                                  className="chat-subgroup-row"
+                                />
+                              ))}
+                            </ul>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                )}
+
+                <ChatSectionHeader
+                  label="Nhóm"
+                  unread={groupUnread}
+                  unreadLabel={`${groupUnread} tin chưa đọc trong nhóm`}
+                />
+                {tree.groups.length === 0 ? (
                   <div className="small muted" style={{ padding: '10px 12px', borderBottom: '1px solid var(--border)' }}>
                     Chưa có nhóm nào. Bấm &ldquo;Tạo nhóm&rdquo; để bắt đầu.
                   </div>
                 ) : (
                   <ul className="conv-list" aria-label="Nhóm">
-                    {groups.map((c) => (
+                    {tree.groups.map((c) => (
                       <ChatConversationRow key={c.id} item={c} selected={c.id === conversationId} />
                     ))}
                   </ul>
                 )}
 
-                <div
-                  className="row"
-                  style={{
-                    padding: '10px 12px 6px',
-                    background: 'var(--surface-2)',
-                    borderBottom: '1px solid var(--border)',
-                  }}
-                >
-                  <span className="small" style={{ fontWeight: 700, textTransform: 'uppercase', color: 'var(--muted)' }}>
-                    Tin riêng
-                  </span>
-                  {directUnread > 0 && (
-                    <span className="conv-unread-badge" aria-label={`${directUnread} tin riêng chưa đọc`}>
-                      {directUnread}
-                    </span>
-                  )}
-                </div>
-                {directs.length === 0 ? (
+                {tree.system.length > 0 && (
+                  <>
+                    <ChatSectionHeader
+                      label="Hệ thống"
+                      unread={systemUnread}
+                      unreadLabel={`${systemUnread} tin chưa đọc trong nhóm hệ thống`}
+                    />
+                    <ul className="conv-list" aria-label="Hệ thống">
+                      {tree.system.map((c) => (
+                        <ChatConversationRow key={c.id} item={c} selected={c.id === conversationId} />
+                      ))}
+                    </ul>
+                  </>
+                )}
+
+                <ChatSectionHeader
+                  label="Tin riêng"
+                  unread={directUnread}
+                  unreadLabel={`${directUnread} tin riêng chưa đọc`}
+                />
+                {tree.directs.length === 0 ? (
                   <div className="small muted" style={{ padding: '10px 12px' }}>
                     Chưa có hội thoại riêng. Bấm &ldquo;Nhắn riêng&rdquo; để chọn đồng nghiệp.
                   </div>
                 ) : (
                   <ul className="conv-list" aria-label="Tin riêng">
-                    {directs.map((c) => (
+                    {tree.directs.map((c) => (
                       <ChatConversationRow key={c.id} item={c} selected={c.id === conversationId} />
                     ))}
                   </ul>
@@ -311,6 +362,7 @@ export function ChatPage() {
               isPhoneWidth={isPhoneWidth}
               onOpenThread={openThread}
               onCloseThread={closeThread}
+              onCreateSubgroup={openCreateGroup}
             />
           ) : (
             <div className="inbox-placeholder">
@@ -322,8 +374,109 @@ export function ChatPage() {
         </div>
       </div>
 
-      <CreateGroupDialog open={createGroupOpen} onClose={() => setCreateGroupOpen(false)} />
+      <CreateGroupDialog
+        open={createGroup.open}
+        presetParent={createGroup.parent}
+        parentOptions={subgroupParents}
+        onClose={() => setCreateGroup({ open: false, parent: null })}
+      />
       <NewDirectDialog open={newDirectOpen} onClose={() => setNewDirectOpen(false)} />
+    </div>
+  );
+}
+
+function ChatSectionHeader({ label, unread, unreadLabel }: { label: string; unread: number; unreadLabel: string }) {
+  return (
+    <div
+      className="row"
+      style={{
+        padding: '10px 12px 6px',
+        background: 'var(--surface-2)',
+        borderBottom: '1px solid var(--border)',
+      }}
+    >
+      <span className="small" style={{ fontWeight: 700, textTransform: 'uppercase', color: 'var(--muted)' }}>
+        {label}
+      </span>
+      {unread > 0 && (
+        <span className="conv-unread-badge" aria-label={unreadLabel}>
+          {unread}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** A department group row: the conversation link with a "Phòng ban" chip, and a "⋯" menu to create a subgroup. */
+function ChatDepartmentRow({
+  item,
+  selected,
+  canCreateSubgroup: allowSubgroup,
+  onCreateSubgroup,
+}: {
+  item: ChatConversationSummary;
+  selected: boolean;
+  canCreateSubgroup: boolean;
+  onCreateSubgroup: () => void;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const boxRef = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDown = (e: PointerEvent) => {
+      if (!boxRef.current?.contains(e.target as Node)) setMenuOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setMenuOpen(false);
+        buttonRef.current?.focus();
+      }
+    };
+    document.addEventListener('pointerdown', onDown);
+    document.addEventListener('keydown', onKey);
+    boxRef.current?.querySelector<HTMLButtonElement>('.menu-item')?.focus();
+    return () => {
+      document.removeEventListener('pointerdown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [menuOpen]);
+
+  return (
+    <div className="chat-tree-row" data-has-menu={allowSubgroup ? 'true' : undefined}>
+      <ChatConversationLink item={item} selected={selected} chip="Phòng ban" />
+      {allowSubgroup && (
+        <div className="dropdown chat-tree-menu" ref={boxRef}>
+          <button
+            ref={buttonRef}
+            type="button"
+            className="btn btn-ghost btn-sm icon-btn"
+            aria-label={`Thao tác với ${item.title}`}
+            title="Thao tác"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen((v) => !v)}
+          >
+            <span aria-hidden="true">⋯</span>
+          </button>
+          {menuOpen && (
+            <div className="menu-pop" role="menu">
+              <button
+                type="button"
+                role="menuitem"
+                className="menu-item"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onCreateSubgroup();
+                }}
+              >
+                Tạo nhóm nhỏ
+              </button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -331,16 +484,33 @@ export function ChatPage() {
 function ChatConversationRow({
   item,
   selected,
+  className,
 }: {
   item: ChatConversationSummary;
   selected: boolean;
+  className?: string;
+}) {
+  return (
+    <li className={className}>
+      <ChatConversationLink item={item} selected={selected} />
+    </li>
+  );
+}
+
+function ChatConversationLink({
+  item,
+  selected,
+  chip,
+}: {
+  item: ChatConversationSummary;
+  selected: boolean;
+  chip?: string;
 }) {
   const title = item.title || (item.kind === 'group' ? 'Nhóm chat' : 'Tin riêng');
   const preview = formatMentionText(item.lastMessage) || 'Chưa có tin nhắn';
   const time = fmtShortTime(item.lastMessageAt ?? item.updatedAt);
 
   return (
-    <li>
       <Link
         to="/chat/$conversationId"
         params={{ conversationId: item.id }}
@@ -357,6 +527,7 @@ function ChatConversationRow({
               >
                 {title}
               </span>
+              {chip && <span className="chat-dept-chip">{chip}</span>}
               {time && <span className="small muted nowrap">{time}</span>}
               {item.unread > 0 && (
                 <span className="conv-unread-badge" aria-label={`${item.unread} tin chưa đọc`}>
@@ -379,7 +550,6 @@ function ChatConversationRow({
           </div>
         </div>
       </Link>
-    </li>
   );
 }
 
@@ -434,6 +604,7 @@ function ChatConversationPane({
   isPhoneWidth,
   onOpenThread,
   onCloseThread,
+  onCreateSubgroup,
 }: {
   conversationId: string;
   threadRootId?: string;
@@ -441,12 +612,13 @@ function ChatConversationPane({
   isPhoneWidth: boolean;
   onOpenThread: (rootId: string, messageId?: string) => void;
   onCloseThread: () => void;
+  onCreateSubgroup: (parent: SubgroupParent) => void;
 }) {
   const actor = useActor();
   const client = useQueryClient();
   const toast = useToast();
   const connected = useChatSocketConnected();
-  const [membersModalOpen, setMembersModalOpen] = useState(false);
+  const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [agentsModalOpen, setAgentsModalOpen] = useState(false);
 
   const convQuery = useQuery<ChatConversationDetail, ApiFailure>({
@@ -499,6 +671,7 @@ function ChatConversationPane({
     (myMember?.role === 'owner' || actor.role === 'director' || actor.role === 'admin');
 
   const showPanel = Boolean(threadRootId) && (conv.kind === 'group' || conv.kind === 'direct');
+  const isTopicMode = conv.kind === 'group' && conv.mode === 'topic';
 
   return (
     <div className="chat-main-row">
@@ -521,6 +694,8 @@ function ChatConversationPane({
             <Badge tone={conv.kind === 'group' ? 'info' : 'neutral'}>
               {conv.kind === 'group' ? `Nhóm · ${conv.members.length} thành viên` : 'Tin riêng'}
             </Badge>
+            {conv.departmentId && <span className="chat-dept-chip">Phòng ban</span>}
+            {isTopicMode && <Badge tone="accent">Chủ đề</Badge>}
           </div>
           <div className="small muted truncate" title={memberNames}>
             Thành viên: {memberNames || '—'}
@@ -567,21 +742,25 @@ function ChatConversationPane({
             <button
               type="button"
               className="btn btn-sm"
-              onClick={() => setMembersModalOpen(true)}
+              onClick={() => setSettingsModalOpen(true)}
             >
               <Icon name="users" />
-              <span>Thành viên ({conv.members.length})</span>
+              <span>Cài đặt nhóm</span>
             </button>
           </div>
         )}
       </header>
 
-      <ChatThread
-        conversationId={conversationId}
-        embedded
-        onOpenThread={onOpenThread}
-        focusMessageId={threadRootId ? undefined : messageId}
-      />
+      {isTopicMode ? (
+        <ChatTopicList conversation={conv} onOpenThread={(rootId) => onOpenThread(rootId)} />
+      ) : (
+        <ChatThread
+          conversationId={conversationId}
+          embedded
+          onOpenThread={onOpenThread}
+          focusMessageId={threadRootId ? undefined : messageId}
+        />
+      )}
 
       <div
         className="small muted"
@@ -596,11 +775,11 @@ function ChatConversationPane({
 
       {conv.kind === 'group' && (
         <>
-          <GroupMembersDialog
-            open={membersModalOpen}
-            onClose={() => setMembersModalOpen(false)}
+          <ChatGroupSettingsDialog
+            open={settingsModalOpen}
+            onClose={() => setSettingsModalOpen(false)}
             conversation={conv}
-            canManage={canManageGroup}
+            onCreateSubgroup={onCreateSubgroup}
           />
           {canManageGroup && (
             <ConversationAgentsDialog
@@ -632,7 +811,19 @@ function ChatConversationPane({
   );
 }
 
-function CreateGroupDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+function CreateGroupDialog({
+  open,
+  onClose,
+  presetParent,
+  parentOptions,
+}: {
+  open: boolean;
+  onClose: () => void;
+  /** The department group to create a subgroup in, when opened from that group. */
+  presetParent: SubgroupParent | null;
+  /** Department groups the user may create a subgroup in. */
+  parentOptions: SubgroupParent[];
+}) {
   const actor = useActor();
   const navigate = useNavigate();
   const client = useQueryClient();
@@ -643,25 +834,46 @@ function CreateGroupDialog({ open, onClose }: { open: boolean; onClose: () => vo
   const [title, setTitle] = useState('');
   const [search, setSearch] = useState('');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [parentId, setParentId] = useState('');
 
   useEffect(() => {
     if (!open) {
       setTitle('');
       setSearch('');
       setSelectedIds([]);
+      setParentId('');
+    } else {
+      setParentId(presetParent?.id ?? '');
     }
-  }, [open]);
+  }, [open, presetParent?.id]);
 
-  const createGroupMutation = useMutation<{ id: string }, ApiFailure, { title: string; memberUserIds: string[] }>({
+  const parents = useMemo(
+    () =>
+      presetParent && !parentOptions.some((p) => p.id === presetParent.id)
+        ? [presetParent, ...parentOptions]
+        : parentOptions,
+    [presetParent, parentOptions],
+  );
+  const selectedParent = parents.find((p) => p.id === parentId) ?? null;
+
+  const createGroupMutation = useMutation<
+    { id: string },
+    ApiFailure,
+    { title: string; memberUserIds: string[]; parentConversationId: string | null }
+  >({
     mutationFn: (payload) =>
       api.post<{ id: string }>('/chat/conversations', {
         kind: 'group',
         title: payload.title,
         memberUserIds: payload.memberUserIds,
+        ...(payload.parentConversationId ? { parentConversationId: payload.parentConversationId } : {}),
       }),
-    onSuccess: (res) => {
+    onSuccess: (res, payload) => {
       void client.invalidateQueries({ queryKey: ['chat', 'conversations'] });
-      toast('Đã tạo nhóm chat mới');
+      if (payload.parentConversationId) {
+        void client.invalidateQueries({ queryKey: ['chat', 'conversation', payload.parentConversationId] });
+      }
+      toast(payload.parentConversationId ? 'Đã tạo nhóm nhỏ mới' : 'Đã tạo nhóm chat mới');
       onClose();
       void navigate({ to: '/chat/$conversationId', params: { conversationId: res.id } });
     },
@@ -688,13 +900,17 @@ function CreateGroupDialog({ open, onClose }: { open: boolean; onClose: () => vo
     e.preventDefault();
     const trimmed = title.trim();
     if (!trimmed || selectedIds.length === 0 || createGroupMutation.isPending) return;
-    createGroupMutation.mutate({ title: trimmed, memberUserIds: selectedIds });
+    createGroupMutation.mutate({
+      title: trimmed,
+      memberUserIds: selectedIds,
+      parentConversationId: selectedParent?.id ?? null,
+    });
   };
 
   return (
     <Modal
       open={open}
-      title="Tạo nhóm"
+      title={selectedParent ? `Tạo nhóm nhỏ trong ${selectedParent.title}` : 'Tạo nhóm'}
       onClose={onClose}
       footer={
         <>
@@ -725,6 +941,24 @@ function CreateGroupDialog({ open, onClose }: { open: boolean; onClose: () => vo
             required
           />
         </Field>
+
+        {parents.length > 0 && (
+          <Field
+            label="Thuộc phòng ban"
+            error={errors.parentConversationId}
+            hint="Để trống nếu là nhóm thường. Nhóm nhỏ mời được người ở phòng ban khác."
+            htmlFor={`${formId}-parent`}
+          >
+            <select id={`${formId}-parent`} value={parentId} onChange={(e) => setParentId(e.target.value)}>
+              <option value="">— Nhóm thường —</option>
+              {parents.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.title}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
 
         <Field
           label={`Thành viên (${selectedIds.length} đã chọn)`}
@@ -872,163 +1106,6 @@ function NewDirectDialog({ open, onClose }: { open: boolean; onClose: () => void
             )}
           </div>
         )}
-      </div>
-    </Modal>
-  );
-}
-
-function GroupMembersDialog({
-  open,
-  onClose,
-  conversation,
-  canManage,
-}: {
-  open: boolean;
-  onClose: () => void;
-  conversation: ChatConversationDetail;
-  canManage: boolean;
-}) {
-  const actor = useActor();
-  const navigate = useNavigate();
-  const client = useQueryClient();
-  const toast = useToast();
-  const membersEditable = !conversation.system;
-  const directory = useApi<DirectoryUser[]>(open && canManage && membersEditable ? '/directory' : null);
-
-  const [title, setTitle] = useState(conversation.title);
-  const [addUserId, setAddUserId] = useState('');
-
-  useEffect(() => {
-    setTitle(conversation.title);
-    setAddUserId('');
-  }, [conversation.title, open]);
-
-  const renameMutation = useMutation<unknown, ApiFailure, string>({
-    mutationFn: (nextTitle) =>
-      api.patch(`/chat/conversations/${encodeURIComponent(conversation.id)}`, { title: nextTitle }),
-    onSuccess: () => {
-      void client.invalidateQueries({ queryKey: ['chat', 'conversation', conversation.id] });
-      void client.invalidateQueries({ queryKey: ['chat', 'conversations'] });
-      toast('Đã đổi tên nhóm');
-    },
-  });
-
-  const addMemberMutation = useMutation<unknown, ApiFailure, string>({
-    mutationFn: (userId) =>
-      api.post(`/chat/conversations/${encodeURIComponent(conversation.id)}/members`, { userIds: [userId] }),
-    onSuccess: () => {
-      setAddUserId('');
-      void client.invalidateQueries({ queryKey: ['chat', 'conversation', conversation.id] });
-      void client.invalidateQueries({ queryKey: ['chat', 'conversations'] });
-      toast('Đã thêm thành viên');
-    },
-  });
-
-  const removeMemberMutation = useMutation<unknown, ApiFailure, string>({
-    mutationFn: (userId) =>
-      api.delete(`/chat/conversations/${encodeURIComponent(conversation.id)}/members/${encodeURIComponent(userId)}`),
-    onSuccess: (_res, removedId) => {
-      void client.invalidateQueries({ queryKey: ['chat', 'conversations'] });
-      if (removedId === actor.id) {
-        onClose();
-        void navigate({ to: '/chat' });
-      } else {
-        void client.invalidateQueries({ queryKey: ['chat', 'conversation', conversation.id] });
-        toast('Đã xóa thành viên khỏi nhóm');
-      }
-    },
-  });
-
-  const existingIds = new Set(conversation.members.map((m) => m.id));
-  const nonMembers = (directory.data ?? []).filter((u) => !existingIds.has(u.id));
-
-  return (
-    <Modal open={open} title="Thành viên nhóm" onClose={onClose}>
-      <div className="stack">
-        <FormError error={renameMutation.error ?? addMemberMutation.error ?? removeMemberMutation.error} />
-
-        {canManage && (
-          <form
-            className="row"
-            onSubmit={(e) => {
-              e.preventDefault();
-              const trimmed = title.trim();
-              if (trimmed && trimmed !== conversation.title) {
-                renameMutation.mutate(trimmed);
-              }
-            }}
-          >
-            <input
-              type="text"
-              maxLength={80}
-              value={title}
-              aria-label="Tên nhóm"
-              onChange={(e) => setTitle(e.target.value)}
-            />
-            <button
-              type="submit"
-              className="btn btn-sm btn-primary"
-              disabled={!title.trim() || title.trim() === conversation.title || renameMutation.isPending}
-            >
-              Đổi tên
-            </button>
-          </form>
-        )}
-
-        {canManage && membersEditable && nonMembers.length > 0 && (
-          <form
-            className="row"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (addUserId) addMemberMutation.mutate(addUserId);
-            }}
-          >
-            <select
-              aria-label="Chọn thành viên thêm vào nhóm"
-              value={addUserId}
-              onChange={(e) => setAddUserId(e.target.value)}
-            >
-              <option value="">— Chọn đồng nghiệp để thêm —</option>
-              {nonMembers.map((u) => (
-                <option key={u.id} value={u.id}>
-                  {u.name} ({roleLabel(u.role)})
-                </option>
-              ))}
-            </select>
-            <button
-              type="submit"
-              className="btn btn-sm btn-primary"
-              disabled={!addUserId || addMemberMutation.isPending}
-            >
-              Thêm
-            </button>
-          </form>
-        )}
-
-        <ul className="list">
-          {conversation.members.map((m) => {
-            const canRemoveThis = membersEditable && (canManage || m.id === actor.id);
-            return (
-              <li key={m.id} className="row" style={{ padding: '8px 4px' }}>
-                <Avatar name={m.name} />
-                <span className="truncate" style={{ flex: 1, fontWeight: 500 }}>
-                  {m.name}
-                </span>
-                {m.role === 'owner' && <Badge tone="accent">Trưởng nhóm</Badge>}
-                {canRemoveThis && (
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-ghost"
-                    disabled={removeMemberMutation.isPending}
-                    onClick={() => removeMemberMutation.mutate(m.id)}
-                  >
-                    {m.id === actor.id ? 'Rời nhóm' : 'Xóa'}
-                  </button>
-                )}
-              </li>
-            );
-          })}
-        </ul>
       </div>
     </Modal>
   );

@@ -201,7 +201,18 @@ export interface ChatConversationSummary {
   unread: number;
   /** Unread thread-only replies in this conversation's followed, unmuted threads. */
   threadUnread: number;
+  mode: ChatConversationMode;
+  /** Set on a department group. */
+  departmentId: string | null;
+  /** Set on a subgroup: its department group, and that group's title. */
+  parentConversationId: string | null;
+  parentTitle: string | null;
+  /** A system group (Inbox, department group): members follow the org chart, nobody edits them by hand. */
+  system: boolean;
 }
+
+/** "chat": quote and thread replies; "topic": every new top-level message starts a topic. */
+export type ChatConversationMode = 'chat' | 'topic';
 
 export interface ChatMember {
   id: string;
@@ -239,11 +250,18 @@ export interface ChatConversationDetail {
   kind: 'group' | 'direct' | 'task';
   title: string;
   taskId: string | null;
-  /** A system group (the "Inbox" group): members follow the roster and cannot be edited by hand. */
+  /** A system group (Inbox or department group): members follow the roster and cannot be edited by hand. */
   system: boolean;
   agentReadable: boolean;
-  /** "Chủ đề" mode turns every new message into a topic; absent means the normal chat mode. */
-  mode?: 'chat' | 'topic';
+  /** "Chủ đề" mode turns every new message into a topic. */
+  mode: ChatConversationMode;
+  /** Set on a department group. */
+  departmentId: string | null;
+  /** Set on a subgroup: its department group, and that group's title. */
+  parentConversationId: string | null;
+  parentTitle: string | null;
+  /** Subgroups of a department group that the reader belongs to, sorted by title; empty otherwise. */
+  subgroups: { id: string; title: string }[];
   createdByUserId: string | null;
   createdAt: string;
   updatedAt: string;

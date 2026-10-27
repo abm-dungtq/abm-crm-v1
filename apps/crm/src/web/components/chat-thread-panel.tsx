@@ -3,11 +3,13 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useActor } from '../actor-context';
 import { ApiFailure, api } from '../api';
 import { useChatSocketConnected } from '../chat-socket';
+import { canCloseTopic } from '../chat-tree';
 import type {
   ChatConversationDetail,
   ChatMessage,
   ChatThreadDetail,
   ChatThreadSubscriptionState,
+  ChatThreadSummary,
 } from '../types';
 import { ChatComposer, useAgentThinking, useDebouncedMarkRead } from './chat-composer';
 import { ChatMessageItem, scrollToMessage } from './chat-message-item';
@@ -158,11 +160,35 @@ export function ChatThreadPanel({
     }
   };
 
+  const closeTopicMutation = useMutation<ChatThreadSummary | null, ApiFailure, boolean>({
+    mutationFn: (nextClosed) => api.post(`${threadPath}/close`, { closed: nextClosed }),
+    onSuccess: (summary) => {
+      if (summary) {
+        client.setQueryData<ChatThreadDetail>(['chat', 'thread', rootId], (prev) =>
+          prev ? { ...prev, thread: summary } : prev,
+        );
+      }
+      void client.invalidateQueries({ queryKey: ['chat', 'thread', rootId] });
+      void client.invalidateQueries({ queryKey: ['chat', conversationId] });
+      void client.invalidateQueries({ queryKey: ['chat', 'threads'] });
+    },
+  });
+
   const thread = data?.thread ?? null;
   const following = thread?.following ?? false;
   const muted = thread?.muted ?? false;
   const closed = thread?.closed ?? false;
   const showAlsoSend = conversationMode === 'chat' && !(thread?.isTopic ?? false);
+  const rootAuthorUserId = data?.root.authorKind === 'user' ? data.root.authorUserId : null;
+  const showCloseTopic = conv ? canCloseTopic(thread, rootAuthorUserId, conv, actor) : false;
+  const toggleTopicClosed = () => {
+    const nextClosed = !closed;
+    const question = nextClosed
+      ? 'Đóng chủ đề này? Mọi người vẫn đọc được nhưng không trả lời thêm.'
+      : 'Mở lại chủ đề này để mọi người trả lời tiếp?';
+    if (!window.confirm(question)) return;
+    closeTopicMutation.mutate(nextClosed);
+  };
 
   const renderMessage = (m: ChatMessage) => (
     <ChatMessageItem
@@ -194,7 +220,7 @@ export function ChatThreadPanel({
           </button>
         )}
         <div className="truncate" style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontWeight: 600 }}>Chuỗi</div>
+          <div style={{ fontWeight: 600 }}>{thread?.isTopic ? 'Chủ đề' : 'Chuỗi'}</div>
           <div className="small muted truncate" title={conversationTitle}>
             {conversationTitle}
           </div>
@@ -217,6 +243,16 @@ export function ChatThreadPanel({
             >
               {following && muted ? 'Bật thông báo' : 'Tắt thông báo'}
             </button>
+            {showCloseTopic && (
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={closeTopicMutation.isPending}
+                onClick={toggleTopicClosed}
+              >
+                {closed ? 'Mở lại' : 'Đóng chủ đề'}
+              </button>
+            )}
           </>
         )}
         {!isPhone && (
@@ -243,7 +279,7 @@ export function ChatThreadPanel({
       ) : (
         <>
           <div ref={bodyRef} className="inbox-messages" aria-label="Tin gốc và các trả lời">
-            <FormError error={subscriptionMutation.error ?? loadOlderMutation.error} />
+            <FormError error={subscriptionMutation.error ?? closeTopicMutation.error ?? loadOlderMutation.error} />
             <ol className="msg-list">
               {renderMessage(data.root)}
             </ol>

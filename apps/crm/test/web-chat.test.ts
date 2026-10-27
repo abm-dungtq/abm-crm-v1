@@ -1,5 +1,14 @@
 import { describe, expect, test } from 'vitest';
 import { chatLink, formatThreadTime, parseChatSearch, replierInitials } from '../src/web/chat-links';
+import {
+  buildChatTree,
+  canCloseTopic,
+  canCreateSubgroup,
+  canManageMembers,
+  canSwitchMode,
+  type ChatTreeActor,
+} from '../src/web/chat-tree';
+import type { ChatConversationDetail, ChatConversationSummary } from '../src/web/types';
 
 describe('chatLink', () => {
   test('encodes the conversation id and adds no query without a target', () => {
@@ -56,5 +65,131 @@ describe('formatThreadTime', () => {
   test('returns an empty string for a missing or invalid time', () => {
     expect(formatThreadTime(null)).toBe('');
     expect(formatThreadTime('not a date', '2026-10-26T16:45:00Z')).toBe('');
+  });
+});
+
+function summary(overrides: Partial<ChatConversationSummary> & { id: string }): ChatConversationSummary {
+  return {
+    kind: 'group',
+    title: overrides.id,
+    agentReadable: false,
+    lastMessage: '',
+    lastMessageAt: null,
+    updatedAt: '2026-10-01T00:00:00Z',
+    unread: 0,
+    threadUnread: 0,
+    mode: 'chat',
+    departmentId: null,
+    parentConversationId: null,
+    parentTitle: null,
+    system: false,
+    ...overrides,
+  };
+}
+
+function detail(overrides: Partial<ChatConversationDetail> = {}): ChatConversationDetail {
+  return {
+    id: 'g-1',
+    kind: 'group',
+    title: 'Nhóm',
+    taskId: null,
+    system: false,
+    agentReadable: false,
+    mode: 'chat',
+    departmentId: null,
+    parentConversationId: null,
+    parentTitle: null,
+    subgroups: [],
+    createdByUserId: 'u-owner',
+    createdAt: '2026-10-01T00:00:00Z',
+    updatedAt: '2026-10-01T00:00:00Z',
+    lastMessageAt: null,
+    members: [
+      { id: 'u-owner', name: 'Chủ nhóm', role: 'owner' },
+      { id: 'u-member', name: 'Thành viên', role: 'member' },
+    ],
+    ...overrides,
+  };
+}
+
+const owner: ChatTreeActor = { id: 'u-owner', role: 'sale' };
+const member: ChatTreeActor = { id: 'u-member', role: 'sale' };
+const director: ChatTreeActor = { id: 'u-dir', role: 'director' };
+const admin: ChatTreeActor = { id: 'u-admin', role: 'admin' };
+
+describe('buildChatTree', () => {
+  const tree = buildChatTree([
+    summary({ id: 'dm-1', kind: 'direct', lastMessageAt: '2026-10-05T00:00:00Z' }),
+    summary({ id: 'sub-a', parentConversationId: 'dept:kd', parentTitle: 'Kinh doanh', lastMessageAt: '2026-10-02T00:00:00Z' }),
+    summary({ id: 'dept:kd', title: 'Kinh doanh', departmentId: 'kd', system: true }),
+    summary({ id: 'sub-b', parentConversationId: 'dept:kd', parentTitle: 'Kinh doanh', lastMessageAt: '2026-10-01T00:00:00Z', unread: 2 }),
+    summary({ id: 'sub-orphan', parentConversationId: 'dept:dt', parentTitle: 'Đào tạo' }),
+    summary({ id: 'inbox', title: 'Inbox', system: true }),
+    summary({ id: 'g-old', lastMessageAt: '2026-10-01T00:00:00Z' }),
+    summary({ id: 'g-new', lastMessageAt: '2026-10-04T00:00:00Z' }),
+    summary({ id: 'g-unread', lastMessageAt: '2026-09-01T00:00:00Z', unread: 1 }),
+  ]);
+
+  test('nests subgroups under their department group, unread first', () => {
+    const kd = tree.departments.find((d) => d.parentId === 'dept:kd');
+    expect(kd?.group?.id).toBe('dept:kd');
+    expect(kd?.title).toBe('Kinh doanh');
+    expect(kd?.children.map((c) => c.id)).toEqual(['sub-b', 'sub-a']);
+  });
+
+  test('lists an orphan subgroup under a header with the parent title', () => {
+    const dt = tree.departments.find((d) => d.parentId === 'dept:dt');
+    expect(dt).toMatchObject({ group: null, title: 'Đào tạo' });
+    expect(dt?.children.map((c) => c.id)).toEqual(['sub-orphan']);
+  });
+
+  test('sorts departments by Vietnamese title', () => {
+    expect(tree.departments.map((d) => d.title)).toEqual(['Đào tạo', 'Kinh doanh']);
+  });
+
+  test('puts Inbox in system, directs apart, and orders normal groups by unread then recency', () => {
+    expect(tree.system.map((c) => c.id)).toEqual(['inbox']);
+    expect(tree.directs.map((c) => c.id)).toEqual(['dm-1']);
+    expect(tree.groups.map((c) => c.id)).toEqual(['g-unread', 'g-new', 'g-old']);
+  });
+});
+
+describe('group permissions', () => {
+  test('canSwitchMode: owner, director and admin; never a member or the Inbox group', () => {
+    expect(canSwitchMode(detail(), owner)).toBe(true);
+    expect(canSwitchMode(detail(), member)).toBe(false);
+    expect(canSwitchMode(detail(), director)).toBe(true);
+    expect(canSwitchMode(detail({ system: true }), admin)).toBe(false);
+    expect(canSwitchMode(detail({ system: true, departmentId: 'kd' }), owner)).toBe(true);
+    expect(canSwitchMode(detail({ kind: 'direct' }), admin)).toBe(false);
+  });
+
+  test('canManageMembers: false for department and Inbox groups', () => {
+    expect(canManageMembers(detail(), owner)).toBe(true);
+    expect(canManageMembers(detail(), member)).toBe(false);
+    expect(canManageMembers(detail(), admin)).toBe(true);
+    expect(canManageMembers(detail({ system: true, departmentId: 'kd' }), owner)).toBe(false);
+    expect(canManageMembers(detail({ system: true }), admin)).toBe(false);
+  });
+
+  test('canCreateSubgroup: a member of the department group, or a director or admin', () => {
+    const dept = summary({ id: 'dept:kd', departmentId: 'kd', system: true });
+    expect(canCreateSubgroup(dept, member)).toBe(true);
+    expect(canCreateSubgroup(null, member)).toBe(false);
+    expect(canCreateSubgroup(null, admin)).toBe(true);
+    expect(canCreateSubgroup(null, director)).toBe(true);
+    expect(canCreateSubgroup(summary({ id: 'g-1' }), admin)).toBe(false);
+  });
+
+  test('canCloseTopic: the root author, the owner, a director or an admin, and only for a topic', () => {
+    const topic = { isTopic: true };
+    const other: ChatTreeActor = { id: 'u-other', role: 'sale' };
+    const conv = detail({ members: [...detail().members, { id: 'u-other', name: 'Khác', role: 'member' }] });
+    expect(canCloseTopic(topic, 'u-member', conv, member)).toBe(true);
+    expect(canCloseTopic(topic, 'u-member', conv, owner)).toBe(true);
+    expect(canCloseTopic(topic, 'u-member', conv, other)).toBe(false);
+    expect(canCloseTopic(topic, null, conv, admin)).toBe(true);
+    expect(canCloseTopic({ isTopic: false }, 'u-member', conv, member)).toBe(false);
+    expect(canCloseTopic(null, 'u-member', conv, owner)).toBe(false);
   });
 });
