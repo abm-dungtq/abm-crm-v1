@@ -157,6 +157,28 @@ describe('chat threads', () => {
     expect(await notificationsOf('u-huy')).toEqual([]);
   });
 
+  test('the list preview ignores a thread-only reply but shows a reply also sent to the group', async () => {
+    const g = await groupG();
+    const root = await post('u-lan', g, 'Tin gốc');
+    await tick();
+    await post('u-long', g, 'Chỉ trong chuỗi', { threadRootId: root.id });
+    expect((await conversationOf('u-huy', g)).lastMessage).toBe('Tin gốc');
+
+    await tick();
+    await post('u-long', g, 'Gửi cả nhóm', { threadRootId: root.id, alsoSendToMain: true });
+    expect((await conversationOf('u-huy', g)).lastMessage).toBe('Gửi cả nhóm');
+  });
+
+  test('each conversation in the list carries the caller\'s read marker', async () => {
+    const g = await groupG();
+    await post('u-lan', g, 'Tin gốc');
+    expect((await conversationOf('u-huy', g)).lastReadAt).toBeNull();
+
+    const at = new Date(Date.now() - 1000).toISOString();
+    expect((await call('u-huy', 'POST', `/chat/conversations/${g}/read`, { at })).status).toBe(200);
+    expect((await conversationOf('u-huy', g)).lastReadAt).toBe(at);
+  });
+
   test('thread unread counts in the thread list and the badge, not in the main flow, until the thread is read', async () => {
     const g = await groupG();
     const root = await post('u-lan', g, 'Tin gốc');

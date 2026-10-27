@@ -117,4 +117,16 @@ describe('task markers', () => {
     expect(drafts[0]!.title).toHaveLength(200);
     expect(drafts[0]!.description).toHaveLength(5000);
   });
+
+  test('keys are read with spaces around them, and hostile lines are parsed in linear time', () => {
+    expect(extractTaskDrafts('[TASK]\n   Tiêu đề   :  Gọi khách \n[/TASK]', members).drafts[0]).toMatchObject({ title: 'Gọi khách' });
+    const timed = (text: string) => {
+      const start = performance.now();
+      extractTaskDrafts(text, members);
+      return performance.now() - start;
+    };
+    expect(timed(`[TASK]\n${' '.repeat(10_000)}x\n[/TASK]`)).toBeLessThan(50);
+    expect(timed(`[TASK]\n${'a '.repeat(5000)}\ntitle: x\n[/TASK]`)).toBeLessThan(50);
+    expect(timed(`[task:${'] '.repeat(5000)}x`)).toBeLessThan(50);
+  });
 });

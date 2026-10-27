@@ -109,6 +109,8 @@ export interface ChatConversationSummary {
   parentTitle: string | null;
   /** A system group (Inbox, department group): members follow the org chart, nobody edits them by hand. */
   system: boolean;
+  /** When the caller last read this conversation (ISO), or null if never. */
+  lastReadAt: string | null;
 }
 
 export type ChatEvent =
@@ -131,35 +133,27 @@ export interface ThreadRootRow {
   is_topic: number | null;
 }
 
-export function parseMentions(body: string): string[] {
+/**
+ * One mention token, `@[Name](user:<id>)` or `@[Name](agent:<id>)`: group 1 is the name, 2 the kind, 3 the id. The name
+ * and the id are length-bounded, so scanning a message full of unclosed `@[` or `(user:` stays linear in its length.
+ */
+export const MENTION_SOURCE = String.raw`@\[([^\]]{1,200})\]\((user|agent):([^)\s]{1,128})\)`;
+const mentionTokens = (body: string) => body.matchAll(new RegExp(MENTION_SOURCE, 'g'));
+
+function mentionIds(body: string, kind?: 'user' | 'agent'): string[] {
   const ids = new Set<string>();
-  const re = /@\[[^\]]+\]\((?:user|agent):([^)\s]+)\)/g;
-  for (const match of body.matchAll(re)) {
-    if (match[1]) ids.add(match[1]);
+  for (const match of mentionTokens(body)) {
+    if (match[3] && (!kind || match[2] === kind)) ids.add(match[3]);
   }
   return [...ids];
 }
 
-export function parseUserMentions(body: string): string[] {
-  const ids = new Set<string>();
-  const re = /@\[[^\]]+\]\(user:([^)\s]+)\)/g;
-  for (const match of body.matchAll(re)) {
-    if (match[1]) ids.add(match[1]);
-  }
-  return [...ids];
-}
-
-export function parseAgentMentions(body: string): string[] {
-  const ids = new Set<string>();
-  const re = /@\[[^\]]+\]\(agent:([^)\s]+)\)/g;
-  for (const match of body.matchAll(re)) {
-    if (match[1]) ids.add(match[1]);
-  }
-  return [...ids];
-}
+export const parseMentions = (body: string): string[] => mentionIds(body);
+export const parseUserMentions = (body: string): string[] => mentionIds(body, 'user');
+export const parseAgentMentions = (body: string): string[] => mentionIds(body, 'agent');
 
 export function renderMentionText(body: string): string {
-  return body.replace(/@\[([^\]]+)\]\((?:user|agent):[^)\s]+\)/g, '@$1');
+  return body.replace(new RegExp(MENTION_SOURCE, 'g'), '@$1');
 }
 
 /** Display name of a message author, with the generic names for agents and the system when no row is joined. */
@@ -315,8 +309,10 @@ export async function listConversations(db: D1Database, actor: Actor): Promise<C
       (SELECT CASE WHEN lm.deleted_at IS NOT NULL THEN '' ELSE SUBSTR(lm.body, 1, 120) END
        FROM chat_message lm
        WHERE lm.conversation_id = c.id
+         AND (lm.thread_root_id IS NULL OR lm.also_in_main = 1)
        ORDER BY lm.created_at DESC, lm.id DESC
        LIMIT 1) AS last_message,
+      cm.last_read_at,
       (SELECT COUNT(*)
        FROM chat_message um
        WHERE um.conversation_id = c.id
@@ -349,6 +345,7 @@ export async function listConversations(db: D1Database, actor: Actor): Promise<C
       parent_title: string | null;
       system_key: string | null;
       last_message: string | null;
+      last_read_at: string | null;
       unread: number;
       thread_unread: number;
     }>();
@@ -368,6 +365,7 @@ export async function listConversations(db: D1Database, actor: Actor): Promise<C
     parentConversationId: r.parent_conversation_id,
     parentTitle: r.parent_title,
     system: r.system_key !== null,
+    lastReadAt: r.last_read_at,
   }));
 }
 

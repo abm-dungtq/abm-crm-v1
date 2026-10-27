@@ -1,6 +1,8 @@
 import { env, type D1Migration } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import seedSql from '../seed/demo.sql?raw';
+import { parseMentions, renderMentionText } from '../src/worker/chat';
+import { draftTitleFrom } from '../src/worker/chat-tasks';
 import { claimCommands } from '../src/worker/inbox/dispatcher';
 import app from '../src/worker/index';
 import { resetDb } from './helpers/reset-db';
@@ -94,18 +96,21 @@ async function agentDraftMessage(convId: string, source: unknown, requestedBy = 
 }
 
 describe('task from chat', () => {
-  test('a manual draft from a message takes its first line as title and its mentioned members', async () => {
+  test('a manual draft from a message takes a clean first line as title and the one mentioned member as assignee', async () => {
     const g = await groupG();
-    const msg = await post('u-lan', g, 'Gửi báo giá cho @[Hùng](user:u-hung) trước thứ 6\nChi tiết gửi sau');
+    const msg = await post('u-lan', g, 'Gửi báo giá cho @[Hùng](user:u-hung) trước thứ 6 nhé ạ.\nChi tiết gửi sau');
     const res = await drafts('u-lan', g, { messageId: msg, scope: 'message' });
     expect(res.status).toBe(200);
     expect(res.json.data.mode).toBe('manual');
     const draft = res.json.data.draft;
-    expect(draft.title).toBe('Gửi báo giá cho @Hùng trước thứ 6');
-    expect(draft.title.startsWith('Gửi báo giá')).toBe(true);
-    expect(draft.description).toBe('Gửi báo giá cho @Hùng trước thứ 6\nChi tiết gửi sau');
-    expect(draft.memberUserIds).toEqual(['u-hung']);
-    expect(draft).toMatchObject({ assigneeUserId: null, dueDate: null, source: { conversationId: g, messageId: msg, scope: 'message' } });
+    expect(draft.title).toBe('Gửi báo giá cho Hùng trước thứ 6');
+    expect(draft.description).toBe('Gửi báo giá cho @Hùng trước thứ 6 nhé ạ.\nChi tiết gửi sau');
+    expect(draft).toMatchObject({
+      assigneeUserId: 'u-hung',
+      memberUserIds: [],
+      dueDate: null,
+      source: { conversationId: g, messageId: msg, scope: 'message' },
+    });
 
     // Only group and direct chats, live messages, and thread roots for a thread draft.
     const reply = await post('u-long', g, 'Trả lời', { threadRootId: msg });
@@ -115,7 +120,7 @@ describe('task from chat', () => {
     expect((await drafts('u-huy', g, { messageId: msg, scope: 'message' })).status).toBe(404);
   });
 
-  test('a manual draft from a thread lists the root first, then each reply with its time and author', async () => {
+  test('a manual draft from a thread lists the root first, then each reply with its author and no timestamp', async () => {
     const g = await groupG();
     const root = await post('u-lan', g, 'Tin gốc về báo giá');
     await post('u-long', g, 'Ý một', { threadRootId: root });
@@ -126,12 +131,88 @@ describe('task from chat', () => {
     expect(res.status).toBe(200);
     const lines = (res.json.data.draft.description as string).split('\n');
     expect(lines).toHaveLength(4);
-    for (const line of lines) expect(line).toMatch(/^\d{2}:\d{2} \d{2}\/\d{2} .+: .+$/);
-    expect(lines[0]).toContain('Đỗ Ngọc Lan: Tin gốc về báo giá');
-    expect(lines[1]).toContain('Vũ Đức Long: Ý một');
-    expect(lines[2]).toContain('Phạm Văn Hùng: Ý hai có hai dòng');
+    for (const line of lines) expect(line).not.toMatch(/\d{2}:\d{2}/);
+    expect(lines[0]).toBe('Đỗ Ngọc Lan: Tin gốc về báo giá');
+    expect(lines[1]).toBe('Vũ Đức Long: Ý một');
+    expect(lines[2]).toBe('Phạm Văn Hùng: Ý hai có hai dòng');
     expect(res.json.data.draft.title).toBe('Tin gốc về báo giá');
-    expect(res.json.data.draft.memberUserIds).toEqual(['u-long']);
+    expect(res.json.data.draft.assigneeUserId).toBe('u-long');
+    expect(res.json.data.draft.memberUserIds).toEqual([]);
+  });
+
+  test('a thread draft quotes the root and only the newest 5 replies, marking the older ones as dropped', async () => {
+    const g = await groupG();
+    const root = await post('u-lan', g, '@[Vũ Đức Long](user:u-long) @[Phạm Văn Hùng](user:u-hung) chuẩn bị hồ sơ thầu nha!!');
+    const base = Date.now();
+    for (let i = 1; i <= 7; i += 1) {
+      const id = await post(i % 2 ? 'u-long' : 'u-hung', g, `Ý số ${i}`, { threadRootId: root });
+      // Distinct times, so the order never depends on two posts landing in the same millisecond.
+      await db.prepare('UPDATE chat_message SET created_at = ? WHERE id = ?').bind(new Date(base + i * 1000).toISOString(), id).run();
+    }
+
+    const res = await drafts('u-lan', g, { messageId: root, scope: 'thread' });
+    expect(res.status).toBe(200);
+    const draft = res.json.data.draft;
+    const lines = (draft.description as string).split('\n');
+    expect(lines).toHaveLength(7);
+    expect(lines[0]).toContain('Đỗ Ngọc Lan: @Vũ Đức Long @Phạm Văn Hùng chuẩn bị hồ sơ thầu nha!!');
+    expect(lines[1]).toBe('…');
+    expect(lines.slice(2).map((l) => l.replace(/^.*: /, ''))).toEqual(['Ý số 3', 'Ý số 4', 'Ý số 5', 'Ý số 6', 'Ý số 7']);
+    // Addressed people are dropped from the title; with two mentioned there is no single assignee.
+    expect(draft.title).toBe('Chuẩn bị hồ sơ thầu');
+    expect(draft.assigneeUserId).toBeNull();
+    expect(draft.memberUserIds).toEqual(['u-long', 'u-hung']);
+  });
+
+  test('task titles drop addressed mentions, trailing punctuation and closing particles', () => {
+    expect(draftTitleFrom('@[Bùi Quang Huy](user:u-huy) gửi giúp em báo giá nhé ạ.')).toBe('Gửi giúp em báo giá');
+    expect(draftTitleFrom('Anh @[Huy](user:u-huy) gọi lại cho khách nha')).toBe('Anh Huy gọi lại cho khách');
+    expect(draftTitleFrom('Chốt lịch họp thứ 6 @[Lan](user:u-lan)')).toBe('Chốt lịch họp thứ 6');
+    expect(draftTitleFrom('Kiểm tra lại hợp đồng ạ!!! ')).toBe('Kiểm tra lại hợp đồng');
+    // A word that only ends like a particle is kept.
+    expect(draftTitleFrom('Dọn kho nhà')).toBe('Dọn kho nhà');
+    expect(draftTitleFrom('Hỏi giá phòng Gia Nha')).toBe('Hỏi giá phòng Gia Nha');
+    // A first line with only a mention is skipped.
+    expect(draftTitleFrom('@[Huy](user:u-huy)\nxem giúp em file này')).toBe('Xem giúp em file này');
+    expect(draftTitleFrom('  ạ. ')).toBe('Việc từ chat');
+    expect(draftTitleFrom('')).toBe('Việc từ chat');
+    const long = draftTitleFrom(`${'chữ '.repeat(80)}nhé`);
+    expect(long.length).toBeLessThanOrEqual(200);
+    expect(long.endsWith('…')).toBe(true);
+    // Mentions separated by commas, dashes and spaces, at both ends.
+    expect(draftTitleFrom('@[A](user:a), @[B](user:b) – gửi hồ sơ @[C](user:c) ; @[D](user:d)')).toBe('Gửi hồ sơ');
+    expect(draftTitleFrom('@[A](user:a) @[B](user:b)   @[C](user:c)\nviệc thật')).toBe('Việc thật');
+  });
+
+  test('task titles are built in linear time from hostile message bodies', () => {
+    const timed = (body: string) => {
+      const start = performance.now();
+      draftTitleFrom(body);
+      return performance.now() - start;
+    };
+    const text = 'chữ '.repeat(2500); // 10 kB
+    const mentions = Array.from({ length: 200 }, (_, i) => `@[Người ${i}](user:u-${i})`);
+    // 200 mentions plus 10 kB of text, with the gaps that used to backtrack: runs of spaces, then a word.
+    expect(timed(`${mentions.join('   ')} ${text}`)).toBeLessThan(50);
+    expect(timed(`${text}${mentions.join(' ,  ')}x`)).toBeLessThan(50);
+    expect(timed(`${mentions.join('   ')}${text}${mentions.join('   ')}`)).toBeLessThan(50);
+    // Unclosed mention starts and long whitespace runs.
+    expect(timed('@['.repeat(5000))).toBeLessThan(50);
+    expect(timed(`${'@[a](user:'.repeat(1000)}x`)).toBeLessThan(50);
+    expect(timed(`x${' '.repeat(10_000)}y${' ạ'.repeat(3000)}`)).toBeLessThan(50);
+    expect(timed(`${'.'.repeat(10_000)}x${'!'.repeat(10_000)}`)).toBeLessThan(50);
+  });
+
+  test('mention parsing stays linear on unclosed mention markup and still reads real mentions', () => {
+    const hostile = ['@['.repeat(5000), `${'@[a](user:'.repeat(1000)}x`, `@[${'a'.repeat(10_000)}`];
+    for (const body of hostile) {
+      const start = performance.now();
+      parseMentions(body);
+      renderMentionText(body);
+      expect(performance.now() - start).toBeLessThan(50);
+    }
+    expect(parseMentions('@[Lan](user:u-lan) @[Lan](user:u-lan) @[Bot](agent:a-1)')).toEqual(['u-lan', 'a-1']);
+    expect(renderMentionText('Chào @[Bùi Quang Huy](user:u-huy)!')).toBe('Chào @Bùi Quang Huy!');
   });
 
   test('creating with a source stores it, notifies the assignee and the members, and posts one card', async () => {

@@ -1,4 +1,5 @@
 import {
+  MENTION_SOURCE,
   authorNameOrDefault,
   insertMessage,
   publish,
@@ -21,7 +22,8 @@ export interface TaskSourceRef {
 export interface ManualTaskDraft {
   title: string;
   description: string;
-  assigneeUserId: null;
+  /** The one member the source mentions, when it mentions exactly one; otherwise null. */
+  assigneeUserId: string | null;
   memberUserIds: string[];
   dueDate: null;
   source: TaskSourceRef;
@@ -30,31 +32,118 @@ export interface ManualTaskDraft {
 const TITLE_MAX_CHARS = 200;
 const DESCRIPTION_MAX_CHARS = 5000;
 const THREAD_REPLY_LIMIT = 50;
+/** Replies quoted in a thread draft's description, the newest ones. */
+const DESCRIPTION_REPLY_LIMIT = 5;
 const MEMBER_LIMIT = 20;
-const VN_OFFSET_MS = 7 * 3600_000;
 
-const flatten = (text: string) => text.replace(/\s*[\r\n]+\s*/g, ' ').trim();
+/** Joins the lines of a message into one line; whitespace around line breaks becomes one space. Linear: no regex backtracking. */
+const flatten = (text: string) =>
+  text.split(/[\r\n]+/).map((line) => line.trim()).filter(Boolean).join(' ');
 
-/** `HH:mm DD/MM` in Vietnam time (UTC+7, no daylight saving). */
-function vnStamp(iso: string): string {
-  const d = new Date(Date.parse(iso) + VN_OFFSET_MS);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} ${pad(d.getUTCDate())}/${pad(d.getUTCMonth() + 1)}`;
+/** A character allowed between addressed mentions: "@A, @B: …", "@A – …". */
+const MENTION_GAP_CHAR = /[\s,:;–-]/u;
+const SPACE_CHAR = /\s/u;
+/** Trailing punctuation stripped from a title, one character at a time. */
+const TRAILING_PUNCT_CHAR = /[\s.,!?;:…~]/u;
+/**
+ * Closing courtesy particles, stripped only as their own lower-case word at the end, so a capitalised name such as
+ * "Gia Nha" is kept.
+ */
+const CLOSING_PARTICLES = ['ạ', 'nhé', 'nha'] as const;
+
+interface MentionSpan { start: number; end: number; name: string }
+
+function mentionSpans(line: string): MentionSpan[] {
+  return [...line.matchAll(new RegExp(MENTION_SOURCE, 'gu'))].map((m) => ({
+    start: m.index,
+    end: m.index + m[0].length,
+    name: m[1]!,
+  }));
 }
 
-/** First non-empty line, cut on a word boundary to at most 200 characters (with `…` when cut). */
-export function draftTitleFrom(text: string): string {
-  const line = text.split(/\r?\n/).map((l) => l.trim()).find(Boolean) ?? '';
-  if (!line) return 'Việc từ chat';
+/** The first index at or after `from` (or, going back, the end index at or before `from`) whose character is not in `set`. */
+function skipForward(text: string, from: number, set: RegExp): number {
+  let i = from;
+  while (i < text.length && set.test(text[i]!)) i += 1;
+  return i;
+}
+function skipBack(text: string, from: number, set: RegExp): number {
+  let i = from;
+  while (i > 0 && set.test(text[i - 1]!)) i -= 1;
+  return i;
+}
+
+/**
+ * Drops the mentions a line is addressed with (a run of mentions at its start or its end, with the separators between
+ * them) and turns the mentions inside the sentence into plain names. One pass over the mention spans, so it is linear.
+ */
+function stripAddressedMentions(line: string): string {
+  const spans = mentionSpans(line);
+  let first = 0;
+  let start = skipForward(line, 0, SPACE_CHAR);
+  while (first < spans.length && spans[first]!.start === start) {
+    start = skipForward(line, spans[first]!.end, MENTION_GAP_CHAR);
+    first += 1;
+  }
+  let last = spans.length;
+  let end = skipBack(line, line.length, SPACE_CHAR);
+  while (last > first && spans[last - 1]!.end === end) {
+    end = skipBack(line, spans[last - 1]!.start, MENTION_GAP_CHAR);
+    last -= 1;
+  }
+  if (end <= start) return '';
+  let out = '';
+  let at = start;
+  for (let i = first; i < last; i += 1) {
+    const span = spans[i]!;
+    out += line.slice(at, span.start) + span.name;
+    at = span.end;
+  }
+  return out + line.slice(at, end);
+}
+
+/** Strips trailing punctuation and closing particles, repeatedly, by moving one end index: linear in the title. */
+function stripTrailingNoise(title: string): string {
+  let end = title.length;
+  for (;;) {
+    end = skipBack(title, end, TRAILING_PUNCT_CHAR);
+    const particle = CLOSING_PARTICLES.find((p) =>
+      end >= p.length
+      && title.startsWith(p, end - p.length)
+      && (end === p.length || SPACE_CHAR.test(title[end - p.length - 1]!)));
+    if (!particle) return title.slice(0, end);
+    end -= particle.length;
+  }
+}
+
+/** Cuts to at most 200 characters on a word boundary, with `…` when cut. */
+function capTitle(line: string): string {
   if (line.length <= TITLE_MAX_CHARS) return line;
   const head = line.slice(0, TITLE_MAX_CHARS - 1);
   const space = head.lastIndexOf(' ');
   return `${(space > 0 ? head.slice(0, space) : head).trimEnd()}…`;
 }
 
-/** Root line first, then as many of the newest replies as fit in 5000 characters; `…` marks dropped older replies. */
-function threadDescription(rootLine: string, replyLines: string[]): string {
-  const full = [rootLine, ...replyLines].join('\n');
+/**
+ * A task title from a raw message body: its first line with words, without the people it is addressed to (mentions at
+ * the start or the end), with mentions inside the sentence kept as plain names, and without trailing punctuation or
+ * closing particles ("ạ", "nhé", "nha"). "@Huy gửi báo giá giúp em nhé ạ." gives "Gửi báo giá giúp em".
+ */
+export function draftTitleFrom(body: string): string {
+  const line = body
+    .normalize('NFC')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .find((l) => l.replace(new RegExp(MENTION_SOURCE, 'gu'), '').trim()) ?? '';
+  const title = stripTrailingNoise(stripAddressedMentions(line).replace(/\s+/g, ' ').trim()).trim();
+  if (!title) return 'Việc từ chat';
+  const first = Array.from(title)[0]!;
+  return capTitle(`${first.toLocaleUpperCase('vi-VN')}${title.slice(first.length)}`);
+}
+
+/** Root line first, then as many of the given reply lines as fit in 5000 characters; `…` marks dropped older replies. */
+function threadDescription(rootLine: string, replyLines: string[], olderDropped: boolean): string {
+  const full = [rootLine, ...(olderDropped ? ['…'] : []), ...replyLines].join('\n');
   if (full.length <= DESCRIPTION_MAX_CHARS) return full;
   const kept: string[] = [];
   let length = rootLine.length + 2; // the root line and the `…` line
@@ -77,8 +166,8 @@ interface DraftMessageRow {
 }
 
 /**
- * Builds the manual draft from a message (`scope 'message'`) or a thread (the root plus its newest 50 replies) in one
- * `db.batch`. The caller has already checked that the actor can read the conversation and that the message is a live
+ * Builds the manual draft from a message (`scope 'message'`) or a thread in one `db.batch`. A thread draft describes the
+ * root and its newest 5 replies; the people come from the mentions in the root and its newest 50 replies. The caller has already checked that the actor can read the conversation and that the message is a live
  * message of it (a top-level one for `scope 'thread'`). Null when the message is gone.
  */
 export async function buildManualTaskDraft(
@@ -110,26 +199,29 @@ export async function buildManualTaskDraft(
   const ordered = [root, ...rows.slice(1).reverse()];
 
   const memberSet = new Set(((membersRes?.results ?? []) as { user_id: string }[]).map((r) => r.user_id));
-  const memberUserIds: string[] = [];
+  // Every member the source mentions, the actor included, in order of first mention.
+  const mentioned: string[] = [];
   for (const row of ordered) {
     for (const uid of row.mentions_json ? (JSON.parse(row.mentions_json) as string[]) : []) {
-      if (uid !== actorId && memberSet.has(uid) && !memberUserIds.includes(uid) && memberUserIds.length < MEMBER_LIMIT) {
-        memberUserIds.push(uid);
-      }
+      if (memberSet.has(uid) && !mentioned.includes(uid)) mentioned.push(uid);
     }
   }
+  const assigneeUserId = mentioned.length === 1 ? mentioned[0]! : null;
+  const memberUserIds = mentioned.filter((uid) => uid !== actorId && uid !== assigneeUserId).slice(0, MEMBER_LIMIT);
 
-  const rootText = renderMentionText(root.body);
+  // "Name: text", one line per message. No timestamps: the task links back to the chat, where the times are.
   const lineOf = (row: DraftMessageRow) =>
-    `${vnStamp(row.created_at)} ${authorNameOrDefault(row.author_name, row.author_kind) ?? 'Nhân viên'}: ${flatten(renderMentionText(row.body))}`;
+    `${authorNameOrDefault(row.author_name, row.author_kind) ?? 'Nhân viên'}: ${flatten(renderMentionText(row.body))}`;
+  const replies = ordered.slice(1);
+  const quoted = replies.slice(-DESCRIPTION_REPLY_LIMIT).map(lineOf);
   const description = input.scope === 'message'
-    ? rootText.slice(0, DESCRIPTION_MAX_CHARS)
-    : threadDescription(lineOf(root), ordered.slice(1).map(lineOf));
+    ? renderMentionText(root.body).slice(0, DESCRIPTION_MAX_CHARS)
+    : threadDescription(lineOf(root), quoted, replies.length > quoted.length);
 
   return {
-    title: draftTitleFrom(rootText),
+    title: draftTitleFrom(root.body),
     description,
-    assigneeUserId: null,
+    assigneeUserId,
     memberUserIds,
     dueDate: null,
     source: { conversationId: conversation.id, messageId: input.messageId, scope: input.scope },

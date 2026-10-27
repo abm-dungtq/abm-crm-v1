@@ -31,7 +31,17 @@ const EMPTY_BODY = 'Đề xuất công việc:';
 const BLOCK_OPEN_RE = /^\s*\[\s*task\s*\]\s*$/i;
 const BLOCK_CLOSE_RE = /^\s*\[\s*\/\s*task\s*\]\s*$/i;
 const LEGACY_LINE_RE = /^\s*\[\s*task\s*:(.*)\]\s*$/i;
-const KEY_LINE_RE = /^\s*([^:]{1,40}?)\s*:\s*(.*)$/;
+/** A `key: value` line: the key is the trimmed text before the first colon, 1 to 40 characters. */
+const KEY_MAX_CHARS = 40;
+function splitKeyLine(line: string): { key: string; value: string } | null {
+  // indexOf and trim instead of a regex: a pattern with optional spaces on both sides of a lazy key backtracks
+  // quadratically on a long line of spaces without a colon.
+  const colon = line.indexOf(':');
+  if (colon < 0) return null;
+  const key = line.slice(0, colon).trim();
+  if (!key || key.length > KEY_MAX_CHARS) return null;
+  return { key, value: line.slice(colon + 1) };
+}
 
 type Key = 'title' | 'assignee' | 'members' | 'due' | 'description';
 /** Keys compared after `foldText`, so case and diacritics do not matter. */
@@ -121,10 +131,10 @@ function parseLegacyLine(inner: string, members: TaskMarkerMember[]): ParsedTask
 function parseBlock(lines: string[], members: TaskMarkerMember[]): ParsedTaskDraft | null {
   const fields = { title: '', assignee: null as string | null, members: [] as string[], due: null as string | null, description: null as string | null };
   for (let i = 0; i < lines.length; i += 1) {
-    const match = KEY_LINE_RE.exec(lines[i]!);
-    const key = match ? KEY_ALIASES[foldText(match[1]!)] : undefined;
+    const match = splitKeyLine(lines[i]!);
+    const key = match ? KEY_ALIASES[foldText(match.key)] : undefined;
     if (!match || !key) continue;
-    const value = match[2]!.trim();
+    const value = match.value.trim();
     if (key === 'description') {
       fields.description = [value, ...lines.slice(i + 1)].join('\n').replace(/^\n+/, '');
       break;
