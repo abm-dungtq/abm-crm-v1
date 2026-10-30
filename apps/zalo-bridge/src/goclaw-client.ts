@@ -17,10 +17,14 @@ import { GatewayConnection, gatewayWsUrl, type WebSocketFactory, type WebSocketL
  * Only a timeout is retried here; every other failure goes back to the Worker's command lease.
  */
 
-/** Per-attempt timeouts: a short first attempt, then one longer retry. */
-export const GOCLAW_TEXT_ATTEMPTS_MS: readonly number[] = [25_000, 90_000];
-/** Image turns read the image with a tool first, so their first attempt is longer. */
-export const GOCLAW_MEDIA_ATTEMPTS_MS: readonly number[] = [45_000, 90_000];
+/**
+ * Per-attempt timeouts: a first attempt, then one longer retry. The reasoning model behind the sales agent
+ * takes over 30 seconds on one turn in ten, so a shorter first attempt throws away work that was nearly done.
+ * Both attempts together stay well under the 300-second command lease.
+ */
+export const GOCLAW_TEXT_ATTEMPTS_MS: readonly number[] = [60_000, 90_000];
+/** Image turns read the image with a tool first, so their attempts are longer. */
+export const GOCLAW_MEDIA_ATTEMPTS_MS: readonly number[] = [90_000, 120_000];
 const ABORT_TIMEOUT_MS = 5000;
 /** GoClaw rejects request bodies above 1 MiB. */
 const MAX_BODY_BYTES = 1024 * 1024;
