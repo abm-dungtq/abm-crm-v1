@@ -1,0 +1,1 @@
+- [CRM plan format](feedback-crm-plan-format.md) — VN plan.md + EN phases, fullstack-developer per phase, Opus release, never kongming
