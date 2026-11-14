@@ -523,6 +523,23 @@ async function storeUnsentReply(db: D1Database, conversationId: string, prefix: 
 }
 
 /**
+ * Tells the CRM "Inbox" chat group that a direct reply was drafted but dropped because the conversation went to
+ * people while the bot was thinking (for example the bot handed off on one turn while the next turn, such as a
+ * payment receipt, was still being answered). The customer got nothing, so a person has to answer that turn.
+ * `commandId` dedupes the notice, so a replayed result notifies once.
+ */
+async function notifyCancelledReply(db: D1Database, env: Pick<Env, 'APP_URL'>, conv: ConversationRow,
+  origin: string | undefined, commandId: string | undefined, sink: Sink) {
+  const base = linkBase(env.APP_URL, origin);
+  await postInboxNotice(sink, db, {
+    organizationId: conv.organization_id,
+    text: `Bot trả lời bị huỷ vì đã chuyển người: ${conv.display_name ?? conv.external_thread_id} (${conv.account_name}) – khách chưa nhận câu trả lời, xem bản bot soạn trong hội thoại rồi trả lời khách – ${base}/inbox/${conv.id}`,
+    link: `/inbox/${conv.id}`,
+    ...(commandId ? { dedupeKey: `cancelled-reply:${commandId}` } : {}),
+  });
+}
+
+/**
  * Applies a group reply. The direct `botMayReply` rule does not apply here. A reply that may no longer go out
  * is kept as a system note. A handoff marker only notifies the CRM "Inbox" chat group.
  */
@@ -556,7 +573,8 @@ async function applyGroupCompletion(db: D1Database, env: Pick<Env, 'APP_URL'>, c
 /**
  * Applies GoClaw's reply: strips handoff marker lines and sends the remaining text while the bot may still reply
  * (rule 1, re-checked now because the switch or the mode can change while GoClaw thinks). Otherwise the text is
- * kept as a cancelled system note and nothing is sent. A marker hands off only after a reply that was allowed.
+ * kept as a cancelled system note and nothing is sent; when the conversation went to people meanwhile, the CRM
+ * "Inbox" chat group is told that the customer still waits. A marker hands off only after a reply that was allowed.
  * After an allowed reply the customer's own turn is checked as well, so a missing marker can still hand off.
  */
 export async function applyCompletionResult(db: D1Database, env: HandoffCheckEnv, conversationId: string, replyText: string,
@@ -569,9 +587,9 @@ export async function applyCompletionResult(db: D1Database, env: HandoffCheckEnv
   if (conv.kind === 'group') return applyGroupCompletion(db, env, conv, text, marker?.[1]?.trim(), now, origin, payload, sink);
   if (!botMayReply(conv)) {
     if (text) {
-      const prefix = conv.mode !== 'ai' ? CANCELLED_REPLY_PREFIX : BOT_OFF_REPLY_PREFIX;
-      await db.prepare(`INSERT INTO message (id, conversation_id, direction, sender_kind, body, status, created_at)
-        VALUES (?, ?, 'out', 'system', ?, 'failed', ?)`).bind(crypto.randomUUID(), conv.id, prefix + text, now).run();
+      const cancelled = conv.mode !== 'ai';
+      await storeUnsentReply(db, conv.id, cancelled ? CANCELLED_REPLY_PREFIX : BOT_OFF_REPLY_PREFIX, text, now);
+      if (cancelled) await notifyCancelledReply(db, env, conv, origin, payload?.commandId, sink);
     }
     return { workerCommandQueued: false };
   }

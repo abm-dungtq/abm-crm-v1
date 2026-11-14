@@ -631,7 +631,11 @@ export function InboxThread({
     const el = list.current;
     if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   };
-  const failed = messages.data?.filter((m) => m.status === 'failed').length ?? 0;
+  const failed = messages.data?.filter((m) => m.status === 'failed' && m.senderKind !== 'system').length ?? 0;
+  // A bot draft kept as a failed system note (cancelled after a handoff, bot off, or held by the 199k check) never
+  // reached the customer. It only matters until someone answers, so drafts before the last sent message are ignored.
+  const lastSentAt = messages.data?.reduce((at, m) => (m.direction === 'out' && m.status === 'sent' && m.createdAt > at ? m.createdAt : at), '') ?? '';
+  const unsentDrafts = messages.data?.filter((m) => m.status === 'failed' && m.senderKind === 'system' && m.createdAt > lastSentAt).length ?? 0;
   const name = conversationName(conversation);
 
   return (
@@ -673,6 +677,12 @@ export function InboxThread({
         <div className="alert" data-tone="danger" role="alert" style={{ margin: '8px 12px 0' }}>
           <Icon name="alert" />
           <div>{failed} tin gửi lỗi. Kiểm tra tài khoản kênh (có thể đang tạm dừng gửi hoặc mất kết nối) rồi gửi lại.</div>
+        </div>
+      )}
+      {unsentDrafts > 0 && (
+        <div className="alert" data-tone="warn" role="alert" style={{ margin: '8px 12px 0' }}>
+          <Icon name="alert" />
+          <div>Khách chưa được trả lời: {unsentDrafts} câu bot soạn không được gửi (đã chuyển người, bot đang tắt hoặc bị kiểm tra 199k chặn). Xem ghi chú trong hội thoại rồi trả lời khách.</div>
         </div>
       )}
       <div className="inbox-messages" ref={list} onScroll={onScroll}>

@@ -180,13 +180,18 @@ test('a Lark notice still queued from before is failed by the Worker without cal
   expect(JSON.parse(row.result_json)).toEqual({ error: 'UNSUPPORTED_COMMAND' });
 });
 
-test('a reply that arrives after people took over is kept as a cancelled note and not sent', async () => {
+test('a reply that arrives after people took over is kept as a cancelled note, not sent, and the inbox group is told once', async () => {
   await ingest(message());
   const conv = await conversation();
   await db.prepare("UPDATE conversation SET mode = 'human' WHERE id = ?").bind(conv.id).run();
-  await applyCompletionResult(db, { APP_URL }, conv.id, 'Học phí là 5 triệu ạ', undefined, undefined, testSink());
+  await applyCompletionResult(db, { APP_URL }, conv.id, 'Học phí là 5 triệu ạ', undefined, { commandId: 'cmd-1' }, testSink());
+  await applyCompletionResult(db, { APP_URL }, conv.id, 'Học phí là 5 triệu ạ', undefined, { commandId: 'cmd-1' }, testSink());
   expect(await commands('send_zalo')).toHaveLength(0);
   expect((await messages(conv.id)).at(-1)).toMatchObject({ sender_kind: 'system', body: '[Bot trả lời bị huỷ vì đã chuyển người] Học phí là 5 triệu ạ' });
+  const notices = await db.prepare("SELECT body FROM chat_message WHERE conversation_id = 'sys:inbox:org-abm'").all<any>();
+  expect(notices.results).toEqual([{
+    body: `Bot trả lời bị huỷ vì đã chuyển người: Chị Hoa (Số tư vấn 1) – khách chưa nhận câu trả lời, xem bản bot soạn trong hội thoại rồi trả lời khách – ${APP_URL}/inbox/${conv.id}`,
+  }]);
 });
 
 test('a reply that arrives after the customer bot or the account bot was turned off is not sent', async () => {
@@ -201,6 +206,7 @@ test('a reply that arrives after the customer bot or the account bot was turned 
   expect((await outgoing()).filter((m) => m.sender_kind === 'bot')).toHaveLength(0);
   expect(await outgoing()).toEqual([expect.objectContaining({ sender_kind: 'system', status: 'failed', body: '[Bot trả lời bị huỷ vì bot đang tắt] Học phí là 5 triệu ạ' })]);
   expect(await conversation()).toMatchObject({ mode: 'ai' });
+  expect(await db.prepare("SELECT id FROM chat_message WHERE conversation_id = 'sys:inbox:org-abm'").all()).toMatchObject({ results: [] });
 
   await db.prepare('UPDATE customer_bot_switch SET enabled = 0 WHERE id = 1').run();
   await db.prepare("UPDATE channel_account SET bot_enabled = 0 WHERE id = 'ca-1'").run();
