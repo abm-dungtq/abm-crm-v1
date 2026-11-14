@@ -576,11 +576,11 @@ async function applyGroupCompletion(db: D1Database, env: Pick<Env, 'APP_URL'>, c
  * a receipt that arrived right after the bot handed off the previous question. The mode stays as it is; a bot that
  * is switched off still sends nothing.
  */
-function registrationReplyOverridesHandoff(conv: ConversationRow, text: string, handedOff: boolean): boolean {
-  if (conv.channel !== 'zalo_oa' || conv.mode === 'ai' || !text || handedOff) return false;
+function registrationReplyOverridesHandoff(conv: ConversationRow, text: string): boolean {
+  if (conv.channel !== 'zalo_oa' || conv.mode === 'ai' || !text) return false;
   if (conv.agent_key === null || conv.bot_switch !== 0 || conv.bot_enabled !== 1 || conv.kind !== 'direct') return false;
   try {
-    return assertRegistrationPolicyOutput({ reply: text, handoff: false }, conv.registration_policy === 1,
+    return assertRegistrationPolicyOutput(text, conv.registration_policy === 1,
       conv.registration_group_url ? `- Link nhóm Zalo chính xác: ${conv.registration_group_url}` : '');
   } catch (error) {
     if (error instanceof UnsafeRecoveryReplyError) return false;
@@ -603,7 +603,7 @@ export async function applyCompletionResult(db: D1Database, env: HandoffCheckEnv
   const text = replyText.replace(HANDOFF_MARKER_ALL, '').trim();
   const now = new Date().toISOString();
   if (conv.kind === 'group') return applyGroupCompletion(db, env, conv, text, marker?.[1]?.trim(), now, origin, payload, sink);
-  if (!botMayReply(conv) && !registrationReplyOverridesHandoff(conv, text, Boolean(marker))) {
+  if (!botMayReply(conv) && !registrationReplyOverridesHandoff(conv, text)) {
     if (text) {
       const cancelled = conv.mode !== 'ai';
       await storeUnsentReply(db, conv.id, cancelled ? CANCELLED_REPLY_PREFIX : BOT_OFF_REPLY_PREFIX, text, now);
@@ -615,7 +615,7 @@ export async function applyCompletionResult(db: D1Database, env: HandoffCheckEnv
   if (conv.channel === 'zalo_oa' && text) {
     try {
       registrationConfirmed = assertRegistrationPolicyOutput(
-        { reply: text, handoff: Boolean(marker) },
+        text,
         conv.registration_policy === 1,
         conv.registration_group_url ? `- Link nhóm Zalo chính xác: ${conv.registration_group_url}` : '',
       );

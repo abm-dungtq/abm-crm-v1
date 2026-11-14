@@ -7,8 +7,8 @@ const REGISTRATION_GROUP_URL = 'https://zalo.me/g/5fsvz1vdhrewdka7uxuk';
 const trusted = `- Link nhóm Zalo chính xác: ${REGISTRATION_GROUP_URL}`;
 
 /** The live guard reads the group link from trusted instructions, so that line is the default here. */
-const check = (reply: string, enabled: boolean, instructions = trusted, handoff = false) =>
-  assertRegistrationPolicyOutput({ reply, handoff }, enabled, instructions);
+const check = (reply: string, enabled: boolean, instructions = trusted) =>
+  assertRegistrationPolicyOutput(reply, enabled, instructions);
 
 test('authorized registration output requires the named program and exact group link', () => {
   expect(registrationGroupUrl(trusted)).toBe(REGISTRATION_GROUP_URL);
@@ -28,7 +28,7 @@ test('authorized registration output requires the named program and exact group 
     'Anh/chị đã đăng ký thành công chương trình Xây dựng Bộ não thứ hai & Đội quân Trợ lý AI cá nhân hóa và nếu cần hỗ trợ hãy nhắn em.',
   ]) expect(() => check(reply, true)).toThrow(UnsafeRecoveryReplyError);
   // Every 199k turn is the bot's: the configured link may go out on its own, since staff check the payment when they
-  // approve the member into the group. Another link or a handoff with the link is still held back.
+  // approve the member into the group. Another link is still held back.
   for (const reply of [
     `Mời anh/chị vào nhóm ${REGISTRATION_GROUP_URL}`,
     `Dạ em gửi lại link nhóm của chương trình ạ: ${REGISTRATION_GROUP_URL}`,
@@ -36,7 +36,6 @@ test('authorized registration output requires the named program and exact group 
   ]) {
     expect(check(reply, true)).toBe(true);
     expect(() => check(reply, false)).toThrow(UnsafeRecoveryReplyError);
-    expect(() => check(reply, true, trusted, true)).toThrow(UnsafeRecoveryReplyError);
   }
   expect(() => check(`Mời anh/chị vào nhóm ${REGISTRATION_GROUP_URL} hoặc https://zalo.me/g/wrong`, true)).toThrow(UnsafeRecoveryReplyError);
   for (const reply of [
@@ -80,5 +79,4 @@ test('authorized registration output requires the named program and exact group 
     expect(() => check(reply, true)).toThrow(UnsafeRecoveryReplyError);
     expect(check(reply, false)).toBe(false);
   }
-  expect(() => check(valid.reply, true, trusted, true)).toThrow(UnsafeRecoveryReplyError);
 });

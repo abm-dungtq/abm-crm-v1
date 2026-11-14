@@ -55,30 +55,25 @@ function zaloGroupLinks(text: string): string[] {
     ?.map(link => link.replace(/[.,!?;:]+$/u, '')) ?? [];
 }
 
-/** Reply text plus whether the model also asked to hand the conversation to a person. */
-export interface RegistrationPolicyOutput {
-  reply: string;
-  handoff: boolean;
-}
-
 /**
  * Enforces the owner-approved program name/link shape; input qualification remains model-driven. Every 199k turn is
  * answered by the bot: the payment is checked by staff when they approve the member into the Zalo group, so the
- * configured group link may also go out on its own (for example sent again when the customer asks which group).
+ * configured group link may also go out on its own (for example sent again when the customer asks which group), and
+ * a reply that also hands another question to people is still sent before the handoff.
  * Returns true when the reply confirms the registration or carries the configured group link.
  */
 export function assertRegistrationPolicyOutput(
-  output: RegistrationPolicyOutput,
+  reply: string,
   policyEnabled: boolean,
   trustedInstructions = '',
 ): boolean {
-  const normalized = normalizeReply(output.reply);
+  const normalized = normalizeReply(reply);
   const registrationSuccess = hasAffirmativeRegistrationSuccess(normalized);
   const namedProgram = normalized.includes('xay dung bo nao thu hai')
     && normalized.includes('doi quan tro ly ai ca nhan hoa');
   const mentionsTargetProgram = normalized.includes('bo nao thu hai')
     || normalized.includes('doi quan tro ly ai');
-  const groupLinks = zaloGroupLinks(output.reply);
+  const groupLinks = zaloGroupLinks(reply);
   const groupUrl = registrationGroupUrl(trustedInstructions);
   const configuredGroups = new Set(zaloGroupLinks(trustedInstructions));
   const hasConfiguredAlternateGroup = groupLinks.length > 0
@@ -93,9 +88,6 @@ export function assertRegistrationPolicyOutput(
   const onlyConfiguredLink = groupUrl !== null && groupLinks.length === 1 && groupLinks[0] === groupUrl;
   if (!onlyConfiguredLink || (registrationSuccess && !namedProgram)) {
     throw new UnsafeRecoveryReplyError('Xác nhận đăng ký phải có đúng tên chương trình và link nhóm Zalo được cấu hình. Chưa gửi tin.');
-  }
-  if (output.handoff) {
-    throw new UnsafeRecoveryReplyError('Không được vừa xác nhận đăng ký vừa chuyển người thật. Chưa gửi tin.');
   }
   return true;
 }

@@ -974,7 +974,7 @@ test('a registration confirmation with the wrong group link is not sent and hand
   expect(await db.prepare("SELECT id FROM chat_message WHERE conversation_id = 'sys:inbox:org-abm'").all().then((r) => r.results)).toHaveLength(1);
 });
 
-test('a 199k reply that arrives after the conversation went to people is still sent; other replies stay cancelled', async () => {
+test('a 199k reply is sent even after the conversation went to people or with a handoff; other replies stay cancelled', async () => {
   const conv = await customerTurn('Em gửi bill chuyển khoản rồi ạ');
   await db.prepare('UPDATE channel_account SET registration_policy = 1, registration_group_url = ? WHERE id = ?')
     .bind('https://zalo.me/g/abc123', 'ca-oa').run();
@@ -986,11 +986,15 @@ test('a 199k reply that arrives after the conversation went to people is still s
   expect((await conversation()).mode).toBe('human');
 
   await applyCompletionResult(db, testEnv, conv.id, 'Học phí là 5 triệu ạ', undefined, { commandId: 'cmd-2' }, testSink());
-  await applyCompletionResult(db, testEnv, conv.id, `${reply}\n[HANDOFF: khách hỏi thêm]`, undefined, { commandId: 'cmd-3' }, testSink());
   expect(await commands('send_zalo_oa')).toHaveLength(1);
+  // The link still goes out when the bot also hands a question about the schedule to people.
+  await db.prepare("UPDATE conversation SET mode = 'ai' WHERE id = ?").bind(conv.id).run();
+  await applyCompletionResult(db, testEnv, conv.id, `${reply}\n[HANDOFF: khách hỏi lịch học]`, undefined, { commandId: 'cmd-3' }, testSink());
+  expect(await commands('send_zalo_oa')).toHaveLength(2);
+  expect(await conversation()).toMatchObject({ mode: 'human', handoff_reason: 'khách hỏi lịch học' });
   await db.prepare("UPDATE customer_bot_switch SET enabled = 1 WHERE id = 1").run();
   await applyCompletionResult(db, testEnv, conv.id, reply, undefined, { commandId: 'cmd-4' }, testSink());
-  expect(await commands('send_zalo_oa')).toHaveLength(1);
+  expect(await commands('send_zalo_oa')).toHaveLength(2);
 });
 
 test('a 199k payment keeps the registration rules: the handoff check never hands off a confirmed or 199k-policy turn', async () => {
