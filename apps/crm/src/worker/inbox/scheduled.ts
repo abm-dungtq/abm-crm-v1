@@ -2,7 +2,7 @@ import type { Env, Sink } from '../env';
 import { postInboxNotice } from '../inbox-notices';
 import { notifyRows } from '../notify';
 import { linkBase, slaDueSql } from './assignment';
-import { abandonStaleReplies, sweepStuckOutgoing } from './conversation-flow';
+import { abandonStaleReplies, sweepStuckOutgoing, takeOverUnanswered } from './conversation-flow';
 import { runDueSchedules } from './group-schedules';
 import { enqueueDailyGroupSummaries } from './group-summaries';
 import { extractIdleConversations } from './intake';
@@ -215,6 +215,7 @@ export async function runScheduled(
   await step('oa_avatar_backfill', () => backfillOaSenderAvatars(env.DB, env, now));
   await step('worker_commands', () => processWorkerCommands(env, sink));
   await step('sla', () => checkSla(env.DB, sink, now, env.APP_URL));
+  await step('takeover_unanswered', () => takeOverUnanswered(env.DB, env, now, sink));
   await step('stuck_outgoing', () => sweepStuckOutgoing(env.DB, now));
   await step('extract_idle', () => extractIdleConversations(env.DB, now));
   await step('group_schedules', () => runDueSchedules(env.DB, now));

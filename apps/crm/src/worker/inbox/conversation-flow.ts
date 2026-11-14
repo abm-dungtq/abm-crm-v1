@@ -223,9 +223,10 @@ const APPEND_CUSTOMER_TEXT = "COALESCE(json_extract(payload_json, '$.customerTex
 /**
  * Queues the bot's reply to a customer message: extends the pending reply of the conversation with this
  * text and pushes its run time back 8 seconds, or queues a new one. Pending staff context is prefixed once
- * and then cleared. Returns false when the bot may not reply.
+ * and then cleared. `dedupeKey` defaults to one reply per customer message. Returns false when the bot may not reply.
  */
-export async function scheduleCompletion(db: D1Database, conversationId: string, messageId: string, text: string, now = new Date()) {
+export async function scheduleCompletion(db: D1Database, conversationId: string, messageId: string, text: string, now = new Date(),
+  dedupeKey = `completion:${messageId}`) {
   const conv = await loadConversation(db, conversationId);
   if (!conv || !botMayReply(conv)) return false;
   const context = conv.staff_context_pending ?? '';
@@ -263,7 +264,7 @@ export async function scheduleCompletion(db: D1Database, conversationId: string,
           : {}),
         ...(conv.channel === 'zalo_oa' ? { images: images ?? [] } : {}),
       },
-      dedupeKey: `completion:${messageId}`, runAt,
+      dedupeKey, runAt,
     });
   }
   if (context) {
@@ -487,6 +488,74 @@ export async function abandonStaleReplies(db: D1Database, env: Pick<Env, 'APP_UR
     }
   }
   return abandoned;
+}
+
+/** People have this long to answer a waiting customer during staff hours before the bot answers instead. */
+const STAFF_REPLY_WAIT_MS = 30 * 60_000;
+/** A conversation whose customer last wrote longer ago than this (the backlog from before the rule) is left to people. */
+const TAKEOVER_MAX_AGE_MS = 24 * 60 * 60_000;
+const TAKEOVER_BATCH = 20;
+
+/** Staff hours in Vietnam time, the hotline hours: Monday to Saturday, 8:30–18:00. */
+function withinStaffHours(now: Date): boolean {
+  const vietnam = new Date(now.getTime() + 7 * 3_600_000);
+  const minutes = vietnam.getUTCHours() * 60 + vietnam.getUTCMinutes();
+  return vietnam.getUTCDay() !== 0 && minutes >= 8 * 60 + 30 && minutes < 18 * 60;
+}
+
+/**
+ * Hands a direct `human` conversation back to the bot when its customer still waits for an answer: at once outside
+ * staff hours, after 30 minutes inside them. The customer waits when no staff or bot message went out or is queued
+ * since their message; a cancelled or blocked bot draft is no answer. The bot answers with what was said meanwhile as
+ * context, the mode stays `ai`, and the CRM inbox group is told. Each customer message hands back at most once, so a
+ * bot that hands off again is not overruled in a loop. Returns the number of conversations handed back.
+ */
+export async function takeOverUnanswered(db: D1Database, env: Pick<Env, 'APP_URL'>, now: Date, sink: Sink): Promise<number> {
+  const nowIso = now.toISOString();
+  const staffHours = withinStaffHours(now);
+  const waitingSince = staffHours ? new Date(now.getTime() - STAFF_REPLY_WAIT_MS).toISOString() : nowIso;
+  const due = await db.prepare(`SELECT id, last_in_id FROM (
+      SELECT w.id, w.first_waiting_at,
+        (SELECT m.id FROM message m WHERE m.conversation_id = w.id AND m.direction = 'in' ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS last_in_id
+      FROM (
+        SELECT c.id, (SELECT MIN(m.created_at) FROM message m WHERE m.conversation_id = c.id AND m.direction = 'in'
+            AND m.created_at > COALESCE((SELECT MAX(o.created_at) FROM message o WHERE o.conversation_id = c.id AND o.direction = 'out'
+              AND o.sender_kind <> 'system' AND o.status <> 'failed'), '')) AS first_waiting_at
+        FROM conversation c WHERE c.kind = 'direct' AND c.mode = 'human' AND c.last_inbound_at >= ?1
+      ) w WHERE w.first_waiting_at IS NOT NULL AND w.first_waiting_at <= ?2
+    ) d WHERE NOT EXISTS (SELECT 1 FROM channel_command k WHERE k.dedupe_key = 'takeover:' || d.last_in_id)
+    ORDER BY first_waiting_at LIMIT ?3`)
+    .bind(new Date(now.getTime() - TAKEOVER_MAX_AGE_MS).toISOString(), waitingSince, TAKEOVER_BATCH)
+    .all<{ id: string; last_in_id: string }>();
+  const ensuredOrgs = new Set<string>();
+  const base = linkBase(env.APP_URL);
+  let handedBack = 0;
+  for (const row of due.results) {
+    try {
+      const conv = await loadConversation(db, row.id);
+      if (!conv || !botMayReply({ ...conv, mode: 'ai' })) continue;
+      const moved = await db.prepare(`UPDATE conversation SET mode = 'ai', handoff_reason = NULL, sla_due_at = NULL, updated_at = ?
+        WHERE id = ? AND mode = 'human'`).bind(nowIso, conv.id).run();
+      if (moved.meta.changes !== 1) continue;
+      await auditStatement(db, null, 'inbox.takeOverUnanswered', conv.id, { mode: 'human' },
+        { mode: 'ai', staffHours }, nowIso).run();
+      const last = await db.prepare('SELECT body FROM message WHERE id = ?').bind(row.last_in_id).first<{ body: string }>();
+      await scheduleCompletion(db, conv.id, row.last_in_id, last?.body ?? '', now, `takeover:${row.last_in_id}`);
+      const why = staffHours ? 'khách chờ quá 30 phút chưa có người trả lời' : 'ngoài giờ làm việc';
+      await postInboxNotice(sink, db, {
+        organizationId: conv.organization_id,
+        text: `Bot trả lời thay (${why}): ${conv.display_name ?? conv.external_thread_id} (${conv.account_name}) – hội thoại đã về chế độ Bot – ${base}/inbox/${conv.id}`,
+        link: `/inbox/${conv.id}`,
+        dedupeKey: `takeover:${row.last_in_id}`,
+        ensuredOrgs,
+      });
+      handedBack += 1;
+    } catch (error) {
+      // One conversation failing must not hold back the others.
+      console.error('takeover_error', error instanceof Error ? error.message : 'unknown');
+    }
+  }
+  return handedBack;
 }
 
 /** Asks the CRM extractor to read the conversation; a failure is logged and never blocks the mode change. */

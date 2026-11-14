@@ -2,7 +2,7 @@ import { env } from 'cloudflare:test';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import seedSql from '../seed/demo.sql?raw';
 import app from '../src/worker/index';
-import { applyCompletionResult } from '../src/worker/inbox/conversation-flow';
+import { applyCompletionResult, takeOverUnanswered } from '../src/worker/inbox/conversation-flow';
 import { enqueueCommand } from '../src/worker/inbox/dispatcher';
 import { ingestEvents } from '../src/worker/inbox/ingest';
 import { processWorkerCommands } from '../src/worker/inbox/worker-commands';
@@ -363,4 +363,57 @@ test('admins manage channel accounts and the customer bot switch', async () => {
   expect((await web('u-admin', 'PUT', '/inbox/customer-bot-switch', { enabled: true })).json.data.enabled).toBe(true);
   expect((await web('u-admin', 'GET', '/inbox/customer-bot-switch')).json.data.enabled).toBe(true);
   expect(await db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE command LIKE 'inbox.%'").first()).toEqual({ n: 6 });
+});
+
+test('a customer people leave unanswered gets the bot: after 30 minutes in staff hours, at once outside them, once per message', async () => {
+  // Monday 2026-11-16 10:00 Vietnam time.
+  const customerAt = async (iso: string, text: string) => {
+    const event = message({ text, sentAt: iso });
+    await ingest(event);
+    const conv = await conversation();
+    const { id } = (await db.prepare('SELECT id FROM message WHERE external_msg_id = ?').bind(event.msgId).first<{ id: string }>())!;
+    await db.prepare('UPDATE message SET created_at = ? WHERE id = ?').bind(iso, id).run();
+    await db.prepare('UPDATE conversation SET last_inbound_at = ? WHERE id = ?').bind(iso, conv.id).run();
+    return id;
+  };
+  await ingest(message({ text: 'Chào em' }));
+  const conv = await conversation();
+  await db.prepare('DELETE FROM channel_command').run();
+  await db.prepare("UPDATE conversation SET mode = 'human', handoff_reason = 'khách hỏi giá' WHERE id = ?").bind(conv.id).run();
+  await db.prepare('DELETE FROM message').run();
+  const first = await customerAt('2026-11-16T03:00:00.000Z', 'Học phí bao nhiêu ạ');
+  const takeOver = (iso: string) => takeOverUnanswered(db, { APP_URL }, new Date(iso), testSink());
+
+  expect(await takeOver('2026-11-16T03:29:00.000Z')).toBe(0);
+  expect((await conversation()).mode).toBe('human');
+  expect(await takeOver('2026-11-16T03:31:00.000Z')).toBe(1);
+  expect(await conversation()).toMatchObject({ mode: 'ai', handoff_reason: null });
+  const [reply] = await commands('run_completion');
+  expect(reply).toMatchObject({ dedupe_key: `takeover:${first}`, conversation_id: conv.id });
+  expect(reply.payload.text).toBe('[Nhân viên đã trao đổi: Khách: Học phí bao nhiêu ạ]\nHọc phí bao nhiêu ạ');
+  const notices = await db.prepare("SELECT body FROM chat_message WHERE conversation_id = 'sys:inbox:org-abm'").all<any>();
+  expect(notices.results).toEqual([{ body: `Bot trả lời thay (khách chờ quá 30 phút chưa có người trả lời): Chị Hoa (Số tư vấn 1) – hội thoại đã về chế độ Bot – ${APP_URL}/inbox/${conv.id}` }]);
+
+  // The bot hands off again on the same message: people keep it until the customer writes again.
+  await db.prepare("UPDATE channel_command SET status = 'done' WHERE kind = 'run_completion'").run();
+  await db.prepare("UPDATE conversation SET mode = 'human' WHERE id = ?").bind(conv.id).run();
+  expect(await takeOver('2026-11-16T04:30:00.000Z')).toBe(0);
+
+  // A staff answer stops the clock; a cancelled bot draft does not.
+  await customerAt('2026-11-16T05:00:00.000Z', 'Còn chỗ không em');
+  await db.prepare(`INSERT INTO message (id, conversation_id, direction, sender_kind, body, status, created_at)
+    VALUES ('m-staff', ?, 'out', 'staff_web', 'Dạ còn ạ', 'sent', '2026-11-16T05:10:00.000Z')`).bind(conv.id).run();
+  expect(await takeOver('2026-11-16T06:00:00.000Z')).toBe(0);
+  const evening = await customerAt('2026-11-16T12:00:00.000Z', 'Tối nay học được không');
+  await db.prepare(`INSERT INTO message (id, conversation_id, direction, sender_kind, body, status, created_at)
+    VALUES ('m-draft', ?, 'out', 'system', '[Bot trả lời bị huỷ vì đã chuyển người] Dạ được ạ', 'failed', '2026-11-16T12:00:10.000Z')`).bind(conv.id).run();
+  expect(await takeOver('2026-11-16T12:00:30.000Z')).toBe(1);
+  expect((await commands('run_completion')).map((c) => c.dedupe_key)).toEqual([`takeover:${first}`, `takeover:${evening}`]);
+
+  // A switched-off bot is never forced to answer.
+  await db.prepare("UPDATE conversation SET mode = 'human' WHERE id = ?").bind(conv.id).run();
+  await customerAt('2026-11-16T13:00:00.000Z', 'Em ơi');
+  await db.prepare('UPDATE customer_bot_switch SET enabled = 1 WHERE id = 1').run();
+  expect(await takeOver('2026-11-16T13:01:00.000Z')).toBe(0);
+  expect((await conversation()).mode).toBe('human');
 });
