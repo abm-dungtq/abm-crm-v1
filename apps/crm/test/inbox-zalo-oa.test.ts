@@ -974,6 +974,25 @@ test('a registration confirmation with the wrong group link is not sent and hand
   expect(await db.prepare("SELECT id FROM chat_message WHERE conversation_id = 'sys:inbox:org-abm'").all().then((r) => r.results)).toHaveLength(1);
 });
 
+test('a 199k reply that arrives after the conversation went to people is still sent; other replies stay cancelled', async () => {
+  const conv = await customerTurn('Em gửi bill chuyển khoản rồi ạ');
+  await db.prepare('UPDATE channel_account SET registration_policy = 1, registration_group_url = ? WHERE id = ?')
+    .bind('https://zalo.me/g/abc123', 'ca-oa').run();
+  await db.prepare("UPDATE conversation SET mode = 'human' WHERE id = ?").bind(conv.id).run();
+  const reply = 'Dạ em gửi anh/chị link nhóm của chương trình ạ: https://zalo.me/g/abc123';
+  const outcome = await applyCompletionResult(db, testEnv, conv.id, reply, undefined, { commandId: 'cmd-1' }, testSink());
+  expect(outcome.workerCommandQueued).toBe(true);
+  expect((await commands('send_zalo_oa')).map((c) => JSON.parse(c.payload_json).text)).toEqual([reply]);
+  expect((await conversation()).mode).toBe('human');
+
+  await applyCompletionResult(db, testEnv, conv.id, 'Học phí là 5 triệu ạ', undefined, { commandId: 'cmd-2' }, testSink());
+  await applyCompletionResult(db, testEnv, conv.id, `${reply}\n[HANDOFF: khách hỏi thêm]`, undefined, { commandId: 'cmd-3' }, testSink());
+  expect(await commands('send_zalo_oa')).toHaveLength(1);
+  await db.prepare("UPDATE customer_bot_switch SET enabled = 1 WHERE id = 1").run();
+  await applyCompletionResult(db, testEnv, conv.id, reply, undefined, { commandId: 'cmd-4' }, testSink());
+  expect(await commands('send_zalo_oa')).toHaveLength(1);
+});
+
 test('a 199k payment keeps the registration rules: the handoff check never hands off a confirmed or 199k-policy turn', async () => {
   const activeEnv = { ...testEnv, HANDOFF_NET_MODE: 'active' };
   const handoffChecks = () => db.prepare("SELECT after_json FROM audit_log WHERE command = 'inbox.handoffCheck' ORDER BY created_at")

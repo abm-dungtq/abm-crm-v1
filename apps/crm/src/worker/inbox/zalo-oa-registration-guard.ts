@@ -61,7 +61,12 @@ export interface RegistrationPolicyOutput {
   handoff: boolean;
 }
 
-/** Enforces the owner-approved program name/link shape; input qualification remains model-driven. */
+/**
+ * Enforces the owner-approved program name/link shape; input qualification remains model-driven. Every 199k turn is
+ * answered by the bot: the payment is checked by staff when they approve the member into the Zalo group, so the
+ * configured group link may also go out on its own (for example sent again when the customer asks which group).
+ * Returns true when the reply confirms the registration or carries the configured group link.
+ */
 export function assertRegistrationPolicyOutput(
   output: RegistrationPolicyOutput,
   policyEnabled: boolean,
@@ -85,7 +90,8 @@ export function assertRegistrationPolicyOutput(
   if (!policyEnabled) {
     throw new UnsafeRecoveryReplyError('Chính sách xác nhận đăng ký Zalo không còn hiệu lực. Chưa gửi tin.');
   }
-  if (!registrationSuccess || !namedProgram || groupUrl === null || groupLinks.length !== 1 || groupLinks[0] !== groupUrl) {
+  const onlyConfiguredLink = groupUrl !== null && groupLinks.length === 1 && groupLinks[0] === groupUrl;
+  if (!onlyConfiguredLink || (registrationSuccess && !namedProgram)) {
     throw new UnsafeRecoveryReplyError('Xác nhận đăng ký phải có đúng tên chương trình và link nhóm Zalo được cấu hình. Chưa gửi tin.');
   }
   if (output.handoff) {

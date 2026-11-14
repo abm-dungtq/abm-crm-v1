@@ -571,6 +571,24 @@ async function applyGroupCompletion(db: D1Database, env: Pick<Env, 'APP_URL'>, c
 }
 
 /**
+ * Every 199k turn is the bot's (staff check the payment when they approve the member into the group), so a valid
+ * registration reply still goes out when the conversation went to people while the bot was thinking, for example
+ * a receipt that arrived right after the bot handed off the previous question. The mode stays as it is; a bot that
+ * is switched off still sends nothing.
+ */
+function registrationReplyOverridesHandoff(conv: ConversationRow, text: string, handedOff: boolean): boolean {
+  if (conv.channel !== 'zalo_oa' || conv.mode === 'ai' || !text || handedOff) return false;
+  if (conv.agent_key === null || conv.bot_switch !== 0 || conv.bot_enabled !== 1 || conv.kind !== 'direct') return false;
+  try {
+    return assertRegistrationPolicyOutput({ reply: text, handoff: false }, conv.registration_policy === 1,
+      conv.registration_group_url ? `- Link nhóm Zalo chính xác: ${conv.registration_group_url}` : '');
+  } catch (error) {
+    if (error instanceof UnsafeRecoveryReplyError) return false;
+    throw error;
+  }
+}
+
+/**
  * Applies GoClaw's reply: strips handoff marker lines and sends the remaining text while the bot may still reply
  * (rule 1, re-checked now because the switch or the mode can change while GoClaw thinks). Otherwise the text is
  * kept as a cancelled system note and nothing is sent; when the conversation went to people meanwhile, the CRM
@@ -585,7 +603,7 @@ export async function applyCompletionResult(db: D1Database, env: HandoffCheckEnv
   const text = replyText.replace(HANDOFF_MARKER_ALL, '').trim();
   const now = new Date().toISOString();
   if (conv.kind === 'group') return applyGroupCompletion(db, env, conv, text, marker?.[1]?.trim(), now, origin, payload, sink);
-  if (!botMayReply(conv)) {
+  if (!botMayReply(conv) && !registrationReplyOverridesHandoff(conv, text, Boolean(marker))) {
     if (text) {
       const cancelled = conv.mode !== 'ai';
       await storeUnsentReply(db, conv.id, cancelled ? CANCELLED_REPLY_PREFIX : BOT_OFF_REPLY_PREFIX, text, now);

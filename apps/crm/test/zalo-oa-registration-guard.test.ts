@@ -23,13 +23,22 @@ test('authorized registration output requires the named program and exact group 
     'Anh/chị đã đăng ký thành công chương trình Xây dựng Bộ não thứ hai & Đội quân Trợ lý AI cá nhân hóa.',
     'Anh/chị đã đăng ký thành công chương trình Xây dựng Bộ não thứ hai & Đội quân Trợ lý AI cá nhân hóa. https://zalo.me/g/wrong',
     'Anh/chị đã đăng ký thành công chương trình Xây dựng Bộ não thứ hai.',
-    `Mời anh/chị vào nhóm ${REGISTRATION_GROUP_URL}`,
-    `Anh/chị đăng ký thành công nếu chuyển đủ 199k. Chương trình Xây dựng Bộ não thứ hai & Đội quân Trợ lý AI cá nhân hóa: ${REGISTRATION_GROUP_URL}`,
-    `Anh/chị đã đăng ký thành công chương trình Xây dựng Bộ não thứ hai & Đội quân Trợ lý AI cá nhân hóa đúng không? ${REGISTRATION_GROUP_URL}`,
-    `Anh/chị đã đăng ký thành công chương trình Xây dựng Bộ não thứ hai & Đội quân Trợ lý AI cá nhân hóa rồi phải không? ${REGISTRATION_GROUP_URL}`,
+    `Anh/chị đã đăng ký thành công chương trình Xây dựng Bộ não thứ hai & Đội quân Trợ lý AI cá nhân hóa. ${REGISTRATION_GROUP_URL} https://zalo.me/g/wrong`,
     'Anh/chị đã đăng ký thành công và nếu cần hỗ trợ hãy nhắn em.',
     'Anh/chị đã đăng ký thành công chương trình Xây dựng Bộ não thứ hai & Đội quân Trợ lý AI cá nhân hóa và nếu cần hỗ trợ hãy nhắn em.',
   ]) expect(() => check(reply, true)).toThrow(UnsafeRecoveryReplyError);
+  // Every 199k turn is the bot's: the configured link may go out on its own, since staff check the payment when they
+  // approve the member into the group. Another link or a handoff with the link is still held back.
+  for (const reply of [
+    `Mời anh/chị vào nhóm ${REGISTRATION_GROUP_URL}`,
+    `Dạ em gửi lại link nhóm của chương trình ạ: ${REGISTRATION_GROUP_URL}`,
+    `Anh/chị đăng ký thành công nếu chuyển đủ 199k. Chương trình Xây dựng Bộ não thứ hai & Đội quân Trợ lý AI cá nhân hóa: ${REGISTRATION_GROUP_URL}`,
+  ]) {
+    expect(check(reply, true)).toBe(true);
+    expect(() => check(reply, false)).toThrow(UnsafeRecoveryReplyError);
+    expect(() => check(reply, true, trusted, true)).toThrow(UnsafeRecoveryReplyError);
+  }
+  expect(() => check(`Mời anh/chị vào nhóm ${REGISTRATION_GROUP_URL} hoặc https://zalo.me/g/wrong`, true)).toThrow(UnsafeRecoveryReplyError);
   for (const reply of [
     'Anh/chị đã đăng ký thành công chương trình.',
     'Dạ em xác nhận đăng ký thành công chương trình.',
